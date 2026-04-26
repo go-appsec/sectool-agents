@@ -1,6 +1,7 @@
 # go-appsec/sectool-agents
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/go-appsec/toolbox/blob/main/LICENSE)
+[![Tests - Main Push](https://github.com/go-appsec/sectool-agents/actions/workflows/tests-main.yml/badge.svg)](https://github.com/go-appsec/sectool-agents/actions/workflows/tests-main.yml)
 
 Agents that drive [`sectool`](https://github.com/go-appsec/toolbox) in autonomous security workflows. Each agent runs a multi-agent loop (workers + verifier + director) on top of sectool's MCP server so an LLM can autonomously explore a target for vulnerabilities, reproduce candidates, and file findings.
 
