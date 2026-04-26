@@ -63,7 +63,6 @@ python controller.py \
 | `--max-workers` | no | `4` | Maximum parallel workers the orchestrator can assign |
 | `--verbose` | no | false | Print full worker and orchestrator outputs |
 | `--sectool-bin` | no | `sectool` | Path to the sectool binary (default: looked up on `PATH`) |
-| `--workflow` | no | `explore` | Sectool workflow mode |
 
 ## Using with an Existing MCP Server
 
@@ -71,7 +70,7 @@ If an MCP server is already accepting requests on `--mcp-port`, the controller d
 
 ```bash
 # Start the MCP server separately
-sectool mcp --proxy-port 8181 --workflow=explore
+sectool mcp --proxy-port 8181 --workflow=multi
 
 # In another terminal, run the controller — the existing server is auto-detected
 python controller.py \

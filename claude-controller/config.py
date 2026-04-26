@@ -22,7 +22,6 @@ class Config:
     worker_model: str | None = None
     verbose: bool = False
     sectool_bin: str = "sectool"
-    workflow: str = "explore"
     max_workers: int = 4
 
     @property
@@ -80,10 +79,6 @@ def parse_args() -> Config:
         help="Path to the sectool binary (default: 'sectool' on PATH)",
     )
     parser.add_argument(
-        "--workflow", default="explore",
-        help="Sectool workflow mode (default: explore)",
-    )
-    parser.add_argument(
         "--max-workers", type=int, default=4,
         help="Maximum parallel workers the orchestrator can assign (default: 4)",
     )
@@ -100,6 +95,5 @@ def parse_args() -> Config:
         worker_model=args.worker_model,
         verbose=args.verbose,
         sectool_bin=args.sectool_bin,
-        workflow=args.workflow,
         max_workers=max_workers,
     )

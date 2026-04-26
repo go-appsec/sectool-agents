@@ -87,17 +87,17 @@ def log(tag: str, msg: str) -> None:
 
 
 def start_mcp_server(
-    sectool_bin: str, proxy_port: int, mcp_port: int, workflow: str,
+    sectool_bin: str, proxy_port: int, mcp_port: int,
 ) -> tuple[subprocess.Popen, "io.TextIOWrapper"]:
     cmd = [
         sectool_bin, "mcp",
         f"--proxy-port={proxy_port}",
         f"--port={mcp_port}",
-        f"--workflow={workflow}",
+        "--workflow=multi",
     ]
     log_path = os.path.abspath("sectool-mcp.log")
     log_file = open(log_path, "w")  # noqa: SIM115
-    log("server", f"Starting sectool MCP server on :{mcp_port} (proxy :{proxy_port}, workflow: {workflow})")
+    log("server", f"Starting sectool MCP server on :{mcp_port} (proxy :{proxy_port})")
     log("server", f"Server stderr → {log_path}")
     try:
         proc = subprocess.Popen(cmd, stderr=log_file, stdout=subprocess.DEVNULL)
@@ -1400,7 +1400,7 @@ async def run(config: Config) -> None:
         log("server", f"Detected existing MCP server on :{config.mcp_port}; reusing.")
     else:
         server_proc, server_log = start_mcp_server(
-            config.sectool_bin, config.proxy_port, config.mcp_port, config.workflow,
+            config.sectool_bin, config.proxy_port, config.mcp_port,
         )
 
     iteration = 0
