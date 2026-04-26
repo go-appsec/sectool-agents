@@ -1032,23 +1032,42 @@ class TestClearLeakedCancellations(unittest.TestCase):
         self.assertEqual(_run(body()), 0)
 
     def test_drains_pending_cancellations(self):
-        """Simulate a leaked cancel by cancelling the current task, then verify
-        the helper drains the counter."""
-        async def body():
+        """Cancel a sub-task and verify the helper drains its counter.
+
+        Run inside a sub-task so the outer `asyncio.run` doesn't observe
+        the cancellation: on 3.11/3.12, `uncancel()` decrements the counter
+        but doesn't clear the `_must_cancel` flag set by `task.cancel()`,
+        so the task finalizes as cancelled even though the counter is 0.
+        That doesn't affect the helper's real-world contract (anyio
+        cancel-scope leaks don't set `_must_cancel`), but it would otherwise
+        break this test on 3.11/3.12.
+        """
+        captured: dict = {}
+
+        async def inner():
             task = asyncio.current_task()
             if not hasattr(task, "uncancel"):
-                return -1  # skip on pre-3.11
+                captured["skip"] = True
+                return
             task.cancel()
-            # On Python 3.11+, cancel() increments cancelling() immediately.
-            self.assertGreater(task.cancelling(), 0)
-            cleared = controller._clear_leaked_cancellations()
-            self.assertEqual(task.cancelling(), 0)
-            return cleared
+            captured["before"] = task.cancelling()
+            captured["cleared"] = controller._clear_leaked_cancellations()
+            captured["after"] = task.cancelling()
 
-        result = _run(body())
-        if result == -1:
+        async def body():
+            inner_task = asyncio.create_task(inner())
+            try:
+                await inner_task
+            except asyncio.CancelledError:
+                pass
+
+        _run(body())
+
+        if captured.get("skip"):
             self.skipTest("Python < 3.11: Task.uncancel/cancelling unavailable")
-        self.assertGreaterEqual(result, 1)
+        self.assertGreater(captured["before"], 0)
+        self.assertEqual(captured["after"], 0)
+        self.assertGreaterEqual(captured["cleared"], 1)
 
     def test_survives_no_current_task(self):
         """Helper returns 0 when called outside an async task context."""
