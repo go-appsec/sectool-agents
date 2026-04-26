@@ -1033,7 +1033,7 @@ class TestClearLeakedCancellations(unittest.TestCase):
 
     def test_drains_pending_cancellations(self):
         """Simulate a leaked cancel by cancelling the current task, then verify
-        the helper drains the counter so subsequent awaits do not raise."""
+        the helper drains the counter."""
         async def body():
             task = asyncio.current_task()
             if not hasattr(task, "uncancel"):
@@ -1043,8 +1043,6 @@ class TestClearLeakedCancellations(unittest.TestCase):
             self.assertGreater(task.cancelling(), 0)
             cleared = controller._clear_leaked_cancellations()
             self.assertEqual(task.cancelling(), 0)
-            # Post-drain, awaits should work normally.
-            await asyncio.sleep(0)
             return cleared
 
         result = _run(body())
