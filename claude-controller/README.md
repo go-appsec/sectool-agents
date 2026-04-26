@@ -1,6 +1,6 @@
-# claude-controller — sectool agent on the Claude Agent SDK
+# claude-controller - sectool agent on the Claude Agent SDK
 
-[![Vibe-Scale 4: AI-generated, behavior validated](https://img.shields.io/badge/Vibe--Scale%204-AI--generated%2C%20behavior%20validated-ff7f0e)](https://github.com/go-appsec/vibe-scale/blob/main/README.md)
+[![Vibe-Scale 4.0(V2|U2|T1): Vibed code with gaps](https://img.shields.io/badge/Vibe--Scale%204.0(V2%7CU2%7CT1)-Vibed%20code%20with%20gaps-ff7f0e)](https://github.com/vibesdk/vibe-scale/blob/main/README.md)
 
 Autonomous security exploration controller that runs multiple Claude instances with different responsibilities:
 

@@ -8,7 +8,7 @@ This repo is a home for multiple agent implementations. They all share the same 
 
 ## Prerequisites
 
-Every agent in this repo drives `sectool`, which lives in the [go-appsec/toolbox](https://github.com/go-appsec/toolbox) repo and must be installed independently:
+Every agent in this repo drives the `sectool` MCP API, which lives in the [go-appsec/toolbox](https://github.com/go-appsec/toolbox) repo and must be installed independently:
 
 ```bash
 go install github.com/go-appsec/toolbox/sectool@latest
@@ -16,7 +16,7 @@ go install github.com/go-appsec/toolbox/sectool@latest
 
 This places the `sectool` binary on your `GOBIN` (typically `$GOPATH/bin` or `~/go/bin`). Make sure that directory is on your `PATH`, or pass the binary path to the agent via its own flag — see each agent's README.
 
-See the individual agent READMEs for any additional language / runtime prerequisites (e.g. Python, Node, etc.).
+See the individual agent READMEs for any additional language / runtime prerequisites.
 
 ## Available agents
 
@@ -26,7 +26,7 @@ See the individual agent READMEs for any additional language / runtime prerequis
 
 ### [`claude-controller/`](claude-controller/)
 
-[![Vibe-Scale 4: AI-generated, behavior validated](https://img.shields.io/badge/Vibe--Scale%204-AI--generated%2C%20behavior%20validated-ff7f0e)](https://github.com/go-appsec/vibe-scale/blob/main/README.md)
+[![Vibe-Scale 4.0(V2|U2|T1): Vibed code with gaps](https://img.shields.io/badge/Vibe--Scale%204.0(V2%7CU2%7CT1)-Vibed%20code%20with%20gaps-ff7f0e)](https://github.com/vibesdk/vibe-scale/blob/main/README.md)
 
 A Python controller built on the Claude Agent SDK. Workers run as Claude Code instances connected to sectool's MCP server; the verifier and director are separate Claude instances with phase-gated tool surfaces and their own system prompts.
 
@@ -48,3 +48,4 @@ See [`claude-controller/README.md`](claude-controller/README.md) for installatio
 ## Where findings land
 
 Every agent writes to its `--findings-dir` (default `./findings/`) as `finding-NN-<slug>.md` files containing Title, Severity, Affected Endpoint, Description, Reproduction Steps, Evidence, Impact, and a Verification section sourced from the verifier's reproduction notes.
+
