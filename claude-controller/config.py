@@ -23,7 +23,6 @@ class Config:
     verbose: bool = False
     sectool_bin: str = "sectool"
     workflow: str = "explore"
-    external: bool = False
     max_workers: int = 4
 
     @property
@@ -85,10 +84,6 @@ def parse_args() -> Config:
         help="Sectool workflow mode (default: explore)",
     )
     parser.add_argument(
-        "--external", action="store_true",
-        help="Connect to an already-running MCP server; skips server start and teardown. Use --mcp-port and --proxy-port to specify connection details.",
-    )
-    parser.add_argument(
         "--max-workers", type=int, default=4,
         help="Maximum parallel workers the orchestrator can assign (default: 4)",
     )
@@ -106,6 +101,5 @@ def parse_args() -> Config:
         verbose=args.verbose,
         sectool_bin=args.sectool_bin,
         workflow=args.workflow,
-        external=args.external,
         max_workers=max_workers,
     )

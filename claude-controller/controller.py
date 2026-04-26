@@ -108,6 +108,17 @@ def start_mcp_server(
     return proc, log_file
 
 
+def is_server_running(mcp_port: int, timeout: float = 1.0) -> bool:
+    url = f"http://127.0.0.1:{mcp_port}/mcp"
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(url, method="GET"), timeout=timeout,
+        )
+        return True
+    except (urllib.error.URLError, ConnectionError, OSError):
+        return False
+
+
 def wait_for_server(mcp_port: int, proc: subprocess.Popen, timeout: float = 10.0) -> None:
     url = f"http://127.0.0.1:{mcp_port}/mcp"
     deadline = time.monotonic() + timeout
@@ -1385,8 +1396,8 @@ async def run(config: Config) -> None:
     server_proc = None
     server_log = None
 
-    if config.external:
-        log("server", f"External mode: connecting to existing MCP server on :{config.mcp_port}")
+    if is_server_running(config.mcp_port):
+        log("server", f"Detected existing MCP server on :{config.mcp_port}; reusing.")
     else:
         server_proc, server_log = start_mcp_server(
             config.sectool_bin, config.proxy_port, config.mcp_port, config.workflow,
@@ -1399,7 +1410,7 @@ async def run(config: Config) -> None:
     total_cost = 0.0
 
     try:
-        if not config.external:
+        if server_proc is not None:
             wait_for_server(config.mcp_port, server_proc)
 
         for key in [k for k in os.environ if k.startswith("CLAUDE")]:

@@ -64,25 +64,25 @@ python controller.py \
 | `--verbose` | no | false | Print full worker and orchestrator outputs |
 | `--sectool-bin` | no | `sectool` | Path to the sectool binary (default: looked up on `PATH`) |
 | `--workflow` | no | `explore` | Sectool workflow mode |
-| `--external` | no | false | Connect to an already-running MCP server; skips server start and teardown |
 
 ## Using with an Existing MCP Server
+
+If an MCP server is already accepting requests on `--mcp-port`, the controller detects it and reuses it instead of starting its own (and skips teardown of the externally-managed process).
 
 ```bash
 # Start the MCP server separately
 sectool mcp --proxy-port 8181 --workflow=explore
 
-# In another terminal, run the controller against it
+# In another terminal, run the controller — the existing server is auto-detected
 python controller.py \
   --prompt "Explore https://target.example.com for auth vulnerabilities." \
-  --external \
   --proxy-port 8181 \
   --mcp-port 9119
 ```
 
 ## How It Works
 
-1. **Launch MCP** — unless `--external`, starts `sectool mcp` as a subprocess on `--mcp-port` using the binary from `--sectool-bin` (or `PATH`). The controller does not build sectool; it must already be installed.
+1. **Launch MCP** — probes `--mcp-port`; if a server is already accepting requests, reuses it (and won't tear it down on exit). Otherwise starts `sectool mcp` as a subprocess on `--mcp-port` using the binary from `--sectool-bin` (or `PATH`). The controller does not build sectool; it must already be installed.
 2. **Connect worker 1, verifier, and director** — all three share the sectool MCP server; the workers get an in-process `worker_tools` MCP server (exposing `report_finding_candidate`), and the verifier and director each connect to the shared in-process `orch_tools` MCP server (tools are phase-gated — see below). The verifier gets the full sectool tool surface; the director gets only worker-control tools.
 3. **Initial prompt** — the user's prompt is sent to worker 1 for discovery.
 4. **Per-iteration anatomy** (three phases):
@@ -99,7 +99,7 @@ python controller.py \
 
 5. **Phase gating.** Each orch tool checks `decisions.phase` and rejects calls made in the wrong phase. Verification phase may call `file_finding`, `dismiss_candidate`, and `verification_done` (plus sectool read/replay tools). Direction phase may call `plan_workers`, `continue_worker`, `expand_worker`, `stop_worker`, `direction_done`, and `done`.
 6. **Stall detection** — controller-observed via each worker's `escalation_reason`. `silent` escalations increment `progress_none_streak`; `candidate` escalations or turns that touched new flow IDs reset it. Three consecutive silent escalations triggers a stall warning in the director prompt; four forces `stop_worker`.
-7. **Teardown** — terminates the MCP server (unless `--external`) and prints a summary.
+7. **Teardown** — terminates the MCP server (only if the controller started it) and prints a summary.
 
 ## Orchestrator Tools (phase-gated decision surface)
 
