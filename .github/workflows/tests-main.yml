@@ -1,0 +1,12 @@
+name: Tests - Main Push
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  claude-controller-tests:
+    uses: ./.github/workflows/claude-controller-tests-workflow.yml
