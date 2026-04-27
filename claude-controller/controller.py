@@ -51,6 +51,7 @@ from tools import (
     DecisionQueue,
     FindingCandidate,
     FindingFiled,
+    FindingMerged,
     PlanEntry,
     ToolCallRecord,
     WorkerDecision,
@@ -795,19 +796,22 @@ def _build_verifier_continue_prompt(
     *,
     pending: list[FindingCandidate],
     filed_this_phase: list[FindingFiled],
+    merged_this_phase: list[FindingMerged],
     dismissed_this_phase: list[CandidateDismissal],
     substep: int,
     max_substeps: int,
 ) -> str:
     """Continue-prompt for the verifier between substeps.
 
-    Lists actual titles filed and candidate ids dismissed this phase so the
-    model stops re-announcing the same dispositions each substep.
+    Lists actual titles filed, finding_ids merged into, and candidate ids
+    dismissed this phase so the model stops re-announcing the same
+    dispositions each substep.
     """
     parts = [
         (
             f"**Verification substep {substep}/{max_substeps}.** "
             f"Filed {len(filed_this_phase)}, "
+            f"merged {len(merged_this_phase)}, "
             f"dismissed {len(dismissed_this_phase)} so far."
         ),
     ]
@@ -816,6 +820,11 @@ def _build_verifier_continue_prompt(
         parts.append("Already filed this phase (do not re-file):")
         for f in filed_this_phase:
             parts.append(f"- {f.title}")
+    if merged_this_phase:
+        parts.append("")
+        parts.append("Already merged this phase:")
+        for m in merged_this_phase:
+            parts.append(f"- into {m.finding_id}: {_short(m.rationale, 80)}")
     if dismissed_this_phase:
         parts.append("")
         parts.append("Already dismissed this phase:")
@@ -828,6 +837,7 @@ def _build_verifier_continue_prompt(
 
 def _format_follow_up_hints(
     findings: list[FindingFiled],
+    merges: list[FindingMerged],
     dismissals: list[CandidateDismissal],
 ) -> str:
     """Collate optional verifier follow-up hints into a labeled block.
@@ -839,6 +849,10 @@ def _format_follow_up_hints(
         h = f.follow_up_hint.strip()
         if h:
             lines.append(f"- (filed: {_short(f.title, 80)}) {h}")
+    for m in merges:
+        h = m.follow_up_hint.strip()
+        if h:
+            lines.append(f"- (merged into {m.finding_id}) {h}")
     for d in dismissals:
         h = d.follow_up_hint.strip()
         if h:
@@ -1067,6 +1081,8 @@ async def run_verification_phase(
 
     applied_findings = 0
     applied_dismissals = 0
+    processed_merges = 0
+    successful_merges: list[FindingMerged] = []
 
     for substep in range(1, VERIFICATION_MAX_SUBSTEPS + 1):
         pending = candidates.pending()
@@ -1078,7 +1094,7 @@ async def run_verification_phase(
                 workers=workers,
                 worker_runs=worker_runs,
                 pending=pending,
-                findings_summary=finding_writer.summary_for_orchestrator(),
+                findings_summary=finding_writer.summary_for_verifier(),
                 iteration=iteration, max_iter=max_iter,
                 total_cost=total_cost + phase_cost,
                 max_cost=max_cost,
@@ -1088,6 +1104,7 @@ async def run_verification_phase(
             user_content = _build_verifier_continue_prompt(
                 pending=pending,
                 filed_this_phase=decisions.findings[:applied_findings],
+                merged_this_phase=successful_merges,
                 dismissed_this_phase=decisions.dismissals[:applied_dismissals],
                 substep=substep,
                 max_substeps=VERIFICATION_MAX_SUBSTEPS,
@@ -1106,8 +1123,9 @@ async def run_verification_phase(
             phase_cost += cost
 
         # Apply new findings this substep produced. `seen_titles` dedups
-        # burst `file_finding` calls within one response — `is_duplicate`
-        # still catches cross-substep dupes on disk.
+        # burst `file_finding` calls within one response — cross-finding dedup
+        # is the verifier's call (it can `merge_into_finding` instead of
+        # filing a near-duplicate; see verifier prompt).
         seen_titles: set[str] = set()
         for filed in decisions.findings[applied_findings:]:
             title_key = filed.title.strip().lower()
@@ -1116,11 +1134,8 @@ async def run_verification_phase(
                 continue
             if title_key:
                 seen_titles.add(title_key)
-            if finding_writer.is_duplicate(filed):
-                log("finding", f"Duplicate skipped: {filed.title}")
-            else:
-                path = finding_writer.write(filed)
-                log("finding", f"Written: {path}")
+            path = finding_writer.write(filed)
+            log("finding", f"Written: {path}")
             resolved = list(filed.supersedes_candidate_ids)
             if not resolved:
                 pending_now = candidates.pending()
@@ -1156,13 +1171,37 @@ async def run_verification_phase(
                     f"{_short(dm.reason, 80)}")
         applied_dismissals = len(decisions.dismissals)
 
+        for mg in decisions.merges[processed_merges:]:
+            path = finding_writer.merge(
+                mg.finding_id,
+                rationale=mg.rationale,
+                additional_endpoint=mg.additional_endpoint,
+                additional_evidence=mg.additional_evidence,
+                additional_reproduction_steps=mg.additional_reproduction_steps,
+                additional_verification_notes=mg.additional_verification_notes,
+                additional_impact=mg.additional_impact,
+            )
+            if path is None:
+                log("finding",
+                    f"Merge skipped: unknown finding_id {mg.finding_id!r}.")
+                continue
+            log("finding",
+                f"Merged into {mg.finding_id}: {_short(mg.rationale, 80)} → {path}")
+            successful_merges.append(mg)
+            for cid in mg.supersedes_candidate_ids:
+                if candidates.mark(cid, "verified"):
+                    log("finding",
+                        f"Candidate {cid} marked verified via merge into {mg.finding_id}.")
+        processed_merges = len(decisions.merges)
+
         if decisions.verification_done_summary is not None:
             break
 
     summary = (
         decisions.verification_done_summary
         or f"Verification phase ended with {applied_findings} filed, "
-           f"{applied_dismissals} dismissed, {len(candidates.pending())} still pending."
+           f"{len(successful_merges)} merged, {applied_dismissals} dismissed, "
+           f"{len(candidates.pending())} still pending."
     )
     return managed, phase_cost, summary
 
@@ -1419,8 +1458,14 @@ async def run(config: Config) -> None:
         mcp_url = f"http://127.0.0.1:{config.mcp_port}/mcp"
         stderr_cb = (lambda line: log("claude", line.rstrip())) if config.verbose else None
 
+        # `workers` is mutated below as workers spawn and retire; the lambda
+        # closes over it so the `done` guard always sees the current alive set.
+        workers: list[WorkerState] = []
         worker_tools_server = build_worker_mcp_server(candidates)
-        orch_tools_server = build_orch_mcp_server(decisions)
+        orch_tools_server = build_orch_mcp_server(
+            decisions,
+            alive_worker_ids=lambda: [w.worker_id for w in workers if w.alive],
+        )
 
         base_options = ClaudeAgentOptions(cwd=cwd, max_turns=100)
         if config.worker_model_id:
@@ -1453,7 +1498,6 @@ async def run(config: Config) -> None:
             system_prompt=director_prompts.build_system_prompt(config.max_workers),
         )
 
-        workers: list[WorkerState] = []
         verifier_managed: ManagedSDKClient | None = None
         director_managed: ManagedSDKClient | None = None
 
@@ -1566,7 +1610,7 @@ async def run(config: Config) -> None:
                 # 6) Direction phase
                 stall_warnings = _format_stall_warnings(workers)
                 follow_up_hints = _format_follow_up_hints(
-                    decisions.findings, decisions.dismissals,
+                    decisions.findings, decisions.merges, decisions.dismissals,
                 )
                 director_managed, d_cost = await run_direction_phase(
                     director_managed, director_options, decisions, workers, worker_runs,

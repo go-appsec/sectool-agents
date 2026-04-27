@@ -43,7 +43,15 @@ def _titles_similar(a: str, b: str) -> bool:
     if not wa or not wb:
         return False
     overlap = len(wa & wb) / max(len(wa), len(wb))
-    return overlap > 0.8
+    # 0.5 catches near-duplicate titles like
+    #   "Wildcard CORS Enables Cross-Origin Token Status Enumeration and Response Leakage"
+    # vs
+    #   "Wildcard CORS Enables Cross-OAuth Response Leakage at Token and Introspection Endpoints"
+    # (8/12 = 0.667). Used only by `match_pending_candidates` for auto-resolving
+    # pending candidates when the verifier files without explicit
+    # `supersedes_candidate_ids` — the safety net side; explicit dedup is the
+    # verifier's call (see `merge_into_finding`).
+    return overlap > 0.5
 
 
 def match_pending_candidates(
@@ -107,25 +115,54 @@ class FindingWriter:
         self.paths: list[str] = []
         self._index: list[dict] = []
 
-    def is_duplicate(self, filed: FindingFiled) -> bool:
-        title_slug = slugify(filed.title)
-        endpoint = _canonical_endpoint(filed.endpoint)
-        for entry in self._index:
-            if title_slug and title_slug == entry["title_slug"]:
-                return True
-            if endpoint and entry["endpoint"] == endpoint and _titles_similar(filed.title, entry["title"]):
-                return True
-        return False
-
     def summary_for_orchestrator(self) -> str:
         if not self._index:
             return "No findings filed yet."
         lines = []
-        for i, entry in enumerate(self._index, 1):
+        for entry in self._index:
             sev = entry["severity"] or "unknown"
             ep = entry["endpoint"] or "N/A"
-            lines.append(f"{i}. [{sev}] {entry['title']} — {ep}")
+            lines.append(f"{entry['finding_id']}. [{sev}] {entry['title']} — {ep}")
         return "**Findings filed so far:**\n" + "\n".join(lines)
+
+    def summary_for_verifier(self, intro_chars: int = 240) -> str:
+        """Verifier-facing roster: includes description excerpts and stable F-IDs.
+
+        The verifier uses this to decide whether a new candidate is a true
+        duplicate / extension of an existing finding (in which case it should
+        call `merge_into_finding`) or a separate vulnerability that happens
+        to share a name. The dedup call is the verifier's; this surface just
+        gives it enough context to decide.
+        """
+        if not self._index:
+            return "No findings filed yet."
+        lines = ["**Findings filed so far (use `finding_id` to reference for merge):**"]
+        for entry in self._index:
+            sev = entry["severity"] or "unknown"
+            ep = entry["endpoint"] or "N/A"
+            extras = entry.get("extra_endpoints") or []
+            if extras:
+                ep = ep + " (+ merged: " + ", ".join(extras) + ")"
+            intro = (entry.get("description") or "").strip()
+            if len(intro) > intro_chars:
+                intro = intro[: intro_chars - 1].rstrip() + "…"
+            lines.append(
+                f"- `{entry['finding_id']}` [{sev}] {entry['title']} — {ep}\n"
+                f"  intro: {intro or '(no description)'}"
+            )
+            for note in entry.get("merge_notes") or []:
+                if note:
+                    lines.append(f"  merged: {note}")
+        return "\n".join(lines)
+
+    def get_by_finding_id(self, finding_id: str) -> dict | None:
+        fid = (finding_id or "").strip()
+        if not fid:
+            return None
+        for entry in self._index:
+            if entry["finding_id"] == fid:
+                return entry
+        return None
 
     def summary_for_worker(self) -> str:
         """Worker-facing roster: title + endpoint only, no severity.
@@ -168,10 +205,68 @@ class FindingWriter:
 
         self.paths.append(filepath)
         self._index.append({
+            "finding_id": f"F{self.count}",
             "title": filed.title,
             "title_slug": slugify(filed.title),
             "endpoint": _canonical_endpoint(filed.endpoint),
             "severity": filed.severity,
+            "description": filed.description or "",
             "path": filepath,
         })
         return filepath
+
+    def merge(
+        self,
+        finding_id: str,
+        *,
+        rationale: str,
+        additional_endpoint: str = "",
+        additional_evidence: str = "",
+        additional_reproduction_steps: str = "",
+        additional_verification_notes: str = "",
+        additional_impact: str = "",
+    ) -> str | None:
+        """Append a verifier-supplied addendum to an existing finding.
+
+        The verifier calls this when a new candidate represents the same
+        underlying vulnerability as a previously-filed finding (typically a
+        new endpoint surface or new evidence). Returns the finding's path on
+        success, None when `finding_id` doesn't resolve.
+        """
+        entry = self.get_by_finding_id(finding_id)
+        if entry is None:
+            return None
+
+        sections: list[str] = []
+        sections.append(f"\n\n## Merge addendum ({finding_id})\n")
+        sections.append(f"**Rationale:** {rationale.strip() or '(none)'}")
+        if additional_endpoint.strip():
+            sections.append(f"\n**Additional endpoint:** {additional_endpoint.strip()}")
+        if additional_evidence.strip():
+            sections.append("\n### Additional evidence\n")
+            sections.append(additional_evidence.strip())
+        if additional_reproduction_steps.strip():
+            sections.append("\n### Additional reproduction steps\n")
+            sections.append(additional_reproduction_steps.strip())
+        if additional_verification_notes.strip():
+            sections.append("\n### Additional verification notes\n")
+            sections.append(additional_verification_notes.strip())
+        if additional_impact.strip():
+            sections.append("\n### Impact addendum\n")
+            sections.append(additional_impact.strip())
+
+        with open(entry["path"], "a") as f:
+            f.write("\n".join(sections) + "\n")
+
+        # Reflect merged content in the verifier-facing roster so the next
+        # substep's `summary_for_verifier` shows the additional endpoint and
+        # merge rationale — otherwise a later candidate covering the merged
+        # surface could look like a separate finding.
+        extra_endpoints = entry.setdefault("extra_endpoints", [])
+        if additional_endpoint.strip():
+            ep_canon = _canonical_endpoint(additional_endpoint)
+            if ep_canon and ep_canon not in extra_endpoints and ep_canon != entry["endpoint"]:
+                extra_endpoints.append(ep_canon)
+        merge_notes = entry.setdefault("merge_notes", [])
+        merge_notes.append(rationale.strip())
+        return entry["path"]

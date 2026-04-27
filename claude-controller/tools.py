@@ -241,6 +241,21 @@ class CandidateDismissal:
     follow_up_hint: str = ""
 
 
+@dataclass
+class FindingMerged:
+    """Verifier-issued merge of a candidate into an already-filed finding."""
+
+    finding_id: str
+    rationale: str
+    additional_endpoint: str = ""
+    additional_evidence: str = ""
+    additional_reproduction_steps: str = ""
+    additional_verification_notes: str = ""
+    additional_impact: str = ""
+    supersedes_candidate_ids: list[str] = field(default_factory=list)
+    follow_up_hint: str = ""
+
+
 PHASE_IDLE = "idle"
 PHASE_VERIFICATION = "verification"
 PHASE_DIRECTION = "direction"
@@ -367,6 +382,7 @@ class DecisionQueue:
         self.worker_decisions: list[WorkerDecision] = []
         self.findings: list[FindingFiled] = []
         self.dismissals: list[CandidateDismissal] = []
+        self.merges: list[FindingMerged] = []
         self.done_summary: str | None = None
         self.phase: str = PHASE_IDLE
         self.verification_done_summary: str | None = None
@@ -378,6 +394,7 @@ class DecisionQueue:
             self.worker_decisions = []
             self.findings = []
             self.dismissals = []
+            self.merges = []
             self.done_summary = None
             self.phase = PHASE_IDLE
             self.verification_done_summary = None
@@ -422,6 +439,15 @@ class DecisionQueue:
             self.dismissals.append(CandidateDismissal(
                 candidate_id=candidate_id, reason=reason, follow_up_hint=follow_up_hint,
             ))
+
+    def add_merge(self, m: FindingMerged) -> None:
+        with self._lock:
+            self.merges.append(m)
+
+    def decisions_by_worker(self) -> dict[int, str]:
+        """worker_id → latest decision kind this phase (continue|expand|stop)."""
+        with self._lock:
+            return {d.worker_id: d.kind for d in self.worker_decisions}
 
     def set_done(self, summary: str) -> None:
         with self._lock:
@@ -613,11 +639,21 @@ def _reject_wrong_phase(expected: str, current: str, tool_name: str) -> dict[str
     }
 
 
-def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
+def build_orch_mcp_server(
+    decisions: DecisionQueue,
+    alive_worker_ids: Any | None = None,
+) -> Any:
     """SDK MCP server with the orchestrator's decision + finding tools.
 
     Tools are phase-gated by `decisions.phase`; calling the wrong tool in the
     wrong phase returns an is_error=True response.
+
+    `alive_worker_ids`, when provided, is a 0-arg callable returning the list
+    of currently-alive worker IDs. It's consulted by the `done` handler to
+    reject `done` while live workers lack an explicit `stop_worker` — this
+    catches the common failure mode of the director queueing
+    `continue_worker` + `done` in the same phase and silently abandoning
+    in-progress investigations.
     """
 
     @tool(
@@ -902,6 +938,109 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
         }
 
     @tool(
+        "merge_into_finding",
+        (
+            "Merge a candidate's evidence into an already-filed finding instead "
+            "of filing a near-duplicate. Use when the candidate represents the "
+            "same underlying vulnerability as an existing finding (e.g. another "
+            "endpoint exhibiting the same flaw, or stronger evidence for an "
+            "already-filed issue). Reference the target by its `finding_id` "
+            "(e.g. 'F1', 'F2') from the findings list. Append-only: the merge "
+            "addendum is added to the existing finding's markdown, not a new file."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "finding_id": {
+                    "type": "string",
+                    "description": "Target finding_id from the findings list (e.g. 'F1').",
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "One short sentence: why this is the same underlying issue.",
+                },
+                "additional_endpoint": {
+                    "type": "string",
+                    "default": "",
+                    "description": "If the merge adds a new affected endpoint, name it here.",
+                },
+                "additional_evidence": {
+                    "type": "string",
+                    "default": "",
+                    "description": "New observable proof — no flow IDs or session references.",
+                },
+                "additional_reproduction_steps": {
+                    "type": "string",
+                    "default": "",
+                    "description": "New reproduction steps — no flow IDs or session references.",
+                },
+                "additional_verification_notes": {
+                    "type": "string",
+                    "default": "",
+                    "description": "How you reproduced this variant — no flow IDs or session IDs.",
+                },
+                "additional_impact": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Any expanded impact this addendum demonstrates.",
+                },
+                "supersedes_candidate_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": (
+                        "Pending candidate IDs this merge resolves. Same "
+                        "semantics as `file_finding.supersedes_candidate_ids`."
+                    ),
+                },
+                "follow_up_hint": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Optional one-line hint for the director: a related "
+                        "angle worth probing next. Advisory only."
+                    ),
+                },
+            },
+            "required": ["finding_id", "rationale"],
+        },
+    )
+    async def merge_into_finding(args: dict[str, Any]) -> dict[str, Any]:
+        if decisions.current_phase != PHASE_VERIFICATION:
+            return _reject_wrong_phase(
+                PHASE_VERIFICATION, decisions.current_phase, "merge_into_finding",
+            )
+        finding_id = str(args.get("finding_id", "")).strip()
+        rationale = str(args.get("rationale", "")).strip()
+        if not finding_id or not rationale:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "Rejected: finding_id and rationale are required.",
+                }],
+                "is_error": True,
+            }
+        decisions.add_merge(FindingMerged(
+            finding_id=finding_id,
+            rationale=rationale,
+            additional_endpoint=str(args.get("additional_endpoint", "")).strip(),
+            additional_evidence=str(args.get("additional_evidence", "")).strip(),
+            additional_reproduction_steps=str(args.get("additional_reproduction_steps", "")).strip(),
+            additional_verification_notes=str(args.get("additional_verification_notes", "")).strip(),
+            additional_impact=str(args.get("additional_impact", "")).strip(),
+            supersedes_candidate_ids=[
+                str(c) for c in (args.get("supersedes_candidate_ids") or [])
+            ],
+            follow_up_hint=str(args.get("follow_up_hint", "")).strip(),
+        ))
+        return {
+            "content": [{
+                "type": "text",
+                "text": f"Merge into {finding_id} recorded.",
+            }],
+        }
+
+    @tool(
         "dismiss_candidate",
         (
             "Mark a worker-reported finding candidate as not a real issue — "
@@ -964,6 +1103,46 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
                 "content": [{"type": "text", "text": "Rejected: summary is required."}],
                 "is_error": True,
             }
+        if alive_worker_ids is not None:
+            alive = list(alive_worker_ids())
+            by_wid = decisions.decisions_by_worker()
+            planned_ids = (
+                {p.worker_id for p in decisions.plan}
+                if decisions.plan is not None else set()
+            )
+            # `plan_workers` covers a worker via the spawn/retarget path —
+            # for the purpose of the done guard, treat it the same as a
+            # non-stop decision (work is still being scheduled).
+            not_stopped = sorted(
+                w for w in alive
+                if (by_wid.get(w) and by_wid[w] != "stop") or w in planned_ids
+            )
+            no_decision = sorted(
+                w for w in alive if w not in by_wid and w not in planned_ids
+            )
+            if not_stopped or no_decision:
+                parts: list[str] = []
+                if not_stopped:
+                    parts.append(
+                        f"workers {not_stopped} have decisions other than stop this iter"
+                    )
+                if no_decision:
+                    parts.append(
+                        f"workers {no_decision} have no decision recorded this iter"
+                    )
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "Rejected: `done` would abandon live work — "
+                            + "; ".join(parts)
+                            + ". Either stop them all via `stop_worker(worker_id, reason=...)` "
+                            "in this iter and re-issue `done`, or call `direction_done(summary)` "
+                            "to close this iter and let the workers continue next iter."
+                        ),
+                    }],
+                    "is_error": True,
+                }
         decisions.set_done(summary)
         return {"content": [{"type": "text", "text": "Run end signaled."}]}
 
@@ -1029,6 +1208,7 @@ def build_orch_mcp_server(decisions: DecisionQueue) -> Any:
             expand_worker,
             stop_worker,
             file_finding,
+            merge_into_finding,
             dismiss_candidate,
             done,
             verification_done,
@@ -1043,6 +1223,7 @@ WORKER_TOOL_ALLOWED = "mcp__worker_tools__report_finding_candidate"
 # Tools available during the verification phase.
 VERIFIER_TOOL_NAMES = (
     "file_finding",
+    "merge_into_finding",
     "dismiss_candidate",
     "verification_done",
 )

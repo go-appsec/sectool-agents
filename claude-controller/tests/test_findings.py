@@ -49,30 +49,6 @@ class TestFindingWriter(unittest.TestCase):
             self.assertIn("**Severity**: high", body)
             self.assertIn("## Verification", body)
 
-    def test_is_duplicate_by_slug(self):
-        with tempfile.TemporaryDirectory() as td:
-            w = FindingWriter(td)
-            w.write(_make("Reflected XSS in /search"))
-            self.assertTrue(
-                w.is_duplicate(_make("reflected xss in /search", endpoint="POST /other"))
-            )
-
-    def test_is_duplicate_by_canonical_endpoint_with_similar_title(self):
-        with tempfile.TemporaryDirectory() as td:
-            w = FindingWriter(td)
-            w.write(_make("Reflected XSS in search", endpoint="GET /search"))
-            self.assertTrue(
-                w.is_duplicate(_make("Reflected XSS in search results", endpoint="get /search/"))
-            )
-
-    def test_is_not_duplicate_for_different_finding(self):
-        with tempfile.TemporaryDirectory() as td:
-            w = FindingWriter(td)
-            w.write(_make("Reflected XSS", endpoint="GET /search"))
-            self.assertFalse(
-                w.is_duplicate(_make("SQL injection in login", endpoint="POST /login"))
-            )
-
     def test_summary_for_orchestrator(self):
         with tempfile.TemporaryDirectory() as td:
             w = FindingWriter(td)
@@ -80,8 +56,65 @@ class TestFindingWriter(unittest.TestCase):
             w.write(_make("XSS in X", endpoint="GET /x", severity="high"))
             w.write(_make("SQLi in Y", endpoint="POST /y", severity="critical"))
             out = w.summary_for_orchestrator()
-            self.assertIn("1. [high] XSS in X — /x", out)
-            self.assertIn("2. [critical] SQLi in Y — /y", out)
+            self.assertIn("F1. [high] XSS in X — /x", out)
+            self.assertIn("F2. [critical] SQLi in Y — /y", out)
+
+    def test_summary_for_verifier_includes_intro_and_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            self.assertEqual(w.summary_for_verifier(), "No findings filed yet.")
+            filed = FindingFiled(
+                title="Reflected XSS",
+                severity="high",
+                endpoint="GET /search",
+                description="Search query is reflected unescaped into the response body.",
+                reproduction_steps="rs", evidence="e", impact="i", verification_notes="v",
+            )
+            w.write(filed)
+            out = w.summary_for_verifier()
+            self.assertIn("`F1`", out)
+            self.assertIn("Reflected XSS", out)
+            self.assertIn("/search", out)
+            self.assertIn("Search query is reflected", out)
+
+    def test_merge_appends_addendum(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            path = w.write(_make("Reflected XSS", endpoint="GET /search"))
+            merged = w.merge(
+                "F1",
+                rationale="Same vuln, additional endpoint",
+                additional_endpoint="GET /lookup",
+                additional_evidence="param `q` reflected on /lookup as well",
+            )
+            self.assertEqual(merged, path)
+            body = open(path).read()
+            self.assertIn("## Merge addendum (F1)", body)
+            self.assertIn("Additional endpoint:** GET /lookup", body)
+            self.assertIn("param `q` reflected", body)
+
+    def test_merge_unknown_finding_id_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            w.write(_make("Reflected XSS", endpoint="GET /search"))
+            self.assertIsNone(w.merge("F99", rationale="r"))
+
+    def test_merge_surfaces_in_verifier_summary(self):
+        """After a merge, summary_for_verifier shows the merged endpoint and
+        rationale so a later candidate covering that surface isn't mistaken
+        for a separate finding."""
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            w.write(_make("Reflected XSS", endpoint="GET /search"))
+            w.merge(
+                "F1",
+                rationale="same vuln on /lookup too",
+                additional_endpoint="GET /lookup",
+            )
+            out = w.summary_for_verifier()
+            self.assertIn("/search", out)
+            self.assertIn("merged: /lookup", out)
+            self.assertIn("merged: same vuln on /lookup too", out)
 
 
 def _candidate(cid: str, title: str, endpoint: str) -> FindingCandidate:
@@ -96,6 +129,24 @@ class TestMatchPendingCandidates(unittest.TestCase):
     def test_matches_by_endpoint_and_title(self):
         filed = _make("Reflected XSS in search", endpoint="GET /search")
         pending = [_candidate("c001", "Reflected XSS in search results", "get /search/")]
+        self.assertEqual(match_pending_candidates(filed, pending), ["c001"])
+
+    def test_matches_near_duplicate_cors_titles(self):
+        """0.5 similarity threshold must catch real near-duplicate titles.
+
+        Two CORS write-ups for the same endpoint/issue with rearranged wording
+        score 8/12 ≈ 0.667 word overlap. The previous 0.8 threshold missed
+        these and left auto-resolve broken; 0.5 catches them.
+        """
+        filed = _make(
+            "Wildcard CORS Enables Cross-Origin Token Status Enumeration and Response Leakage",
+            endpoint="GET /oauth2/introspect",
+        )
+        pending = [_candidate(
+            "c001",
+            "Wildcard CORS Enables Cross-OAuth Response Leakage at Token and Introspection Endpoints",
+            "GET /oauth2/introspect",
+        )]
         self.assertEqual(match_pending_candidates(filed, pending), ["c001"])
 
     def test_requires_both_endpoint_and_title(self):

@@ -1313,10 +1313,9 @@ class TestFindingLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
             for f in decisions.findings:
-                if not fw.is_duplicate(f):
-                    fw.write(f)
-                    for cid in f.supersedes_candidate_ids:
-                        pool.mark(cid, "verified")
+                fw.write(f)
+                for cid in f.supersedes_candidate_ids:
+                    pool.mark(cid, "verified")
             for dm in decisions.dismissals:
                 pool.mark(dm.candidate_id, "dismissed")
 
@@ -1326,32 +1325,47 @@ class TestFindingLifecycle(unittest.TestCase):
         self.assertEqual(pool.pending(), [])
         self.assertEqual(decisions.done_summary, "coverage complete")
 
-    def test_duplicate_finding_still_resolves_candidates(self):
+    def test_merge_resolves_candidates_without_extra_finding(self):
+        """A second candidate for the same underlying issue is merged in,
+        not filed as a near-duplicate. Both candidates resolve verified."""
+        from tools import FindingMerged
+
         pool = CandidatePool()
         c1 = pool.add(title="XSS", severity="high", endpoint="GET /s",
                       flow_ids=["aaaa11"], summary="", evidence_notes="",
                       reproduction_hint="")
-        c2 = pool.add(title="XSS dup", severity="high", endpoint="GET /s",
+        c2 = pool.add(title="XSS variant", severity="high", endpoint="GET /s2",
                       flow_ids=["bbbb22"], summary="", evidence_notes="",
                       reproduction_hint="")
 
-        filed_first = FindingFiled(
+        decisions = DecisionQueue()
+        decisions.add_finding(FindingFiled(
             title="Reflected XSS", severity="high", endpoint="GET /s",
             description="d", reproduction_steps="r", evidence="e", impact="i",
             verification_notes="v1", supersedes_candidate_ids=[c1],
-        )
-        filed_dup = FindingFiled(
-            title="Reflected XSS", severity="high", endpoint="GET /s",
-            description="d", reproduction_steps="r", evidence="e", impact="i",
-            verification_notes="v2", supersedes_candidate_ids=[c2],
-        )
+        ))
+        decisions.add_merge(FindingMerged(
+            finding_id="F1",
+            rationale="same vuln, additional endpoint",
+            additional_endpoint="GET /s2",
+            additional_evidence="param `q` reflected on /s2 too",
+            supersedes_candidate_ids=[c2],
+        ))
 
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
-            for filed in (filed_first, filed_dup):
-                if not fw.is_duplicate(filed):
-                    fw.write(filed)
-                for cid in filed.supersedes_candidate_ids:
+            for f in decisions.findings:
+                fw.write(f)
+                for cid in f.supersedes_candidate_ids:
+                    pool.mark(cid, "verified")
+            for mg in decisions.merges:
+                self.assertIsNotNone(fw.merge(
+                    mg.finding_id,
+                    rationale=mg.rationale,
+                    additional_endpoint=mg.additional_endpoint,
+                    additional_evidence=mg.additional_evidence,
+                ))
+                for cid in mg.supersedes_candidate_ids:
                     pool.mark(cid, "verified")
 
         self.assertEqual(fw.count, 1)
@@ -1632,6 +1646,7 @@ class TestPromptBuilders(unittest.TestCase):
         msg = controller._build_verifier_continue_prompt(
             pending=pool.pending(),
             filed_this_phase=filed,
+            merged_this_phase=[],
             dismissed_this_phase=dismissed,
             substep=2, max_substeps=6,
         )
@@ -1646,11 +1661,29 @@ class TestPromptBuilders(unittest.TestCase):
         msg = controller._build_verifier_continue_prompt(
             pending=pool.pending(),
             filed_this_phase=[],
+            merged_this_phase=[],
             dismissed_this_phase=[],
             substep=2, max_substeps=6,
         )
         self.assertNotIn("Already filed this phase", msg)
+        self.assertNotIn("Already merged this phase", msg)
         self.assertNotIn("Already dismissed this phase", msg)
+
+    def test_verifier_continue_lists_merges(self):
+        from tools import FindingMerged
+
+        pool = CandidatePool()
+        merges = [FindingMerged(finding_id="F2", rationale="same vuln, new endpoint")]
+        msg = controller._build_verifier_continue_prompt(
+            pending=pool.pending(),
+            filed_this_phase=[],
+            merged_this_phase=merges,
+            dismissed_this_phase=[],
+            substep=3, max_substeps=6,
+        )
+        self.assertIn("Already merged this phase", msg)
+        self.assertIn("F2", msg)
+        self.assertIn("same vuln, new endpoint", msg)
 
 
 class TestCoalesceInApplyLoop(unittest.TestCase):

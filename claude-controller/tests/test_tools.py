@@ -210,6 +210,25 @@ class TestDecisionQueuePhases(unittest.TestCase):
         q.begin_phase(PHASE_DIRECTION)
         self.assertEqual(len(q.findings), 1)  # findings accumulate across phase switches within an iter
 
+    def test_decisions_by_worker_returns_latest_kind(self):
+        q = DecisionQueue()
+        q.begin_phase(PHASE_DIRECTION)
+        q.add_decision(WorkerDecision(kind="continue", worker_id=1, instruction="x", progress="new"))
+        q.add_decision(WorkerDecision(kind="continue", worker_id=2, instruction="y", progress="new"))
+        # Same worker re-issued — latest wins.
+        q.add_decision(WorkerDecision(kind="stop", worker_id=2, reason="done"))
+        by_wid = q.decisions_by_worker()
+        self.assertEqual(by_wid, {1: "continue", 2: "stop"})
+
+    def test_reset_clears_merges_too(self):
+        from tools import FindingMerged
+        q = DecisionQueue()
+        q.begin_phase(PHASE_VERIFICATION)
+        q.add_merge(FindingMerged(finding_id="F1", rationale="dup"))
+        self.assertEqual(len(q.merges), 1)
+        q.reset()
+        self.assertEqual(q.merges, [])
+
 
 class TestRejectWrongPhase(unittest.TestCase):
     def test_error_shape_and_content(self):
