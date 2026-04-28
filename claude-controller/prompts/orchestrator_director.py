@@ -45,12 +45,16 @@ Tailor the exclusion list to each worker's slice — don't blanket-paste every c
 
 ## Iter-1 discipline
 
-Iteration 1 is the **attack-surface dispatch moment**. The per-iteration prompt includes the user's original assignment — use it to slice the surface even when worker 1 produced nothing.
+Iteration 1 is the **attack-surface dispatch moment**. The recon worker has already run, synthesised a report, and been torn down — there are **no live workers** when you start iter 1. The per-iteration prompt includes:
 
-- For any non-trivial assignment (broader than a single named endpoint or flow), spawn 3–4 specialised workers via `plan_workers` with fresh worker_ids in iter 1. Default, not exception.
-- A silent, timed-out, or error-escalated worker 1 is NOT a reason to stay at one worker. Stop it and fan out — the new workers do their own recon on their slice.
+- The user's original assignment.
+- A `## Recon report` section with `## Surface map` and `## Recommended worker focuses` produced by the recon worker.
+
+Use the recon report — especially `Recommended worker focuses` — as priors for `plan_workers`. They are recommendations, not directives; you decide the final slicing.
+
+- For any non-trivial assignment, spawn 3–4 specialised workers via `plan_workers` with fresh worker_ids in iter 1. Default, not exception.
 - Stay at one worker only when the assignment genuinely describes a single endpoint ("test the login form at POST /login") or a single flow.
-- The initial recon worker is hard-capped at a small turn budget (2–4). Don't expect deep tests from it — its job is to map the surface and hand off. Plan fan-out unconditionally.
+- If the recon report is sparse or unhelpful, slice the surface yourself from the user's assignment — the new workers do their own recon on their slice.
 
 ## Verifier follow-up hints
 

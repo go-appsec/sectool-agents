@@ -266,6 +266,10 @@ class WorkerState:
     max_autonomous_budget: int | None = None
     escalation_reason: str | None = None
     autonomous_turns: list[WorkerTurnSummary] = field(default_factory=list)
+    # True for the iter-1 recon worker. Survives teardown so the director's
+    # stopped-list can label it and avoid conflating it with a real worker
+    # that was stopped mid-run.
+    is_recon: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +446,9 @@ def _build_worker_options(
     worker_id: int,
     num_workers: int,
     stderr_cb,
+    *,
+    is_recon: bool = False,
+    user_prompt: str | None = None,
 ) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         mcp_servers={
@@ -459,7 +466,9 @@ def _build_worker_options(
         max_turns=base.max_turns,
         model=base.model,
         stderr=stderr_cb,
-        system_prompt=worker_prompts.build_system_prompt(worker_id, num_workers),
+        system_prompt=worker_prompts.build_system_prompt(
+            worker_id, num_workers, is_recon=is_recon, user_prompt=user_prompt,
+        ),
     )
 
 
@@ -470,9 +479,15 @@ async def create_worker(
     mcp_url: str,
     base: ClaudeAgentOptions,
     stderr_cb,
+    *,
+    is_recon: bool = False,
+    user_prompt: str | None = None,
 ) -> WorkerState:
     worker_tools_server = build_worker_mcp_server(candidates, worker_id)
-    opts = _build_worker_options(base, worker_tools_server, mcp_url, worker_id, num_workers, stderr_cb)
+    opts = _build_worker_options(
+        base, worker_tools_server, mcp_url, worker_id, num_workers, stderr_cb,
+        is_recon=is_recon, user_prompt=user_prompt,
+    )
     managed = ManagedSDKClient(options=opts)
     client = await managed.connect()
     return WorkerState(worker_id=worker_id, options=opts, client=client, managed=managed)
@@ -504,6 +519,72 @@ async def attempt_worker_recovery(state: WorkerState) -> bool:
             log(f"worker {state.worker_id}", f"Recovery attempt {attempt} failed: {exc}")
     state.alive = False
     return False
+
+
+_RECON_SYNTHESIS_QUERY = (
+    "Output your recon synthesis now. Two sections only — "
+    "`## Surface map` and `## Recommended worker focuses`. "
+    "No tool calls; do not narrate. End immediately after the second section."
+)
+
+_RECON_SUMMARY_PLACEHOLDER = (
+    "(Recon worker produced no synthesis output. "
+    "Slice the surface from the user assignment.)"
+)
+
+
+async def synthesize_and_teardown_recon(
+    worker: WorkerState,
+    candidates: CandidatePool,
+    iteration: int,
+    verbose: bool,
+) -> tuple[str, float]:
+    """Drive a final synthesis turn from the recon worker, then tear it down.
+
+    Sends an explicit synthesis query, drains the response with
+    `collect_worker_turn`, and returns the captured assistant text plus the
+    turn cost. The worker's SDK client is closed regardless of synthesis
+    success so its conversation history is dropped before iter 2.
+
+    Returns (summary, cost). On any failure, falls back to the worker's
+    last autonomous-turn assistant_text, then to a placeholder string.
+    """
+    cost = 0.0
+    summary_text = ""
+
+    if worker.client is None or not worker.alive:
+        # Recon worker died during the autonomous run; salvage what we can.
+        if worker.autonomous_turns:
+            summary_text = worker.autonomous_turns[-1].assistant_text.strip()
+        return summary_text or _RECON_SUMMARY_PLACEHOLDER, cost
+
+    log(f"worker {worker.worker_id}", "Synthesizing recon report...")
+    tag = f"w{worker.worker_id}" if verbose else None
+    try:
+        await worker.client.query(_RECON_SYNTHESIS_QUERY)
+        synth_turn = await collect_worker_turn(
+            worker.client, worker.worker_id, iteration, candidates, tag,
+        )
+        summary_text = synth_turn.assistant_text.strip()
+        if synth_turn.cost_usd:
+            cost += synth_turn.cost_usd
+    except (ConnectionError, OSError) as exc:
+        log(f"worker {worker.worker_id}", f"Synthesis failed: {exc}")
+
+    if not summary_text and worker.autonomous_turns:
+        # Synthesis returned empty (refusal, max_turns exhaustion, connection
+        # blip): salvage the worker's last autonomous-turn narration. Any
+        # non-empty synthesis is preserved verbatim — formatting varies
+        # across models (## vs **bold** vs plain text) and the director can
+        # work with imperfect shape better than with raw tool-call narration.
+        fallback = worker.autonomous_turns[-1].assistant_text.strip()
+        if fallback:
+            summary_text = fallback
+
+    await teardown_worker(worker)
+    log(f"worker {worker.worker_id}", "Recon worker torn down.")
+
+    return summary_text or _RECON_SUMMARY_PLACEHOLDER, cost
 
 
 async def attempt_client_recovery(
@@ -965,16 +1046,28 @@ def _build_director_prompt(
     follow_up_hints: str,
     max_workers: int,
     user_prompt: str,
+    recon_summary: str | None = None,
 ) -> str:
     parts = [
         _format_status_line(iteration, max_iter, total_cost, max_cost, findings_count),
         "",
         f"**Assignment (user prompt):** {user_prompt}",
+    ]
+    # The recon report is sent only on iter 1 — the director's SDK client
+    # carries it forward in conversation history for subsequent iterations,
+    # so re-sending would just burn tokens.
+    if iteration == 1 and recon_summary:
+        parts.extend([
+            "",
+            "## Recon report (from initial recon worker — already torn down; you have no live workers)",
+            recon_summary,
+        ])
+    parts.extend([
         "",
         findings_summary,
         "",
         f"**Verification:** {verification_summary}",
-    ]
+    ])
     pending_brief = _format_pending_candidates_brief(pending_candidates)
     if pending_brief:
         parts.append("")
@@ -1003,26 +1096,29 @@ def _build_director_prompt(
     parts.append(
         f"**Alive:** [{alive_str}]  **Parallelism:** {alive_count}/{max_workers}."
     )
-    stopped_ids = [str(w.worker_id) for w in workers if not w.alive]
-    if stopped_ids:
+    stopped_labels: list[str] = []
+    for w in workers:
+        if w.alive:
+            continue
+        label = f"{w.worker_id} (recon)" if w.is_recon else str(w.worker_id)
+        stopped_labels.append(label)
+    if stopped_labels:
         parts.append(
-            f"Stopped this run: [{', '.join(stopped_ids)}] "
+            f"Stopped this run: [{', '.join(stopped_labels)}] "
             "(do not re-plan around these; pick fresh worker_ids for new workers)."
         )
 
-    # Iteration 1 is the attack-surface dispatch moment. Fan-out is the
-    # default; a single worker is only correct for manifestly narrow
-    # assignments (single endpoint / single flow).
-    if iteration == 1 and alive_count < max_workers:
+    # Iteration 1 is the attack-surface dispatch moment. The recon worker
+    # is gone; fan-out via plan_workers is the only way to start work.
+    if iteration == 1:
         parts.append("")
         parts.append(
-            "**Iteration 1 fan-out is mandatory for non-trivial assignments.** "
-            "Slice the assignment above into 3–4 disjoint specialised workers "
-            "and spawn them via `plan_workers` with fresh worker_ids NOW. "
-            "Only stay at one worker if the assignment names a single "
-            "endpoint or a single flow. Worker 1 being silent, timed-out, or "
-            "escalating `error` is NOT a reason to stay at one worker — it's "
-            "a reason to stop worker 1 and fan out in its place."
+            "**Iteration 1: no live workers — `plan_workers` is mandatory.** "
+            "Use the `## Recon report` above (especially `Recommended worker focuses`) "
+            "to spawn 3–4 disjoint specialised workers with fresh worker_ids NOW. "
+            "Only stay at one worker if the assignment names a single endpoint or "
+            "a single flow. Recon recommendations are priors, not directives — "
+            "override or ignore them where the user's assignment dictates."
         )
     return "\n".join(parts)
 
@@ -1349,6 +1445,7 @@ async def run_direction_phase(
     verbose: bool,
     max_workers: int,
     user_prompt: str,
+    recon_summary: str | None = None,
     abort_event: asyncio.Event | None = None,
 ) -> tuple[ManagedSDKClient, float]:
     """Drive the director over up to DIRECTION_MAX_SUBSTEPS substeps, then a
@@ -1391,6 +1488,7 @@ async def run_direction_phase(
                 follow_up_hints=follow_up_hints,
                 max_workers=max_workers,
                 user_prompt=user_prompt,
+                recon_summary=recon_summary,
             )
         else:
             user_content = _build_director_continue_prompt(
@@ -1470,6 +1568,7 @@ async def apply_plan_diff(
     base_options: ClaudeAgentOptions,
     stderr_cb,
     max_workers: int,
+    recon_summary: str | None = None,
 ) -> None:
     by_id = {w.worker_id: w for w in workers}
     existing_ids = {w.worker_id for w in workers if w.alive}
@@ -1510,7 +1609,20 @@ async def apply_plan_diff(
                 )
                 new_w.assignment = p.assignment
                 new_w.last_instruction = p.assignment
-                await new_w.client.query(p.assignment)
+                # Fresh SDK client — prepend the recon report so the worker
+                # starts with the surface map in its context. Existing workers
+                # being retargeted (above) already have it from their first
+                # query, so they only need the bare assignment.
+                if recon_summary:
+                    kickoff = (
+                        "## Recon context (from the initial recon worker)\n"
+                        f"{recon_summary}\n\n"
+                        "## Your assignment\n"
+                        f"{p.assignment}"
+                    )
+                else:
+                    kickoff = p.assignment
+                await new_w.client.query(kickoff)
                 workers.append(new_w)
                 existing_ids.add(p.worker_id)
                 log(f"worker {p.worker_id}", "Connected and assigned.")
@@ -1671,15 +1783,22 @@ async def run(config: Config) -> None:
             try:
                 w1 = await create_worker(
                     1, 1, candidates, mcp_url, base_options, stderr_cb,
+                    is_recon=True, user_prompt=config.prompt,
                 )
                 w1.autonomous_budget = config.recon_budget
                 w1.max_autonomous_budget = config.recon_budget
+                w1.is_recon = True
                 workers.append(w1)
             except Exception as exc:
                 log("worker", f"Failed to connect worker 1: {exc}")
                 raise SystemExit(1) from exc
             log("worker",
-                f"Worker 1 connected (recon budget hard-capped at {config.recon_budget}).")
+                f"Recon worker connected (budget hard-capped at {config.recon_budget}).")
+
+            # The recon worker's surface synthesis after iter 1; persists for
+            # the rest of the run so workers spawned in later iterations also
+            # get it prepended to their first assignment.
+            recon_summary: str | None = None
 
             # Verifier and director clients
             try:
@@ -1700,11 +1819,15 @@ async def run(config: Config) -> None:
                 log("direct", f"Failed to connect director: {exc}")
                 raise SystemExit(1) from exc
 
-            # Initial prompt to worker 1
-            workers[0].last_instruction = config.prompt
+            # Recon kick-off. The user assignment is already embedded in the
+            # recon system prompt; this trigger just starts the run without
+            # re-stating it. Recovery here would re-issue the kick-off, which
+            # is harmless even if the original got partially through.
+            _RECON_KICKOFF = "Begin recon. Map the surface; no testing or exploits."
+            workers[0].last_instruction = _RECON_KICKOFF
             workers[0].assignment = config.prompt
             try:
-                await workers[0].client.query(config.prompt)
+                await workers[0].client.query(_RECON_KICKOFF)
             except (ConnectionError, OSError) as exc:
                 log("worker", f"Initial prompt failed: {exc}. Recovery...")
                 if not await attempt_worker_recovery(workers[0]):
@@ -1785,6 +1908,22 @@ async def run(config: Config) -> None:
                             print(f"[turn {i}] {s.assistant_text}")
                         print(f"--- End Worker {w.worker_id} autonomous run ---\n")
 
+                # 3b) Iter-1 only: harvest the recon worker's surface synthesis
+                # and tear it down. After this point the recon worker no
+                # longer exists; iter 2+ skips this block entirely.
+                if iteration == 1 and workers and workers[0].worker_id == 1:
+                    recon_summary, synth_cost = await synthesize_and_teardown_recon(
+                        workers[0], candidates, iteration, config.verbose,
+                    )
+                    total_cost += synth_cost
+                    log(f"iter {iteration}",
+                        f"Recon synthesis captured ({len(recon_summary)} chars, "
+                        f"cost=${synth_cost:.4f}).")
+                    if config.verbose:
+                        print("\n--- Recon summary ---")
+                        print(recon_summary)
+                        print("--- End recon summary ---\n")
+
                 if config.max_cost is not None and total_cost >= config.max_cost:
                     log(f"iter {iteration}", f"Cost ceiling reached (${total_cost:.2f}). Stopping.")
                     break
@@ -1827,6 +1966,7 @@ async def run(config: Config) -> None:
                     finding_writer.count, stall_warnings, follow_up_hints, config.verbose,
                     config.max_workers,
                     config.prompt,
+                    recon_summary=recon_summary,
                     abort_event=dump_unverified_event,
                 )
                 total_cost += d_cost
@@ -1870,6 +2010,7 @@ async def run(config: Config) -> None:
                     await apply_plan_diff(
                         decisions.plan, workers, candidates, mcp_url,
                         base_options, stderr_cb, config.max_workers,
+                        recon_summary=recon_summary,
                     )
 
                 # 9) Per-worker decisions

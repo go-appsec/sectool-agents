@@ -578,17 +578,15 @@ class TestPromptFormatting(unittest.TestCase):
         # The user's prompt must always be surfaced to the director.
         self.assertIn("**Assignment (user prompt):**", msg)
         self.assertIn("Explore example.com for auth bugs.", msg)
-        # Iteration 1 fan-out directive must NOT appear in mid-run iterations.
-        self.assertNotIn("Iteration 1 fan-out is mandatory", msg)
+        # Iter-1 dispatch directive must NOT appear in mid-run iterations.
+        self.assertNotIn("Iteration 1: no live workers", msg)
 
     def test_build_director_prompt_iter1_dispatch_nudge(self):
-        w = controller.WorkerState(worker_id=1, options=None)
-        w.escalation_reason = "silent"
-        turns = [_turn(1, 3, ["mcp__sectool__proxy_poll"], ["fl0w01"], [])]
-
+        # In the new flow the recon worker has been torn down before
+        # direction runs at iter 1, so workers list is empty.
         msg = controller._build_director_prompt(
-            workers=[w],
-            worker_runs={1: turns},
+            workers=[],
+            worker_runs={},
             pending_candidates=[],
             verification_summary="No pending candidates this iteration.",
             findings_summary="No findings filed yet.",
@@ -599,36 +597,39 @@ class TestPromptFormatting(unittest.TestCase):
             follow_up_hints="",
             max_workers=4,
             user_prompt="Broad exploration of target.example.com",
+            recon_summary=(
+                "## Surface map\n- /api/v1/users — GET, bearer\n"
+                "## Recommended worker focuses\n1. users — /api/v1/users — IDOR"
+            ),
         )
-        self.assertIn("Iteration 1 fan-out is mandatory", msg)
+        self.assertIn("Iteration 1: no live workers", msg)
         self.assertIn("plan_workers", msg)
-        # Directive should explicitly call out silent/timed-out worker 1.
-        self.assertIn("NOT a reason to stay at one worker", msg)
         self.assertIn("Broad exploration of target.example.com", msg)
+        # The recon report must be included verbatim at iter 1.
+        self.assertIn("## Recon report", msg)
+        self.assertIn("/api/v1/users — GET, bearer", msg)
+        self.assertIn("Recommended worker focuses", msg)
 
-    def test_build_director_prompt_iter1_no_nudge_when_parallelism_full(self):
-        """If iter 1 is already at parallelism budget, the nudge is suppressed."""
-        workers = []
-        for wid in range(1, 5):
-            w = controller.WorkerState(worker_id=wid, options=None)
-            w.escalation_reason = "candidate"
-            workers.append(w)
-
+    def test_build_director_prompt_omits_recon_report_after_iter1(self):
+        """The recon report goes in the director's iter-1 user prompt only;
+        SDK history carries it forward, so iter 2+ must not re-send it."""
         msg = controller._build_director_prompt(
-            workers=workers,
-            worker_runs={w.worker_id: [] for w in workers},
+            workers=[],
+            worker_runs={},
             pending_candidates=[],
             verification_summary="ok",
             findings_summary="x",
-            iteration=1, max_iter=10,
+            iteration=2, max_iter=10,
             total_cost=0.0, max_cost=None,
             findings_count=0,
             stall_warnings="",
             follow_up_hints="",
             max_workers=4,
             user_prompt="anything",
+            recon_summary="## Surface map\n- /x — GET",
         )
-        self.assertNotIn("Iteration 1 fan-out is mandatory", msg)
+        self.assertNotIn("## Recon report", msg)
+        self.assertNotIn("Iteration 1: no live workers", msg)
 
     def test_verifier_system_prompt_covers_core_contract(self):
         """The verifier prompt must state the full sectool surface is available,
@@ -1658,6 +1659,28 @@ class TestPromptBuilders(unittest.TestCase):
         self.assertIn("Stopped this run: [2]", msg)
         self.assertIn("do not re-plan around these", msg)
 
+    def test_director_prompt_labels_recon_in_stopped_list(self):
+        """The torn-down recon worker is tagged in the stopped roster so
+        the director doesn't conflate it with a real worker that was stopped."""
+        recon_w = controller.WorkerState(worker_id=1, options=None)
+        recon_w.alive = False
+        recon_w.is_recon = True
+        regular_stopped = controller.WorkerState(worker_id=3, options=None)
+        regular_stopped.alive = False
+
+        msg = controller._build_director_prompt(
+            workers=[recon_w, regular_stopped],
+            worker_runs={},
+            pending_candidates=[],
+            verification_summary="ok",
+            findings_summary="x",
+            iteration=2, max_iter=10,
+            total_cost=0.0, max_cost=None,
+            findings_count=0, stall_warnings="", follow_up_hints="",
+            max_workers=4, user_prompt="test",
+        )
+        self.assertIn("Stopped this run: [1 (recon), 3]", msg)
+
     def test_director_prompt_omits_stopped_line_when_none(self):
         alive = controller.WorkerState(worker_id=1, options=None)
         alive.alive = True
@@ -1738,6 +1761,235 @@ class TestPromptBuilders(unittest.TestCase):
         self.assertIn("Already merged this phase", msg)
         self.assertIn("F2", msg)
         self.assertIn("same vuln, new endpoint", msg)
+
+
+class TestReconPrompt(unittest.TestCase):
+    """The recon system prompt is its own self-contained contract; the
+    regular worker BASE prompt must not bleed into it."""
+
+    def test_recon_prompt_excludes_base_contracts(self):
+        from prompts.worker import build_system_prompt
+
+        recon = build_system_prompt(
+            1, 1, is_recon=True, user_prompt="explore example.com",
+        )
+        # BASE-prompt contracts that contradict recon mode must not appear.
+        self.assertNotIn("is your ONLY persistent output channel", recon)
+        self.assertNotIn("End every productive response with tool calls", recon)
+        # User assignment must be embedded so the worker keeps scope in mind.
+        self.assertIn("explore example.com", recon)
+        # Deliverable schema must be present.
+        self.assertIn("## Surface map", recon)
+        self.assertIn("## Recommended worker focuses", recon)
+        # `report_finding_candidate` IS wired up for the recon worker (the
+        # MCP server is shared). The prompt must not claim otherwise; it
+        # tells the model not to call it instead.
+        self.assertNotIn("not available to you", recon)
+        self.assertIn("report_finding_candidate", recon)
+
+    def test_recon_prompt_requires_user_prompt(self):
+        from prompts.worker import build_system_prompt
+        with self.assertRaises(ValueError):
+            build_system_prompt(1, 1, is_recon=True)
+
+    def test_regular_prompt_has_no_recon_content(self):
+        from prompts.worker import build_system_prompt
+        regular = build_system_prompt(1, 1)
+        self.assertNotIn("initial recon worker", regular)
+        self.assertIn("is your ONLY persistent output channel", regular)
+
+
+class TestSynthesizeAndTeardownRecon(unittest.TestCase):
+    """The post-recon synthesis call captures the surface map and discards
+    the worker's transcript before iter 2."""
+
+    def _make_recon_worker(self, client) -> controller.WorkerState:
+        w = controller.WorkerState(worker_id=1, options=None)
+        w.alive = True
+
+        class _M:
+            def __init__(self, c):
+                self.client = c
+                self.closed = False
+
+            async def aclose(self):
+                self.closed = True
+                self.client = None
+
+        w.managed = _M(client)
+        w.client = client
+        return w
+
+    def test_captures_synthesis_text_and_tears_down(self):
+        client = FakeSDKClient([
+            [
+                AssistantMessage(content=[TextBlock(text=(
+                    "## Surface map\n- /api/v1/users — GET, bearer\n"
+                    "## Recommended worker focuses\n1. users — /api/v1/users — IDOR"
+                ))], model="test"),
+                _result(0.05),
+            ],
+        ])
+        worker = self._make_recon_worker(client)
+        pool = CandidatePool()
+
+        summary, cost = _run(controller.synthesize_and_teardown_recon(
+            worker, pool, iteration=1, verbose=False,
+        ))
+
+        self.assertIn("## Surface map", summary)
+        self.assertIn("## Recommended worker focuses", summary)
+        self.assertAlmostEqual(cost, 0.05)
+        self.assertFalse(worker.alive, "recon worker must be torn down")
+        self.assertIsNone(worker.client)
+        # Synthesis query was sent before draining.
+        self.assertEqual(len(client.queries), 1)
+        self.assertIn("Surface map", client.queries[0])
+
+    def test_falls_back_to_last_autonomous_turn_on_empty_synthesis(self):
+        # Synthesis call returns empty text — fallback uses the last
+        # autonomous turn's assistant_text.
+        client = FakeSDKClient([
+            [
+                AssistantMessage(content=[TextBlock(text="")], model="test"),
+                _result(0.0),
+            ],
+        ])
+        worker = self._make_recon_worker(client)
+        worker.autonomous_turns = [WorkerTurnSummary(
+            worker_id=1, iteration=1,
+            assistant_text="## Surface map\n- /x — observed",
+        )]
+        pool = CandidatePool()
+
+        summary, _ = _run(controller.synthesize_and_teardown_recon(
+            worker, pool, iteration=1, verbose=False,
+        ))
+        self.assertIn("## Surface map", summary)
+        self.assertFalse(worker.alive)
+
+    def test_preserves_synthesis_with_alternate_formatting(self):
+        # A model that returns headers as **bold** instead of `##` must
+        # still have its synthesis preserved verbatim — the fallback only
+        # fires on truly-empty output.
+        client = FakeSDKClient([
+            [
+                AssistantMessage(content=[TextBlock(text=(
+                    "**Surface map**\n- /api — GET\n\n"
+                    "**Recommended worker focuses**\n1. x — /api — IDOR"
+                ))], model="test"),
+                _result(0.02),
+            ],
+        ])
+        worker = self._make_recon_worker(client)
+        # Autonomous-turn fallback content is present but must NOT win;
+        # the synthesis output is authoritative.
+        worker.autonomous_turns = [WorkerTurnSummary(
+            worker_id=1, iteration=1,
+            assistant_text="(autonomous narration we don't want)",
+        )]
+        pool = CandidatePool()
+
+        summary, _ = _run(controller.synthesize_and_teardown_recon(
+            worker, pool, iteration=1, verbose=False,
+        ))
+        self.assertIn("**Surface map**", summary)
+        self.assertNotIn("autonomous narration", summary)
+
+    def test_dead_worker_returns_placeholder_without_query(self):
+        # Recon worker died during the autonomous run (client is None);
+        # synthesis must not attempt to query and returns a placeholder when
+        # there's no salvageable history.
+        worker = controller.WorkerState(worker_id=1, options=None)
+        worker.alive = False
+        worker.client = None
+        worker.managed = None
+        pool = CandidatePool()
+
+        summary, cost = _run(controller.synthesize_and_teardown_recon(
+            worker, pool, iteration=1, verbose=False,
+        ))
+        self.assertIn("Recon worker produced no synthesis", summary)
+        self.assertEqual(cost, 0.0)
+
+
+class TestApplyPlanDiffReconKickoff(unittest.TestCase):
+    """Spawning a worker via apply_plan_diff while a recon summary is live
+    must prepend the surface map to the new worker's first query."""
+
+    def test_recon_summary_prepended_on_spawn(self):
+        # Patch create_worker so we can capture what gets queried without
+        # standing up a real SDK client.
+        from tools import PlanEntry
+        captured: dict[str, Any] = {}
+
+        client = FakeSDKClient([])
+
+        class _Managed:
+            def __init__(self):
+                self.client = client
+
+            async def aclose(self):
+                pass
+
+        async def fake_create_worker(*args, **kwargs):
+            w = controller.WorkerState(worker_id=args[0], options=None)
+            w.client = client
+            w.managed = _Managed()
+            w.alive = True
+            captured["kwargs"] = kwargs
+            return w
+
+        original = controller.create_worker
+        controller.create_worker = fake_create_worker
+        try:
+            plan = [PlanEntry(worker_id=2, assignment="hit /api/v1/orgs hard")]
+            workers: list[controller.WorkerState] = []
+            _run(controller.apply_plan_diff(
+                plan, workers, CandidatePool(), "http://x",
+                None, None, max_workers=4,
+                recon_summary="## Surface map\n- /api/v1/orgs — GET",
+            ))
+        finally:
+            controller.create_worker = original
+
+        self.assertEqual(len(client.queries), 1)
+        sent = client.queries[0]
+        self.assertIn("## Recon context", sent)
+        self.assertIn("/api/v1/orgs — GET", sent)
+        self.assertIn("## Your assignment", sent)
+        self.assertIn("hit /api/v1/orgs hard", sent)
+
+    def test_no_recon_summary_sends_bare_assignment(self):
+        from tools import PlanEntry
+        client = FakeSDKClient([])
+
+        class _Managed:
+            def __init__(self):
+                self.client = client
+
+            async def aclose(self):
+                pass
+
+        async def fake_create_worker(*args, **kwargs):
+            w = controller.WorkerState(worker_id=args[0], options=None)
+            w.client = client
+            w.managed = _Managed()
+            w.alive = True
+            return w
+
+        original = controller.create_worker
+        controller.create_worker = fake_create_worker
+        try:
+            plan = [PlanEntry(worker_id=2, assignment="bare assignment")]
+            _run(controller.apply_plan_diff(
+                plan, [], CandidatePool(), "http://x",
+                None, None, max_workers=4,
+            ))
+        finally:
+            controller.create_worker = original
+
+        self.assertEqual(client.queries, ["bare assignment"])
 
 
 class TestCoalesceInApplyLoop(unittest.TestCase):
