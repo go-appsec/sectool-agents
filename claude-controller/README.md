@@ -61,6 +61,7 @@ python controller.py \
 | `--model` | no | `sonnet` | Model for the orchestrator (sonnet, opus, haiku) |
 | `--worker-model` | no | none | Override model for the Claude Code worker |
 | `--max-workers` | no | `4` | Maximum parallel workers the orchestrator can assign |
+| `--recon-budget` | no | `2` | Autonomous-turn cap for the initial recon worker (choices: `2`, `3`, `4`) |
 | `--verbose` | no | false | Print full worker and orchestrator outputs |
 | `--sectool-bin` | no | `sectool` | Path to the sectool binary (default: looked up on `PATH`) |
 
@@ -159,6 +160,15 @@ Each file has Title, Severity, Affected Endpoint, Description, Reproduction Step
 - **Max iterations**: `--max-iterations` caps the outer loop (default 30). Each iteration runs one autonomous worker phase + verification + direction, so an iteration can involve many underlying Claude turns.
 - **Cost ceiling**: Optional `--max-cost` flag halts the loop if total USD cost is exceeded. Checked after each phase.
 - **Autonomous budget per worker**: 1–20 turns, default 8, settable by the director via `continue_worker` / `expand_worker`.
+- **Recon budget**: The initial worker (worker 1) is hard-capped at `--recon-budget` turns (default 2, max 4) so the controller fans out to specialised workers quickly instead of letting recon over-run.
 - **Phase substep caps**: `VERIFICATION_MAX_SUBSTEPS=6`, `DIRECTION_MAX_SUBSTEPS=4` bound each orchestrator phase.
 - **Stall detection**: controller-observed via each worker's `escalation_reason`. Three consecutive silent escalations (no tool calls, no new flow IDs) issue a warning in the director prompt; four force a worker stop.
 - **Verification required**: findings are only filed after the verifier calls `file_finding` with non-empty `verification_notes`.
+
+## Graceful Shutdown (Ctrl-C)
+
+The controller installs a triple-Ctrl-C handler so an in-flight run can be wound down without losing already-collected work:
+
+1. **First Ctrl-C** — cancels in-flight worker tasks and skips the next direction phase, but still runs final verification on whatever candidates were already filed. Verified findings are written to `--findings-dir` as normal.
+2. **Second Ctrl-C** — aborts the current verification (or direction) substep mid-flight and dumps every still-pending candidate to disk as an `unverified-<candidate_id>-<slug>.md` file with a clear `UNVERIFIED` header. Useful when verification is taking too long but you don't want to lose the worker's evidence.
+3. **Third Ctrl-C** — force-exits via `os._exit(130)`. No teardown, no further writes.

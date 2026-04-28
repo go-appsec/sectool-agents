@@ -7,7 +7,6 @@ controller loop.
 
 from __future__ import annotations
 
-import contextvars
 import re
 import threading
 from dataclasses import dataclass, field
@@ -28,28 +27,6 @@ DIRECTION_SELF_REVIEW_MAX_ROUNDS = 2
 # Mirrors secagent's guardrail: models routinely confuse `done` with
 # `direction_done` on early iterations.
 MIN_ITERATIONS_FOR_DONE = 5
-
-# Per-task active worker id. Each worker's concurrent drain runs in its own
-# asyncio task; ContextVar isolates attribution across concurrent runs.
-_ACTIVE_WORKER_ID: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "active_worker_id", default=None,
-)
-
-
-def set_active_worker(worker_id: int | None):
-    """Set the active worker in the current asyncio task context.
-
-    Returns the contextvars Token for use with `reset_active_worker`.
-    """
-    return _ACTIVE_WORKER_ID.set(worker_id)
-
-
-def reset_active_worker(token) -> None:
-    _ACTIVE_WORKER_ID.reset(token)
-
-
-def current_worker_id() -> int | None:
-    return _ACTIVE_WORKER_ID.get()
 
 
 # ---------------------------------------------------------------------------
@@ -102,9 +79,10 @@ class FindingCandidate:
 class CandidatePool:
     """Thread-safe pool of worker-reported finding candidates.
 
-    Worker attribution is read from the `_ACTIVE_WORKER_ID` ContextVar set by
-    the controller around each worker's drain. This keeps attribution correct
-    under concurrent worker runs.
+    Worker attribution is supplied by the caller (`add(worker_id=...)`).
+    Per-worker MCP servers bake the worker_id into the tool handler's closure
+    so attribution is correct even when the SDK dispatches the handler on a
+    task other than the worker's drain task.
     """
 
     def __init__(self) -> None:
@@ -116,6 +94,7 @@ class CandidatePool:
     def add(
         self,
         *,
+        worker_id: int | None,
         title: str,
         severity: str,
         endpoint: str,
@@ -124,7 +103,6 @@ class CandidatePool:
         evidence_notes: str,
         reproduction_hint: str,
     ) -> str:
-        worker_id = current_worker_id()
         with self._lock:
             self._counter += 1
             cid = f"c{self._counter:03d}"
@@ -179,8 +157,8 @@ class CandidatePool:
     def ids_since_for_worker(self, counter_before: int, worker_id: int) -> list[str]:
         """IDs minted after `counter_before` attributed to `worker_id`.
 
-        Race-safe under concurrent worker runs when combined with the
-        `_ACTIVE_WORKER_ID` ContextVar.
+        Race-safe under concurrent worker runs because attribution is set at
+        `add()` time by the per-worker MCP server's closure.
         """
         with self._lock:
             out: list[str] = []
@@ -527,8 +505,51 @@ def extract_flow_ids(*sources: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def build_worker_mcp_server(candidates: CandidatePool) -> Any:
-    """SDK MCP server that exposes `report_finding_candidate` to workers."""
+_HTTP_METHOD_RE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b", re.I)
+_REPRO_KEYWORDS = ("replay", "curl", "request", "send", "POST", "GET")
+_MIN_REPRO_HINT_CHARS = 30
+_MIN_EVIDENCE_NOTES_CHARS = 20
+_MIN_SUMMARY_CHARS = 20
+
+
+def _validate_repro_hint(hint: str, flow_ids: list[str]) -> str | None:
+    """Return an error message if the hint is too sparse, else None.
+
+    Repro hints must give the verifier enough to actually re-run the test:
+    either a referenced flow_id (which the verifier can replay verbatim),
+    an HTTP method, or an explicit replay/curl/request keyword. Anything
+    less ("see flows", "test the login") forces the verifier to reverse-
+    engineer steps from the run summary, which we deliberately do not
+    pass through any more.
+    """
+    if len(hint) < _MIN_REPRO_HINT_CHARS:
+        return (
+            f"reproduction_hint too short ({len(hint)} chars, need ≥{_MIN_REPRO_HINT_CHARS}). "
+            "Spell out the repro step the verifier should run — e.g. "
+            "'Replay flow ab12cd with id=124, expect 403' or "
+            "'curl -X POST /api/x with body {…}, observe reflected payload'."
+        )
+    has_flow_ref = any(fid and fid in hint for fid in flow_ids)
+    has_method = bool(_HTTP_METHOD_RE.search(hint))
+    has_keyword = any(kw.lower() in hint.lower() for kw in _REPRO_KEYWORDS)
+    if not (has_flow_ref or has_method or has_keyword):
+        return (
+            "reproduction_hint must reference at least one of: a flow_id from "
+            "this report, an HTTP method (GET/POST/...), or 'replay'/'curl'/"
+            "'request'. The verifier needs an actionable step, not a paraphrase."
+        )
+    return None
+
+
+def build_worker_mcp_server(candidates: CandidatePool, worker_id: int) -> Any:
+    """SDK MCP server that exposes `report_finding_candidate` to workers.
+
+    Build one server per worker — `worker_id` is captured in the handler's
+    closure and used to attribute every candidate added through this server.
+    A shared server cannot work: the SDK dispatches MCP tool calls on a task
+    forked from its own runner, so any per-task attribution mechanism (e.g.
+    a ContextVar set on the worker's drain task) is invisible to the handler.
+    """
 
     @tool(
         "report_finding_candidate",
@@ -537,6 +558,9 @@ def build_worker_mcp_server(candidates: CandidatePool) -> Any:
             "Include proof flow IDs from your testing (replay_send, request_send, "
             "or proxy_poll). Do NOT write a full finding document — the "
             "orchestrator will reproduce the issue and file the formal finding. "
+            "reproduction_hint MUST be actionable: reference a flow_id, an "
+            "HTTP method, or a curl/replay command. The verifier does not "
+            "see your turn-by-turn run, so vague hints will be rejected. "
             "Returns a candidate_id confirmation."
         ),
         {
@@ -550,14 +574,26 @@ def build_worker_mcp_server(candidates: CandidatePool) -> Any:
                     "items": {"type": "string"},
                     "description": "Proof flow IDs. At least one required.",
                 },
-                "summary": {"type": "string", "description": "1-3 sentence description"},
+                "summary": {
+                    "type": "string",
+                    "description": "1-3 sentence description of the vulnerability.",
+                },
                 "evidence_notes": {
                     "type": "string",
-                    "description": "What makes this exploitable — response content, status codes, behavior.",
+                    "description": (
+                        "What makes this exploitable — response content, status "
+                        "codes, observed behavior. Be specific; this is how the "
+                        "verifier knows what to look for."
+                    ),
                 },
                 "reproduction_hint": {
                     "type": "string",
-                    "description": "How the orchestrator should re-run to verify.",
+                    "description": (
+                        "Step-by-step instruction the verifier will run. Must "
+                        "reference a flow_id, HTTP method, or curl/replay "
+                        "command. Example: 'Replay flow ab12cd with id=124; "
+                        "expect 403, observe 200 + member roster.'"
+                    ),
                 },
             },
             "required": [
@@ -590,14 +626,48 @@ def build_worker_mcp_server(candidates: CandidatePool) -> Any:
                 }],
                 "is_error": True,
             }
+        flow_ids_str = [str(f) for f in flow_ids]
+        summary = str(args.get("summary", "")).strip()
+        evidence_notes = str(args.get("evidence_notes", "")).strip()
+        reproduction_hint = str(args.get("reproduction_hint", "")).strip()
+        if len(summary) < _MIN_SUMMARY_CHARS:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Rejected: summary too short ({len(summary)} chars, "
+                        f"need ≥{_MIN_SUMMARY_CHARS}). Describe the bug in 1-3 sentences."
+                    ),
+                }],
+                "is_error": True,
+            }
+        if len(evidence_notes) < _MIN_EVIDENCE_NOTES_CHARS:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Rejected: evidence_notes too short ({len(evidence_notes)} "
+                        f"chars, need ≥{_MIN_EVIDENCE_NOTES_CHARS}). Cite the response "
+                        "content / status / behaviour that proves exploitability."
+                    ),
+                }],
+                "is_error": True,
+            }
+        repro_err = _validate_repro_hint(reproduction_hint, flow_ids_str)
+        if repro_err is not None:
+            return {
+                "content": [{"type": "text", "text": f"Rejected: {repro_err}"}],
+                "is_error": True,
+            }
         cid = candidates.add(
+            worker_id=worker_id,
             title=str(args.get("title", "")).strip() or "untitled",
             severity=severity,
             endpoint=str(args.get("endpoint", "")).strip(),
-            flow_ids=[str(f) for f in flow_ids],
-            summary=str(args.get("summary", "")).strip(),
-            evidence_notes=str(args.get("evidence_notes", "")).strip(),
-            reproduction_hint=str(args.get("reproduction_hint", "")).strip(),
+            flow_ids=flow_ids_str,
+            summary=summary,
+            evidence_notes=evidence_notes,
+            reproduction_hint=reproduction_hint,
         )
         return {
             "content": [{

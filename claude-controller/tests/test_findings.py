@@ -195,5 +195,51 @@ class TestFindingWriterSummaryForWorker(unittest.TestCase):
             self.assertNotIn("high", out)
 
 
+class TestWriteUnverifiedCandidate(unittest.TestCase):
+    """write_unverified_candidate writes a clearly-marked UNVERIFIED file."""
+
+    def _candidate(self) -> FindingCandidate:
+        return FindingCandidate(
+            candidate_id="c042",
+            worker_id=3,
+            title="Possible IDOR on /api/orgs/{id}",
+            severity="high",
+            endpoint="GET /api/orgs/123",
+            flow_ids=["fl0w01", "fl0w02"],
+            summary="GET on another org id returned 200 with member roster.",
+            evidence_notes="Status 200, body included member emails.",
+            reproduction_hint="Replay flow fl0w01 with id=124; expect 403.",
+        )
+
+    def test_writes_file_with_unverified_header(self):
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            path = fw.write_unverified_candidate(self._candidate())
+            self.assertTrue(os.path.exists(path))
+            with open(path) as f:
+                body = f.read()
+            self.assertIn("UNVERIFIED", body)
+            self.assertIn("Possible IDOR on /api/orgs/{id}", body)
+            self.assertIn("c042", body)
+            self.assertIn("worker", body.lower())
+            self.assertIn("fl0w01", body)
+            self.assertIn("Replay flow fl0w01", body)
+            # Filed-finding count must NOT advance — unverified is not a finding.
+            self.assertEqual(fw.count, 0)
+
+    def test_filename_includes_candidate_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            path = fw.write_unverified_candidate(self._candidate())
+            self.assertIn("unverified", os.path.basename(path))
+            self.assertIn("c042", os.path.basename(path))
+
+    def test_path_is_recorded_in_writer(self):
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            path = fw.write_unverified_candidate(self._candidate())
+            self.assertIn(path, fw.paths)
+
+
 if __name__ == "__main__":
     unittest.main()

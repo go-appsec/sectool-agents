@@ -1,6 +1,5 @@
 """Unit tests for tools.py — queue recording, phase gating, and flow IDs."""
 
-import asyncio
 import unittest
 
 from tools import (
@@ -17,95 +16,61 @@ from tools import (
     _reject_wrong_phase,
     coalesce_decisions,
     extract_flow_ids,
-    reset_active_worker,
-    set_active_worker,
 )
 
 
 class TestCandidatePool(unittest.TestCase):
-    def test_contextvar_attribution(self):
+    def test_worker_id_attribution(self):
         p = CandidatePool()
-        token = set_active_worker(3)
-        try:
-            cid = p.add(title="T", severity="medium", endpoint="/z", flow_ids=["qq11rr"],
-                        summary="s", evidence_notes="e", reproduction_hint="r")
-        finally:
-            reset_active_worker(token)
+        cid = p.add(worker_id=3, title="T", severity="medium", endpoint="/z",
+                    flow_ids=["qq11rr"], summary="s", evidence_notes="e",
+                    reproduction_hint="r")
         self.assertEqual(p.get(cid).worker_id, 3)
-
-    def test_contextvar_isolates_concurrent_tasks(self):
-        """Each asyncio task sees its own active_worker_id."""
-        p = CandidatePool()
-
-        async def add_as(worker_id: int, title: str, delay: float) -> str:
-            token = set_active_worker(worker_id)
-            try:
-                await asyncio.sleep(delay)  # interleave tasks
-                return p.add(title=title, severity="low", endpoint="/",
-                             flow_ids=["aaaa11"], summary="",
-                             evidence_notes="", reproduction_hint="")
-            finally:
-                reset_active_worker(token)
-
-        async def run_both():
-            return await asyncio.gather(
-                add_as(1, "from-1", 0.01),
-                add_as(2, "from-2", 0.0),
-            )
-
-        cid_a, cid_b = asyncio.run(run_both())
-        self.assertEqual(p.get(cid_a).worker_id, 1)
-        self.assertEqual(p.get(cid_b).worker_id, 2)
 
     def test_pending_excludes_verified_and_dismissed(self):
         p = CandidatePool()
-        c1 = p.add(title="A", severity="high", endpoint="/x", flow_ids=["a1b2c3"],
-                   summary="", evidence_notes="", reproduction_hint="")
-        c2 = p.add(title="B", severity="low", endpoint="/y", flow_ids=["d4e5f6"],
-                   summary="", evidence_notes="", reproduction_hint="")
-        c3 = p.add(title="C", severity="low", endpoint="/z", flow_ids=["g7h8i9"],
-                   summary="", evidence_notes="", reproduction_hint="")
+        c1 = p.add(worker_id=1, title="A", severity="high", endpoint="/x",
+                   flow_ids=["a1b2c3"], summary="", evidence_notes="",
+                   reproduction_hint="")
+        c2 = p.add(worker_id=1, title="B", severity="low", endpoint="/y",
+                   flow_ids=["d4e5f6"], summary="", evidence_notes="",
+                   reproduction_hint="")
+        c3 = p.add(worker_id=1, title="C", severity="low", endpoint="/z",
+                   flow_ids=["g7h8i9"], summary="", evidence_notes="",
+                   reproduction_hint="")
         p.mark(c1, "verified")
         p.mark(c3, "dismissed")
         self.assertEqual([c.candidate_id for c in p.pending()], [c2])
 
     def test_ids_since(self):
         p = CandidatePool()
-        p.add(title="a", severity="low", endpoint="/", flow_ids=["aaaa11"],
-              summary="", evidence_notes="", reproduction_hint="")
+        p.add(worker_id=1, title="a", severity="low", endpoint="/",
+              flow_ids=["aaaa11"], summary="", evidence_notes="",
+              reproduction_hint="")
         before = p.counter
-        p.add(title="b", severity="low", endpoint="/", flow_ids=["bbbb22"],
-              summary="", evidence_notes="", reproduction_hint="")
-        p.add(title="c", severity="low", endpoint="/", flow_ids=["cccc33"],
-              summary="", evidence_notes="", reproduction_hint="")
+        p.add(worker_id=1, title="b", severity="low", endpoint="/",
+              flow_ids=["bbbb22"], summary="", evidence_notes="",
+              reproduction_hint="")
+        p.add(worker_id=1, title="c", severity="low", endpoint="/",
+              flow_ids=["cccc33"], summary="", evidence_notes="",
+              reproduction_hint="")
         self.assertEqual(p.ids_since(before), ["c002", "c003"])
 
     def test_ids_since_for_worker_filters(self):
         p = CandidatePool()
-        # Worker 1 adds one
-        token = set_active_worker(1)
-        try:
-            p.add(title="w1", severity="low", endpoint="/", flow_ids=["aaaa11"],
-                  summary="", evidence_notes="", reproduction_hint="")
-        finally:
-            reset_active_worker(token)
+        p.add(worker_id=1, title="w1", severity="low", endpoint="/",
+              flow_ids=["aaaa11"], summary="", evidence_notes="",
+              reproduction_hint="")
         before = p.counter
-        # Worker 2 adds two
-        token = set_active_worker(2)
-        try:
-            p.add(title="w2a", severity="low", endpoint="/", flow_ids=["bbbb22"],
-                  summary="", evidence_notes="", reproduction_hint="")
-            p.add(title="w2b", severity="low", endpoint="/", flow_ids=["cccc33"],
-                  summary="", evidence_notes="", reproduction_hint="")
-        finally:
-            reset_active_worker(token)
-        # Worker 1 adds another
-        token = set_active_worker(1)
-        try:
-            p.add(title="w1b", severity="low", endpoint="/", flow_ids=["dddd44"],
-                  summary="", evidence_notes="", reproduction_hint="")
-        finally:
-            reset_active_worker(token)
+        p.add(worker_id=2, title="w2a", severity="low", endpoint="/",
+              flow_ids=["bbbb22"], summary="", evidence_notes="",
+              reproduction_hint="")
+        p.add(worker_id=2, title="w2b", severity="low", endpoint="/",
+              flow_ids=["cccc33"], summary="", evidence_notes="",
+              reproduction_hint="")
+        p.add(worker_id=1, title="w1b", severity="low", endpoint="/",
+              flow_ids=["dddd44"], summary="", evidence_notes="",
+              reproduction_hint="")
 
         self.assertEqual(p.ids_since_for_worker(before, 2), ["c002", "c003"])
         self.assertEqual(p.ids_since_for_worker(before, 1), ["c004"])
@@ -301,7 +266,7 @@ class TestCandidatePoolMark(unittest.TestCase):
     def _pool_with(self, *titles: str) -> tuple[CandidatePool, list[str]]:
         p = CandidatePool()
         ids = [
-            p.add(title=t, severity="low", endpoint="/x",
+            p.add(worker_id=1, title=t, severity="low", endpoint="/x",
                   flow_ids=["aaaa11"], summary="", evidence_notes="",
                   reproduction_hint="")
             for t in titles
@@ -474,6 +439,39 @@ class TestPlanWorkersHandler(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual([e.worker_id for e in entries], [1, 2])
         self.assertEqual(rej, [])
+
+
+class TestValidateRepoHint(unittest.TestCase):
+    """_validate_repro_hint guards against sparse hints reaching the verifier."""
+
+    def test_too_short_rejected(self):
+        from tools import _validate_repro_hint
+        err = _validate_repro_hint("see flows", ["aaaa11"])
+        self.assertIsNotNone(err)
+        self.assertIn("too short", err)
+
+    def test_paraphrase_without_actionable_content_rejected(self):
+        """Long but vague — no flow_id, no method, no replay/curl/request keyword."""
+        from tools import _validate_repro_hint
+        hint = "The endpoint is broken and exposes data when you try a different id."
+        err = _validate_repro_hint(hint, ["aaaa11"])
+        self.assertIsNotNone(err)
+        self.assertIn("flow_id", err)
+
+    def test_flow_id_reference_accepted(self):
+        from tools import _validate_repro_hint
+        err = _validate_repro_hint("Replay flow aaaa11 with id=124; expect 403.", ["aaaa11"])
+        self.assertIsNone(err)
+
+    def test_http_method_accepted(self):
+        from tools import _validate_repro_hint
+        err = _validate_repro_hint("Send a POST to /api/x with body {…}; observe reflected payload.", [])
+        self.assertIsNone(err)
+
+    def test_curl_keyword_accepted(self):
+        from tools import _validate_repro_hint
+        err = _validate_repro_hint("curl https://target/x?q=<script> and check the body for echo.", [])
+        self.assertIsNone(err)
 
 
 if __name__ == "__main__":

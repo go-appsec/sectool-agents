@@ -13,6 +13,7 @@ import asyncio
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -60,8 +61,6 @@ from tools import (
     build_worker_mcp_server,
     coalesce_decisions,
     extract_flow_ids,
-    reset_active_worker,
-    set_active_worker,
 )
 
 
@@ -261,6 +260,10 @@ class WorkerState:
     progress_none_streak: int = 0
     stall_warned: bool = False
     autonomous_budget: int = DEFAULT_AUTONOMOUS_BUDGET
+    # Per-worker hard cap on autonomous_budget. None = use MAX_AUTONOMOUS_BUDGET.
+    # The recon worker is initialised with a low cap so the director cannot
+    # later expand it past the configured --recon-budget.
+    max_autonomous_budget: int | None = None
     escalation_reason: str | None = None
     autonomous_turns: list[WorkerTurnSummary] = field(default_factory=list)
 
@@ -359,57 +362,54 @@ async def collect_worker_turn(
 ) -> WorkerTurnSummary:
     """Drain one turn from a worker into a WorkerTurnSummary.
 
-    Sets the `_ACTIVE_WORKER_ID` ContextVar so any `report_finding_candidate`
-    calls attribute to this worker even under concurrent drains.
+    Worker attribution for finding candidates is closure-bound on the
+    per-worker MCP server (see `build_worker_mcp_server`), so it survives
+    the SDK dispatching tool handlers on its own runner task.
 
     No per-turn timeout: the SDK's `receive_response` generator is consumed
     to completion. Connection errors and external cancellations are handled
     by the caller (`run_worker_autonomous_turn`).
     """
     candidates_before = candidates.counter
-    token = set_active_worker(worker_id)
 
     summary = WorkerTurnSummary(worker_id=worker_id, iteration=iteration)
     pending_calls: dict[str, ToolCallRecord] = {}
 
-    try:
-        async for message in client.receive_response():
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        summary.assistant_text += (block.text or "")
-                        if verbose_tag:
-                            first = (block.text or "").strip().split("\n", 1)[0]
-                            if first:
-                                log(verbose_tag, f"text: {_short(first, 120)}")
-                    elif isinstance(block, ToolUseBlock):
-                        rec = ToolCallRecord(
-                            name=block.name,
-                            input_summary=_summarize_input(block.input or {}),
-                        )
-                        pending_calls[block.id] = rec
-                        summary.tool_calls.append(rec)
-                        for fid in extract_flow_ids(block.input or {}):
-                            if fid not in summary.flow_ids_touched:
-                                summary.flow_ids_touched.append(fid)
-                        if verbose_tag:
-                            log(verbose_tag, f"tool: {block.name}")
-            elif isinstance(message, UserMessage):
-                blocks = message.content if isinstance(message.content, list) else []
-                for block in blocks:
-                    if isinstance(block, ToolResultBlock):
-                        rec = pending_calls.pop(block.tool_use_id, None)
-                        if rec is not None:
-                            rec.result_summary = _summarize_result(block.content)
-                            rec.is_error = bool(block.is_error)
-                        for fid in extract_flow_ids(block.content):
-                            if fid not in summary.flow_ids_touched:
-                                summary.flow_ids_touched.append(fid)
-            elif isinstance(message, ResultMessage):
-                summary.cost_usd = message.total_cost_usd
-                break
-    finally:
-        reset_active_worker(token)
+    async for message in client.receive_response():
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    summary.assistant_text += (block.text or "")
+                    if verbose_tag:
+                        first = (block.text or "").strip().split("\n", 1)[0]
+                        if first:
+                            log(verbose_tag, f"text: {_short(first, 120)}")
+                elif isinstance(block, ToolUseBlock):
+                    rec = ToolCallRecord(
+                        name=block.name,
+                        input_summary=_summarize_input(block.input or {}),
+                    )
+                    pending_calls[block.id] = rec
+                    summary.tool_calls.append(rec)
+                    for fid in extract_flow_ids(block.input or {}):
+                        if fid not in summary.flow_ids_touched:
+                            summary.flow_ids_touched.append(fid)
+                    if verbose_tag:
+                        log(verbose_tag, f"tool: {block.name}")
+        elif isinstance(message, UserMessage):
+            blocks = message.content if isinstance(message.content, list) else []
+            for block in blocks:
+                if isinstance(block, ToolResultBlock):
+                    rec = pending_calls.pop(block.tool_use_id, None)
+                    if rec is not None:
+                        rec.result_summary = _summarize_result(block.content)
+                        rec.is_error = bool(block.is_error)
+                    for fid in extract_flow_ids(block.content):
+                        if fid not in summary.flow_ids_touched:
+                            summary.flow_ids_touched.append(fid)
+        elif isinstance(message, ResultMessage):
+            summary.cost_usd = message.total_cost_usd
+            break
 
     # Scope candidates to this worker so concurrent drains don't cross-attribute.
     summary.candidate_ids = candidates.ids_since_for_worker(candidates_before, worker_id)
@@ -466,11 +466,12 @@ def _build_worker_options(
 async def create_worker(
     worker_id: int,
     num_workers: int,
-    worker_tools_server,
+    candidates: CandidatePool,
     mcp_url: str,
     base: ClaudeAgentOptions,
     stderr_cb,
 ) -> WorkerState:
+    worker_tools_server = build_worker_mcp_server(candidates, worker_id)
     opts = _build_worker_options(base, worker_tools_server, mcp_url, worker_id, num_workers, stderr_cb)
     managed = ManagedSDKClient(options=opts)
     client = await managed.connect()
@@ -523,6 +524,65 @@ async def attempt_client_recovery(
         except Exception as exc:
             log(tag, f"Recovery attempt {attempt} failed: {exc}")
     return None
+
+
+async def _race_with_abort(
+    coro,
+    abort_event: asyncio.Event | None,
+):
+    """Await `coro`; if `abort_event` fires first, cancel coro and return (None, True).
+
+    On normal completion returns (result, False). When `abort_event` is None
+    this just awaits coro and returns (result, False) — the no-abort path.
+    """
+    if abort_event is None:
+        return await coro, False
+    task = asyncio.create_task(coro)
+    waiter = asyncio.create_task(abort_event.wait())
+    done, _ = await asyncio.wait(
+        [task, waiter], return_when=asyncio.FIRST_COMPLETED,
+    )
+    if task in done:
+        waiter.cancel()
+        try:
+            await waiter
+        except (asyncio.CancelledError, Exception):
+            pass
+        return task.result(), False
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+    return None, True
+
+
+async def reset_orchestrator_client(
+    old_managed: ManagedSDKClient | None,
+    options: ClaudeAgentOptions,
+    tag: str,
+) -> ManagedSDKClient | None:
+    """Tear down and rebuild an orchestrator client to drop accumulated context.
+
+    Builds the new client first; only closes the old one on successful
+    connect. Returns None on failure so the caller can fall back to the
+    existing client.
+    """
+    try:
+        managed = ManagedSDKClient(options=options)
+        await managed.connect()
+    except Exception as exc:
+        log(tag, f"Reset failed (keeping old client): {exc}")
+        return None
+    if old_managed is not None:
+        # The new client is already live, so an aclose failure on the old
+        # one is non-fatal — we just leak its resources for the rest of the
+        # run rather than crashing the phase.
+        try:
+            await old_managed.aclose()
+        except Exception as exc:
+            log(tag, f"Old client aclose failed (continuing): {exc}")
+    return managed
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +670,7 @@ async def run_all_workers_until_escalation(
     iteration: int,
     candidates: CandidatePool,
     verbose: bool = False,
+    shutdown_event: asyncio.Event | None = None,
 ) -> dict[int, list[WorkerTurnSummary]]:
     """Run every alive worker concurrently until all have escalated.
 
@@ -617,6 +678,10 @@ async def run_all_workers_until_escalation(
     scope after a prior timeout) is isolated: that worker is marked
     escalation_reason="error" for the main-loop recovery path, but the
     other workers' results are preserved.
+
+    When `shutdown_event` is provided and fires, all in-flight worker
+    tasks are cancelled — the per_worker handler treats this as the
+    same recovery path as a leaked cancel scope.
     """
     async def per_worker(w: WorkerState) -> tuple[int, list[WorkerTurnSummary]]:
         w.escalation_reason = None
@@ -645,6 +710,16 @@ async def run_all_workers_until_escalation(
     if not alive:
         return {}
     tasks = [asyncio.create_task(per_worker(w)) for w in alive]
+
+    watcher: asyncio.Task | None = None
+    if shutdown_event is not None:
+        async def _watch_shutdown() -> None:
+            await shutdown_event.wait()
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+        watcher = asyncio.create_task(_watch_shutdown())
+
     results: dict[int, list[WorkerTurnSummary]] = {}
     for t in tasks:
         try:
@@ -655,6 +730,13 @@ async def run_all_workers_until_escalation(
             # itself is cancelled we still don't want to crash the whole run.
             log("worker", "Task await cancelled; continuing with remaining workers.")
             _clear_leaked_cancellations("worker")
+
+    if watcher is not None and not watcher.done():
+        watcher.cancel()
+        try:
+            await watcher
+        except (asyncio.CancelledError, Exception):
+            pass
     # Always drain leaked cancellations before returning to the main task.
     # A cancel-scope leak from one worker's timeout can otherwise poison the
     # main loop's next await (e.g. attempt_worker_recovery's asyncio.sleep).
@@ -732,6 +814,23 @@ def _format_pending_candidates(candidates: CandidatePool) -> str:
     return _format_pending_candidates_list(candidates.pending())
 
 
+def _format_pending_candidates_brief(pending: list[FindingCandidate]) -> str:
+    """One-line-per-candidate roster for the director.
+
+    Bounded and cheap: a busy run with 20 pending candidates is ~1.6KB.
+    The director uses this to write `DO NOT TEST:` exclusion blocks into
+    worker assignments — it does not need full reproduction hints.
+    """
+    if not pending:
+        return ""
+    lines = ["**Pending candidates (filed but not yet verified — keep workers off these):**"]
+    for c in pending:
+        lines.append(
+            f"- `{c.candidate_id}` [{c.severity}] {c.title} — {c.endpoint} (worker {c.worker_id})"
+        )
+    return "\n".join(lines)
+
+
 def _format_status_line(
     iteration: int, max_iter: int,
     total_cost: float, max_cost: float | None,
@@ -760,8 +859,6 @@ def _format_stall_warnings(workers: list[WorkerState]) -> str:
 
 def _build_verifier_prompt(
     *,
-    workers: list[WorkerState],
-    worker_runs: dict[int, list[WorkerTurnSummary]],
     pending: list[FindingCandidate],
     findings_summary: str,
     iteration: int, max_iter: int,
@@ -775,20 +872,9 @@ def _build_verifier_prompt(
         "",
         _format_pending_candidates_list(pending),
         "",
-        "**Worker autonomous runs this iteration:**",
-        "",
-    ]
-    for w in workers:
-        if not w.alive:
-            continue
-        parts.append(_format_autonomous_run(
-            w.worker_id, worker_runs.get(w.worker_id, []), w.escalation_reason,
-        ))
-        parts.append("")
-    parts.append(
         "Reproduce and dispose of every pending candidate. "
-        "`verification_done(summary)` when all are filed or dismissed."
-    )
+        "`verification_done(summary)` when all are filed or dismissed.",
+    ]
     return "\n".join(parts)
 
 
@@ -869,6 +955,7 @@ def _build_director_prompt(
     *,
     workers: list[WorkerState],
     worker_runs: dict[int, list[WorkerTurnSummary]],
+    pending_candidates: list[FindingCandidate],
     verification_summary: str,
     findings_summary: str,
     iteration: int, max_iter: int,
@@ -888,6 +975,10 @@ def _build_director_prompt(
         "",
         f"**Verification:** {verification_summary}",
     ]
+    pending_brief = _format_pending_candidates_brief(pending_candidates)
+    if pending_brief:
+        parts.append("")
+        parts.append(pending_brief)
     if stall_warnings:
         parts.append("")
         parts.append(stall_warnings)
@@ -1054,23 +1145,31 @@ async def run_phase_substep(
 
 async def run_verification_phase(
     managed: ManagedSDKClient,
-    options: ClaudeAgentOptions,
+    options: ClaudeAgentOptions | None,
     decisions: DecisionQueue,
     candidates: CandidatePool,
     finding_writer: FindingWriter,
-    worker_runs: dict[int, list[WorkerTurnSummary]],
-    workers: list[WorkerState],
     iteration: int,
     max_iter: int,
     total_cost: float,
     max_cost: float | None,
     verbose: bool,
+    abort_event: asyncio.Event | None = None,
 ) -> tuple[ManagedSDKClient, float, str]:
     """Drive the verifier over up to VERIFICATION_MAX_SUBSTEPS substeps.
 
     Applies findings/dismissals incrementally so each substep's prompt
     reflects the current state. Exits when the verifier calls
     `verification_done`, when no pending candidates remain, or at the cap.
+
+    Resets the verifier client before iteration ≥ 2 to drop the prior
+    iteration's context. This is a cost-vs-context trade-off: carrying
+    the prior iteration's transcript would help the verifier recognise
+    re-reports of an already-dismissed candidate, but each candidate
+    arrives with self-contained evidence (flow_ids, reproduction_hint,
+    summary) and the per-iteration context cost grows quickly. We
+    favour reset; if false-positive recurrence becomes a real problem,
+    revisit this trade-off rather than the comment.
     """
     decisions.begin_phase(PHASE_VERIFICATION)
     phase_cost = 0.0
@@ -1079,20 +1178,33 @@ async def run_verification_phase(
         log("verify", "No pending candidates; skipping verification phase.")
         return managed, phase_cost, "No pending candidates this iteration."
 
+    # Per-iteration verifier reset to prevent context compounding. Iter 1
+    # uses the freshly-spawned verifier from run() startup. options=None
+    # is the test-mode signal — skip reset.
+    if options is not None and iteration > 1:
+        fresh = await reset_orchestrator_client(managed, options, "verify")
+        if fresh is not None:
+            managed = fresh
+            log("verify", f"Verifier client reset for iteration {iteration}.")
+
     applied_findings = 0
     applied_dismissals = 0
     processed_merges = 0
     successful_merges: list[FindingMerged] = []
 
     for substep in range(1, VERIFICATION_MAX_SUBSTEPS + 1):
+        if abort_event is not None and abort_event.is_set():
+            log("verify",
+                f"Aborted by user at substep {substep}; "
+                f"{len(candidates.pending())} candidate(s) still pending.")
+            break
+
         pending = candidates.pending()
         if not pending:
             break
 
         if substep == 1:
             user_content = _build_verifier_prompt(
-                workers=workers,
-                worker_runs=worker_runs,
                 pending=pending,
                 findings_summary=finding_writer.summary_for_verifier(),
                 iteration=iteration, max_iter=max_iter,
@@ -1110,9 +1222,16 @@ async def run_verification_phase(
                 max_substeps=VERIFICATION_MAX_SUBSTEPS,
             )
 
-        ok, cost = await run_phase_substep(
-            managed.client, user_content, PHASE_VERIFICATION, iteration, substep, verbose,
+        result, aborted = await _race_with_abort(
+            run_phase_substep(
+                managed.client, user_content, PHASE_VERIFICATION, iteration, substep, verbose,
+            ),
+            abort_event,
         )
+        if aborted:
+            log("verify", f"Substep {substep} aborted by user mid-flight.")
+            break
+        ok, cost = result
         if not ok:
             new_managed = await attempt_client_recovery(managed, options, "verify")
             if new_managed is not None:
@@ -1217,6 +1336,7 @@ async def run_direction_phase(
     decisions: DecisionQueue,
     workers: list[WorkerState],
     worker_runs: dict[int, list[WorkerTurnSummary]],
+    pending_candidates: list[FindingCandidate],
     verification_summary: str,
     findings_summary: str,
     iteration: int,
@@ -1229,6 +1349,7 @@ async def run_direction_phase(
     verbose: bool,
     max_workers: int,
     user_prompt: str,
+    abort_event: asyncio.Event | None = None,
 ) -> tuple[ManagedSDKClient, float]:
     """Drive the director over up to DIRECTION_MAX_SUBSTEPS substeps, then a
     mandatory self-review substep."""
@@ -1245,6 +1366,11 @@ async def run_direction_phase(
     no_progress_streak = 0
 
     for substep in range(1, DIRECTION_MAX_SUBSTEPS + 1):
+        if abort_event is not None and abort_event.is_set():
+            log("direct", f"Aborted by user at substep {substep}.")
+            aborted = True
+            break
+
         covered = {d.worker_id for d in decisions.worker_decisions}
         if decisions.plan is not None:
             covered |= {p.worker_id for p in decisions.plan}
@@ -1254,6 +1380,7 @@ async def run_direction_phase(
             user_content = _build_director_prompt(
                 workers=workers,
                 worker_runs=worker_runs,
+                pending_candidates=pending_candidates,
                 verification_summary=verification_summary,
                 findings_summary=findings_summary,
                 iteration=iteration, max_iter=max_iter,
@@ -1272,9 +1399,17 @@ async def run_direction_phase(
                 max_substeps=DIRECTION_MAX_SUBSTEPS,
             )
 
-        ok, cost = await run_phase_substep(
-            managed.client, user_content, PHASE_DIRECTION, iteration, substep, verbose,
+        result, raced = await _race_with_abort(
+            run_phase_substep(
+                managed.client, user_content, PHASE_DIRECTION, iteration, substep, verbose,
+            ),
+            abort_event,
         )
+        if raced:
+            log("direct", f"Substep {substep} aborted by user mid-flight.")
+            aborted = True
+            break
+        ok, cost = result
         if not ok:
             new_managed = await attempt_client_recovery(managed, options, "direct")
             if new_managed is not None:
@@ -1330,7 +1465,7 @@ async def run_direction_phase(
 async def apply_plan_diff(
     plan: list[PlanEntry],
     workers: list[WorkerState],
-    worker_tools_server,
+    candidates: CandidatePool,
     mcp_url: str,
     base_options: ClaudeAgentOptions,
     stderr_cb,
@@ -1371,7 +1506,7 @@ async def apply_plan_diff(
             log(f"worker {p.worker_id}", f"Spawning: {snippet}")
             try:
                 new_w = await create_worker(
-                    p.worker_id, num_workers_total, worker_tools_server, mcp_url, base_options, stderr_cb,
+                    p.worker_id, num_workers_total, candidates, mcp_url, base_options, stderr_cb,
                 )
                 new_w.assignment = p.assignment
                 new_w.last_instruction = p.assignment
@@ -1398,12 +1533,18 @@ async def apply_decision(
         await teardown_worker(worker)
         return
 
-    worker.autonomous_budget = max(1, min(MAX_AUTONOMOUS_BUDGET, decision.autonomous_budget))
+    cap = worker.max_autonomous_budget or MAX_AUTONOMOUS_BUDGET
+    requested = max(1, min(MAX_AUTONOMOUS_BUDGET, decision.autonomous_budget))
+    worker.autonomous_budget = min(requested, cap)
 
     snippet = _short(decision.instruction, 120)
+    capped_note = (
+        f" (capped from {requested} by recon limit)"
+        if requested > worker.autonomous_budget else ""
+    )
     log(f"iter {iteration}",
         f"Worker {worker.worker_id}: {decision.kind} "
-        f"(budget={worker.autonomous_budget}) — \"{snippet}\"")
+        f"(budget={worker.autonomous_budget}{capped_note}) — \"{snippet}\"")
 
     worker.last_instruction = decision.instruction
     try:
@@ -1423,6 +1564,30 @@ def update_worker_streaks(workers: list[WorkerState]) -> None:
         elif w.escalation_reason == "candidate" or produced_flows:
             w.progress_none_streak = 0
             w.stall_warned = False
+
+
+# ---------------------------------------------------------------------------
+# Shutdown helpers
+# ---------------------------------------------------------------------------
+
+
+def _dump_unverified_candidates(
+    candidates: CandidatePool, finding_writer: FindingWriter,
+) -> int:
+    """Write every still-pending candidate to disk as an UNVERIFIED finding.
+
+    Used by the double-Ctrl-C abort path: when the user aborts before the
+    verifier finishes, the candidate evidence the workers reported would
+    otherwise be lost. Returns the number of candidates dumped.
+    """
+    pending = candidates.pending()
+    if not pending:
+        return 0
+    log("ctrl-c", f"Dumping {len(pending)} unverified candidate(s) to disk.")
+    for c in pending:
+        path = finding_writer.write_unverified_candidate(c)
+        log("ctrl-c", f"Wrote unverified {c.candidate_id} → {path}")
+    return len(pending)
 
 
 # ---------------------------------------------------------------------------
@@ -1461,7 +1626,6 @@ async def run(config: Config) -> None:
         # `workers` is mutated below as workers spawn and retire; the lambda
         # closes over it so the `done` guard always sees the current alive set.
         workers: list[WorkerState] = []
-        worker_tools_server = build_worker_mcp_server(candidates)
         orch_tools_server = build_orch_mcp_server(
             decisions,
             alive_worker_ids=lambda: [w.worker_id for w in workers if w.alive],
@@ -1506,13 +1670,16 @@ async def run(config: Config) -> None:
             log("worker", "Connecting Claude Code worker 1...")
             try:
                 w1 = await create_worker(
-                    1, 1, worker_tools_server, mcp_url, base_options, stderr_cb,
+                    1, 1, candidates, mcp_url, base_options, stderr_cb,
                 )
+                w1.autonomous_budget = config.recon_budget
+                w1.max_autonomous_budget = config.recon_budget
                 workers.append(w1)
             except Exception as exc:
                 log("worker", f"Failed to connect worker 1: {exc}")
                 raise SystemExit(1) from exc
-            log("worker", "Worker 1 connected.")
+            log("worker",
+                f"Worker 1 connected (recon budget hard-capped at {config.recon_budget}).")
 
             # Verifier and director clients
             try:
@@ -1543,6 +1710,35 @@ async def run(config: Config) -> None:
                 if not await attempt_worker_recovery(workers[0]):
                     raise SystemExit(1)
 
+            # Triple-Ctrl-C graceful shutdown:
+            #   press 1 → cancel workers, transition to final verification
+            #   press 2 → abort current phase, dump pending candidates as
+            #             UNVERIFIED, exit
+            #   press 3 → force-exit (os._exit, no cleanup)
+            shutdown_event = asyncio.Event()
+            dump_unverified_event = asyncio.Event()
+            shutdown_count = 0
+            loop = asyncio.get_running_loop()
+
+            def _on_sigint() -> None:
+                nonlocal shutdown_count
+                shutdown_count += 1
+                if shutdown_count == 1:
+                    log("ctrl-c",
+                        "Stopping workers; transitioning to final verification. "
+                        "Press Ctrl-C again to abort verification and dump unverified candidates.")
+                    shutdown_event.set()
+                elif shutdown_count == 2:
+                    log("ctrl-c",
+                        "Aborting current phase; will dump unverified candidates and exit. "
+                        "Press Ctrl-C again to force-exit.")
+                    dump_unverified_event.set()
+                else:
+                    log("ctrl-c", "Force-exit.")
+                    os._exit(130)
+
+            loop.add_signal_handler(signal.SIGINT, _on_sigint)
+
             # Main loop
             for iteration in range(1, config.max_iterations + 1):
                 alive = [w for w in workers if w.alive]
@@ -1556,6 +1752,7 @@ async def run(config: Config) -> None:
                     f"Running {len(alive)} worker(s) autonomously ({budgets})...")
                 worker_runs = await run_all_workers_until_escalation(
                     alive, iteration, candidates, verbose=config.verbose,
+                    shutdown_event=shutdown_event,
                 )
 
                 # Recover any connection-errored workers. With ManagedSDKClient
@@ -1598,13 +1795,23 @@ async def run(config: Config) -> None:
                 # 5) Verification phase
                 verifier_managed, v_cost, v_summary = await run_verification_phase(
                     verifier_managed, verifier_options, decisions, candidates,
-                    finding_writer, worker_runs, workers, iteration,
+                    finding_writer, iteration,
                     config.max_iterations, total_cost, config.max_cost, config.verbose,
+                    abort_event=dump_unverified_event,
                 )
                 total_cost += v_cost
 
                 if config.max_cost is not None and total_cost >= config.max_cost:
                     log(f"iter {iteration}", f"Cost ceiling reached (${total_cost:.2f}). Stopping.")
+                    break
+
+                # On shutdown: skip direction and exit. Dump pending candidates
+                # to disk as UNVERIFIED if the user pressed Ctrl-C twice.
+                if shutdown_event.is_set():
+                    if dump_unverified_event.is_set():
+                        _dump_unverified_candidates(candidates, finding_writer)
+                    log(f"iter {iteration}",
+                        "Shutdown requested; skipping direction phase and exiting.")
                     break
 
                 # 6) Direction phase
@@ -1614,13 +1821,30 @@ async def run(config: Config) -> None:
                 )
                 director_managed, d_cost = await run_direction_phase(
                     director_managed, director_options, decisions, workers, worker_runs,
+                    candidates.pending(),
                     v_summary, finding_writer.summary_for_orchestrator(),
                     iteration, config.max_iterations, total_cost, config.max_cost,
                     finding_writer.count, stall_warnings, follow_up_hints, config.verbose,
                     config.max_workers,
                     config.prompt,
+                    abort_event=dump_unverified_event,
                 )
                 total_cost += d_cost
+
+                if dump_unverified_event.is_set():
+                    _dump_unverified_candidates(candidates, finding_writer)
+                    log(f"iter {iteration}",
+                        "Shutdown requested mid-direction; exiting.")
+                    break
+
+                # Single Ctrl-C pressed during direction: direction completed
+                # normally, but the user has asked to wind down. Exit before
+                # spawning more worker work. Without this check the loop would
+                # waste a full iteration before noticing shutdown_event.
+                if shutdown_event.is_set():
+                    log(f"iter {iteration}",
+                        "Shutdown requested during/after direction; exiting.")
+                    break
 
                 for w in workers:
                     if w.alive and w.progress_none_streak >= STALL_WARN_AFTER:
@@ -1644,7 +1868,7 @@ async def run(config: Config) -> None:
                 # 8) Plan diff
                 if decisions.plan is not None:
                     await apply_plan_diff(
-                        decisions.plan, workers, worker_tools_server, mcp_url,
+                        decisions.plan, workers, candidates, mcp_url,
                         base_options, stderr_cb, config.max_workers,
                     )
 

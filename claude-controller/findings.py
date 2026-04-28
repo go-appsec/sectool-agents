@@ -106,6 +106,34 @@ _MARKDOWN_TEMPLATE = """\
 """
 
 
+_UNVERIFIED_TEMPLATE = """\
+# UNVERIFIED — {title}
+
+> **WARNING:** This candidate was reported by a worker but the run was aborted
+> before the verifier could reproduce it. Treat this as a lead, not a confirmed
+> finding. The reported severity is the worker's claim, not a verified
+> assessment.
+
+- **Reported severity**: {severity}
+- **Reported endpoint**: {endpoint}
+- **Candidate ID**: {candidate_id}
+- **Reporting worker**: {worker_id}
+- **Flow IDs (worker session)**: {flow_ids}
+
+## Worker summary
+
+{summary}
+
+## Worker evidence notes
+
+{evidence_notes}
+
+## Reproduction hint
+
+{reproduction_hint}
+"""
+
+
 class FindingWriter:
     """Persists verified findings from `FindingFiled` records."""
 
@@ -213,6 +241,37 @@ class FindingWriter:
             "description": filed.description or "",
             "path": filepath,
         })
+        return filepath
+
+    def write_unverified_candidate(self, candidate: FindingCandidate) -> str:
+        """Write a still-pending candidate as an UNVERIFIED finding file.
+
+        Used when the run is aborted before verification could reproduce
+        every candidate. The file is clearly marked so a reviewer doesn't
+        mistake it for a confirmed finding.
+        """
+        os.makedirs(self.findings_dir, exist_ok=True)
+        slug = slugify(candidate.title) or "untitled"
+        if len(slug) > 60:
+            slug = slug[:60].rstrip("-")
+        filename = f"unverified-{candidate.candidate_id}-{slug}.md"
+        filepath = os.path.join(self.findings_dir, filename)
+
+        body = _UNVERIFIED_TEMPLATE.format(
+            title=candidate.title or "(no title)",
+            severity=candidate.severity or "unknown",
+            endpoint=candidate.endpoint or "N/A",
+            candidate_id=candidate.candidate_id,
+            worker_id=candidate.worker_id if candidate.worker_id is not None else "(unknown)",
+            flow_ids=", ".join(candidate.flow_ids) if candidate.flow_ids else "(none)",
+            summary=candidate.summary or "(none)",
+            evidence_notes=candidate.evidence_notes or "(none)",
+            reproduction_hint=candidate.reproduction_hint or "(none)",
+        )
+        with open(filepath, "w") as f:
+            f.write(body)
+
+        self.paths.append(filepath)
         return filepath
 
     def merge(

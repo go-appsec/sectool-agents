@@ -23,6 +23,7 @@ class Config:
     verbose: bool = False
     sectool_bin: str = "sectool"
     max_workers: int = 4
+    recon_budget: int = 2
 
     @property
     def orchestrator_model_id(self) -> str:
@@ -82,6 +83,10 @@ def parse_args() -> Config:
         "--max-workers", type=int, default=4,
         help="Maximum parallel workers the orchestrator can assign (default: 4)",
     )
+    parser.add_argument(
+        "--recon-budget", type=int, default=2, choices=[2, 3, 4],
+        help="Autonomous-turn cap for the initial recon worker (default: 2)",
+    )
     args = parser.parse_args()
     max_workers = max(1, min(5, args.max_workers))
     return Config(
@@ -96,4 +101,5 @@ def parse_args() -> Config:
         verbose=args.verbose,
         sectool_bin=args.sectool_bin,
         max_workers=max_workers,
+        recon_budget=args.recon_budget,
     )

@@ -24,6 +24,16 @@ Bundle observation with action so the worker doesn't stall waiting for clarifica
 
 Be specific: name endpoints, techniques, flow IDs. Generic ("look for IDOR") wastes a turn while the worker rediscovers context you already have.
 
+**Exclusion blocks are mandatory when other workers have active work.** When the prompt's "Pending candidates" or "Findings filed so far" lists are non-empty, every `continue_worker` / `expand_worker` / `plan_workers` instruction MUST include an explicit `DO NOT TEST:` block listing the relevant items by short name + endpoint. Workers do not see each other's candidates — without this exclusion text they will independently rediscover the same vulnerabilities, wasting turns and producing duplicates that the verifier has to dismiss. Example:
+
+```
+DO NOT TEST (already filed by other workers):
+- CORS origin reflection at /api/v1/orgs (c003)
+- gRPC reflection on data-harbor service (F2)
+```
+
+Tailor the exclusion list to each worker's slice — don't blanket-paste every candidate, only ones that overlap their assigned surface.
+
 ## Per-iteration rules
 
 - **Cover every alive worker** with exactly one of continue / expand / stop, or include them in a `plan_workers` entry.
@@ -40,6 +50,7 @@ Iteration 1 is the **attack-surface dispatch moment**. The per-iteration prompt 
 - For any non-trivial assignment (broader than a single named endpoint or flow), spawn 3–4 specialised workers via `plan_workers` with fresh worker_ids in iter 1. Default, not exception.
 - A silent, timed-out, or error-escalated worker 1 is NOT a reason to stay at one worker. Stop it and fan out — the new workers do their own recon on their slice.
 - Stay at one worker only when the assignment genuinely describes a single endpoint ("test the login form at POST /login") or a single flow.
+- The initial recon worker is hard-capped at a small turn budget (2–4). Don't expect deep tests from it — its job is to map the surface and hand off. Plan fan-out unconditionally.
 
 ## Verifier follow-up hints
 

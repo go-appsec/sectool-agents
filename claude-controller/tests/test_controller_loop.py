@@ -28,8 +28,6 @@ from tools import (
     ToolCallRecord,
     WorkerDecision,
     WorkerTurnSummary,
-    set_active_worker,
-    reset_active_worker,
 )
 
 
@@ -157,13 +155,12 @@ class TestCollectWorkerTurn(unittest.TestCase):
     def test_attributes_candidates_to_active_worker(self):
         pool = CandidatePool()
         # Pre-seed a prior candidate (other worker) to verify filtering.
-        token = set_active_worker(99)
-        try:
-            pool.add(title="other", severity="low", endpoint="/a",
-                     flow_ids=["aaaa11"], summary="", evidence_notes="", reproduction_hint="")
-        finally:
-            reset_active_worker(token)
+        pool.add(worker_id=99, title="other", severity="low", endpoint="/a",
+                 flow_ids=["aaaa11"], summary="", evidence_notes="",
+                 reproduction_hint="")
 
+        # In production, the per-worker MCP server bakes worker_id=2 into the
+        # closure for worker 2; the simulated handler does the same explicitly.
         class PoolSideEffectClient(FakeSDKClient):
             def receive_response(self_inner):
                 async def gen():
@@ -174,10 +171,8 @@ class TestCollectWorkerTurn(unittest.TestCase):
                             and b.name == "mcp__worker_tools__report_finding_candidate"
                             for b in m.content
                         ):
-                            # Simulate tool handler side effect — CandidatePool.add
-                            # reads from the contextvar set by collect_worker_turn.
-                            pool.add(title="new", severity="high", endpoint="/b",
-                                     flow_ids=["bbbb22"], summary="",
+                            pool.add(worker_id=2, title="new", severity="high",
+                                     endpoint="/b", flow_ids=["bbbb22"], summary="",
                                      evidence_notes="", reproduction_hint="")
                 return gen()
 
@@ -258,13 +253,20 @@ def _candidate_turn(pool: CandidatePool, wid: int) -> list:
 
 
 class _CandidateInjectingClient(FakeSDKClient):
-    """FakeSDKClient that triggers pool.add() when it sees a candidate tool."""
+    """FakeSDKClient that triggers pool.add() when it sees a candidate tool.
 
-    def __init__(self, scripts, pool: CandidatePool, add_on_turn_indexes: list[int]):
+    `worker_id` mirrors the per-worker MCP server's closure capture in
+    production — the simulated handler attributes its candidates the same
+    way the real `build_worker_mcp_server` does.
+    """
+
+    def __init__(self, scripts, pool: CandidatePool, add_on_turn_indexes: list[int],
+                 worker_id: int):
         super().__init__(scripts)
         self._pool = pool
         self._add_on = set(add_on_turn_indexes)
         self._turn_idx = -1
+        self._worker_id = worker_id
 
     def receive_response(self):
         self._turn_idx += 1
@@ -284,6 +286,7 @@ class _CandidateInjectingClient(FakeSDKClient):
                     for b in m.content:
                         if isinstance(b, ToolUseBlock) and b.name == "mcp__worker_tools__report_finding_candidate":
                             self._pool.add(
+                                worker_id=self._worker_id,
                                 title="injected", severity="high", endpoint="/x",
                                 flow_ids=["ijct01"], summary="", evidence_notes="",
                                 reproduction_hint="",
@@ -309,6 +312,7 @@ class TestRunWorkerAutonomousTurn(unittest.TestCase):
                 else:
                     client = _CandidateInjectingClient(
                         [_candidate_turn(pool, 5)], pool, add_on_turn_indexes=[0],
+                        worker_id=5,
                     )
                 w = self._make_worker(client)
                 s, reason = _run(controller.run_worker_autonomous_turn(w, 1, pool, verbose=False))
@@ -357,7 +361,8 @@ class TestRunWorkerUntilEscalation(unittest.TestCase):
                     client = FakeSDKClient(scripts)
                 else:
                     scripts = [_productive_turn("xyz01"), _candidate_turn(pool, 9), _productive_turn("no01")]
-                    client = _CandidateInjectingClient(scripts, pool, add_on_turn_indexes=[1])
+                    client = _CandidateInjectingClient(scripts, pool, add_on_turn_indexes=[1],
+                                                       worker_id=9)
                 w = self._make_worker(client, budget=3)
                 runs = _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
                 self.assertEqual(len(runs), 2)
@@ -466,6 +471,24 @@ class TestApplyDecision(unittest.TestCase):
         _run(controller.apply_decision(d, w, iteration=5))
         self.assertLessEqual(w.autonomous_budget, 20)
 
+    def test_max_autonomous_budget_caps_director_request(self):
+        """The recon worker's max_autonomous_budget must cap director expansions."""
+        w = self._make_worker()
+        w.max_autonomous_budget = 2  # mimics recon worker initialisation
+        d = WorkerDecision(kind="expand", worker_id=7, instruction="dig deeper",
+                           progress="new", autonomous_budget=12)
+        _run(controller.apply_decision(d, w, iteration=5))
+        self.assertEqual(w.autonomous_budget, 2)
+
+    def test_max_autonomous_budget_allows_smaller_request(self):
+        """Director can still set budget below the cap."""
+        w = self._make_worker()
+        w.max_autonomous_budget = 4
+        d = WorkerDecision(kind="continue", worker_id=7, instruction="ok",
+                           progress="new", autonomous_budget=2)
+        _run(controller.apply_decision(d, w, iteration=5))
+        self.assertEqual(w.autonomous_budget, 2)
+
 
 # ---------------------------------------------------------------------------
 # Prompt formatting
@@ -487,7 +510,7 @@ class TestPromptFormatting(unittest.TestCase):
 
     def test_pending_candidates_populated(self):
         pool = CandidatePool()
-        pool.add(title="XSS in search", severity="high", endpoint="GET /search",
+        pool.add(worker_id=1, title="XSS in search", severity="high", endpoint="GET /search",
                  flow_ids=["abcdef"], summary="reflection in q",
                  evidence_notes="script tag echoed", reproduction_hint="replay abcdef")
         out = controller._format_pending_candidates(pool)
@@ -510,7 +533,7 @@ class TestPromptFormatting(unittest.TestCase):
 
     def test_build_verifier_prompt(self):
         pool = CandidatePool()
-        pool.add(title="T", severity="low", endpoint="/x",
+        pool.add(worker_id=1, title="T", severity="low", endpoint="/x",
                  flow_ids=["zz1122"], summary="s",
                  evidence_notes="e", reproduction_hint="r")
         w = controller.WorkerState(worker_id=1, options=None)
@@ -518,8 +541,6 @@ class TestPromptFormatting(unittest.TestCase):
         turns = [_turn(1, 2, ["mcp__sectool__proxy_poll"], ["zz1122"], ["c001"])]
 
         msg = controller._build_verifier_prompt(
-            workers=[w],
-            worker_runs={1: turns},
             pending=pool.pending(),
             findings_summary="No findings filed yet.",
             iteration=2, max_iter=10,
@@ -529,7 +550,6 @@ class TestPromptFormatting(unittest.TestCase):
         self.assertIn("iteration 2/10", msg)
         self.assertIn("cost $0.50/$5.00", msg)
         self.assertIn("Pending finding candidates", msg)
-        self.assertIn("mcp__sectool__proxy_poll", msg)
         self.assertIn("verification_done", msg)
 
     def test_build_director_prompt(self):
@@ -540,6 +560,7 @@ class TestPromptFormatting(unittest.TestCase):
         msg = controller._build_director_prompt(
             workers=[w],
             worker_runs={2: turns},
+            pending_candidates=[],
             verification_summary="Filed 1, dismissed 0.",
             findings_summary="1 finding so far.",
             iteration=5, max_iter=10,
@@ -568,6 +589,7 @@ class TestPromptFormatting(unittest.TestCase):
         msg = controller._build_director_prompt(
             workers=[w],
             worker_runs={1: turns},
+            pending_candidates=[],
             verification_summary="No pending candidates this iteration.",
             findings_summary="No findings filed yet.",
             iteration=1, max_iter=10,
@@ -595,6 +617,7 @@ class TestPromptFormatting(unittest.TestCase):
         msg = controller._build_director_prompt(
             workers=workers,
             worker_runs={w.worker_id: [] for w in workers},
+            pending_candidates=[],
             verification_summary="ok",
             findings_summary="x",
             iteration=1, max_iter=10,
@@ -711,7 +734,7 @@ class _OrchSideEffectClient(FakeSDKClient):
 
 class TestVerificationPhase(unittest.TestCase):
     def _seed_pool(self, pool: CandidatePool) -> str:
-        return pool.add(title="XSS", severity="high", endpoint="/s",
+        return pool.add(worker_id=1, title="XSS", severity="high", endpoint="/s",
                         flow_ids=["fl0w01"], summary="", evidence_notes="",
                         reproduction_hint="")
 
@@ -735,7 +758,7 @@ class TestVerificationPhase(unittest.TestCase):
             fw = FindingWriter(td)
             new_managed, cost, summary = _run(controller.run_verification_phase(
                 _FakeManaged(client), None, decisions, pool, fw,
-                worker_runs={}, workers=[],
+                
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
         self.assertEqual(summary, "one filed")
@@ -756,7 +779,7 @@ class TestVerificationPhase(unittest.TestCase):
             fw = FindingWriter(td)
             _, _, summary = _run(controller.run_verification_phase(
                 _FakeManaged(client), None, decisions, pool, fw,
-                worker_runs={}, workers=[],
+                
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
         self.assertIn("dismissed", summary)
@@ -764,7 +787,7 @@ class TestVerificationPhase(unittest.TestCase):
 
     def test_file_finding_without_supersedes_auto_resolves_matching_candidate(self):
         pool = CandidatePool()
-        cid = pool.add(title="Reflected XSS in search", severity="high",
+        cid = pool.add(worker_id=1, title="Reflected XSS in search", severity="high",
                        endpoint="GET /search", flow_ids=["fl0w01"],
                        summary="", evidence_notes="", reproduction_hint="")
         decisions = DecisionQueue()
@@ -787,7 +810,7 @@ class TestVerificationPhase(unittest.TestCase):
             fw = FindingWriter(td)
             _run(controller.run_verification_phase(
                 _FakeManaged(client), None, decisions, pool, fw,
-                worker_runs={}, workers=[],
+                
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
         self.assertEqual(fw.count, 1)
@@ -795,10 +818,10 @@ class TestVerificationPhase(unittest.TestCase):
 
     def test_file_finding_without_supersedes_leaves_unrelated_candidate_pending(self):
         pool = CandidatePool()
-        c_match = pool.add(title="Reflected XSS in search", severity="high",
+        c_match = pool.add(worker_id=1, title="Reflected XSS in search", severity="high",
                            endpoint="GET /search", flow_ids=["fl0w01"],
                            summary="", evidence_notes="", reproduction_hint="")
-        c_other = pool.add(title="SQL injection in login", severity="high",
+        c_other = pool.add(worker_id=1, title="SQL injection in login", severity="high",
                            endpoint="POST /login", flow_ids=["fl0w02"],
                            summary="", evidence_notes="", reproduction_hint="")
         decisions = DecisionQueue()
@@ -822,7 +845,7 @@ class TestVerificationPhase(unittest.TestCase):
             fw = FindingWriter(td)
             _run(controller.run_verification_phase(
                 _FakeManaged(client), None, decisions, pool, fw,
-                worker_runs={}, workers=[],
+                
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
         self.assertEqual(pool.get(c_match).status, "verified")
@@ -831,10 +854,10 @@ class TestVerificationPhase(unittest.TestCase):
     def test_explicit_supersedes_beats_auto_match(self):
         """If verifier lists supersedes, only those are resolved — no heuristic."""
         pool = CandidatePool()
-        c_explicit = pool.add(title="Some other title", severity="high",
+        c_explicit = pool.add(worker_id=1, title="Some other title", severity="high",
                               endpoint="POST /login", flow_ids=["fl0w01"],
                               summary="", evidence_notes="", reproduction_hint="")
-        c_similar = pool.add(title="Reflected XSS", severity="high",
+        c_similar = pool.add(worker_id=1, title="Reflected XSS", severity="high",
                              endpoint="GET /search", flow_ids=["fl0w02"],
                              summary="", evidence_notes="", reproduction_hint="")
         decisions = DecisionQueue()
@@ -857,7 +880,7 @@ class TestVerificationPhase(unittest.TestCase):
             fw = FindingWriter(td)
             _run(controller.run_verification_phase(
                 _FakeManaged(client), None, decisions, pool, fw,
-                worker_runs={}, workers=[],
+                
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
         # Explicit one is verified; similar-but-not-listed one was dismissed (not auto-verified)
@@ -872,12 +895,36 @@ class TestVerificationPhase(unittest.TestCase):
             fw = FindingWriter(td)
             _, cost, summary = _run(controller.run_verification_phase(
                 _FakeManaged(client), None, decisions, pool, fw,
-                worker_runs={}, workers=[],
+                
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
         self.assertEqual(cost, 0.0)
         self.assertEqual(client.queries, [])
         self.assertIn("No pending candidates", summary)
+
+
+    def test_aborts_when_abort_event_set_before_loop(self):
+        """If abort_event is already set entering the phase, the substep loop
+        breaks immediately without sending any prompts."""
+        pool = CandidatePool()
+        self._seed_pool(pool)
+        decisions = DecisionQueue()
+
+        client = _OrchSideEffectClient([], decisions, [])
+        abort = asyncio.Event()
+        abort.set()
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, cost, summary = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+                abort_event=abort,
+            ))
+        # No substep was attempted — abort fired before any client.query.
+        self.assertEqual(client.queries, [])
+        self.assertEqual(cost, 0.0)
+        # Pending candidate must remain pending (verifier never ran).
+        self.assertEqual(len(pool.pending()), 1)
 
 
 class TestDirectionPhase(unittest.TestCase):
@@ -913,6 +960,7 @@ class TestDirectionPhase(unittest.TestCase):
         )
         new_managed, cost = _run(controller.run_direction_phase(
             _FakeManaged(client), None, decisions, [w1, w2], worker_runs={},
+            pending_candidates=[],
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
             findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
@@ -945,6 +993,7 @@ class TestDirectionPhase(unittest.TestCase):
         )
         new_managed, cost = _run(controller.run_direction_phase(
             _FakeManaged(client), None, decisions, [w1], worker_runs={},
+            pending_candidates=[],
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
             findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
@@ -966,6 +1015,7 @@ class TestDirectionPhase(unittest.TestCase):
         )
         _run(controller.run_direction_phase(
             _FakeManaged(client), None, decisions, [w1], worker_runs={},
+            pending_candidates=[],
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
             findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
@@ -1006,6 +1056,7 @@ class TestDirectionPhase(unittest.TestCase):
         client = _OrchSideEffectClient(script, decisions, actions)
         _, cost = _run(controller.run_direction_phase(
             _FakeManaged(client), None, decisions, [w1], worker_runs={},
+            pending_candidates=[],
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
             findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
@@ -1294,10 +1345,10 @@ class TestFindingLifecycle(unittest.TestCase):
     def test_finding_and_dismissal_drains(self):
         pool = CandidatePool()
         decisions = DecisionQueue()
-        c1 = pool.add(title="XSS", severity="high", endpoint="GET /s",
+        c1 = pool.add(worker_id=1, title="XSS", severity="high", endpoint="GET /s",
                       flow_ids=["aaaa11"], summary="", evidence_notes="",
                       reproduction_hint="")
-        c2 = pool.add(title="SQLi", severity="critical", endpoint="POST /l",
+        c2 = pool.add(worker_id=1, title="SQLi", severity="critical", endpoint="POST /l",
                       flow_ids=["bbbb22"], summary="", evidence_notes="",
                       reproduction_hint="")
 
@@ -1331,10 +1382,10 @@ class TestFindingLifecycle(unittest.TestCase):
         from tools import FindingMerged
 
         pool = CandidatePool()
-        c1 = pool.add(title="XSS", severity="high", endpoint="GET /s",
+        c1 = pool.add(worker_id=1, title="XSS", severity="high", endpoint="GET /s",
                       flow_ids=["aaaa11"], summary="", evidence_notes="",
                       reproduction_hint="")
-        c2 = pool.add(title="XSS variant", severity="high", endpoint="GET /s2",
+        c2 = pool.add(worker_id=1, title="XSS variant", severity="high", endpoint="GET /s2",
                       flow_ids=["bbbb22"], summary="", evidence_notes="",
                       reproduction_hint="")
 
@@ -1380,7 +1431,7 @@ class TestVerifyDedup(unittest.TestCase):
     def test_dismiss_dedup_logs_once_per_id(self):
         """Repeated `dismiss_candidate` calls for one id must only log once."""
         pool = CandidatePool()
-        cid = pool.add(title="A", severity="low", endpoint="/x",
+        cid = pool.add(worker_id=1, title="A", severity="low", endpoint="/x",
                        flow_ids=["aaaa11"], summary="", evidence_notes="",
                        reproduction_hint="")
         decisions = DecisionQueue()
@@ -1404,7 +1455,7 @@ class TestVerifyDedup(unittest.TestCase):
                 fw = FindingWriter(td)
                 _run(controller.run_verification_phase(
                     _FakeManaged(client), None, decisions, pool, fw,
-                    worker_runs={}, workers=[],
+                    
                     iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
                 ))
         finally:
@@ -1420,7 +1471,7 @@ class TestVerifyDedup(unittest.TestCase):
     def test_dismiss_cannot_override_verified(self):
         """A1 + A4: once verified, a late dismissal must not downgrade."""
         pool = CandidatePool()
-        cid = pool.add(title="A", severity="high", endpoint="GET /x",
+        cid = pool.add(worker_id=1, title="A", severity="high", endpoint="GET /x",
                        flow_ids=["aaaa11"], summary="", evidence_notes="",
                        reproduction_hint="")
         decisions = DecisionQueue()
@@ -1443,7 +1494,7 @@ class TestVerifyDedup(unittest.TestCase):
             fw = FindingWriter(td)
             _run(controller.run_verification_phase(
                 _FakeManaged(client), None, decisions, pool, fw,
-                worker_runs={}, workers=[],
+                
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
         self.assertEqual(pool.get(cid).status, "verified")
@@ -1451,7 +1502,7 @@ class TestVerifyDedup(unittest.TestCase):
     def test_finding_duplicate_logged_once_per_substep(self):
         """A3: same title filed multiple times in one substep → one disk write."""
         pool = CandidatePool()
-        cid = pool.add(title="A", severity="high", endpoint="GET /x",
+        cid = pool.add(worker_id=1, title="A", severity="high", endpoint="GET /x",
                        flow_ids=["aaaa11"], summary="", evidence_notes="",
                        reproduction_hint="")
         decisions = DecisionQueue()
@@ -1474,7 +1525,7 @@ class TestVerifyDedup(unittest.TestCase):
             fw = FindingWriter(td)
             _run(controller.run_verification_phase(
                 _FakeManaged(client), None, decisions, pool, fw,
-                worker_runs={}, workers=[],
+                
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
             self.assertEqual(fw.count, 1)
@@ -1486,7 +1537,7 @@ class TestVerifyFallback(unittest.TestCase):
     def test_orphan_logged_when_no_match(self):
         """No strict match → candidate stays pending and orphan log fires."""
         pool = CandidatePool()
-        cid = pool.add(title="Reflected XSS in search", severity="high",
+        cid = pool.add(worker_id=1, title="Reflected XSS in search", severity="high",
                        endpoint="GET /search", flow_ids=["aaaa11"],
                        summary="", evidence_notes="", reproduction_hint="")
         decisions = DecisionQueue()
@@ -1516,7 +1567,7 @@ class TestVerifyFallback(unittest.TestCase):
                 fw = FindingWriter(td)
                 _run(controller.run_verification_phase(
                     _FakeManaged(client), None, decisions, pool, fw,
-                    worker_runs={}, workers=[],
+                    
                     iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
                 ))
         finally:
@@ -1572,6 +1623,7 @@ class TestDirectionEfficiency(unittest.TestCase):
         )
         _run(controller.run_direction_phase(
             _FakeManaged(client), None, decisions, [w1, w2], worker_runs={},
+            pending_candidates=[],
             verification_summary="ok", findings_summary="x",
             iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
             findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
@@ -1595,6 +1647,7 @@ class TestPromptBuilders(unittest.TestCase):
         msg = controller._build_director_prompt(
             workers=[alive, stopped],
             worker_runs={1: []},
+            pending_candidates=[],
             verification_summary="ok",
             findings_summary="x",
             iteration=3, max_iter=10,
@@ -1611,6 +1664,7 @@ class TestPromptBuilders(unittest.TestCase):
         msg = controller._build_director_prompt(
             workers=[alive],
             worker_runs={1: []},
+            pending_candidates=[],
             verification_summary="ok",
             findings_summary="x",
             iteration=3, max_iter=10,
@@ -1634,7 +1688,7 @@ class TestPromptBuilders(unittest.TestCase):
 
     def test_verifier_continue_lists_phase_progress(self):
         pool = CandidatePool()
-        pool.add(title="T", severity="low", endpoint="/x",
+        pool.add(worker_id=1, title="T", severity="low", endpoint="/x",
                  flow_ids=["aaaa11"], summary="", evidence_notes="",
                  reproduction_hint="")
         filed = [FindingFiled(
