@@ -7,6 +7,8 @@ Agents that drive [`sectool`](https://github.com/go-appsec/toolbox) in autonomou
 
 This repo is a home for multiple agent implementations. They all share the same agent contract (worker reports candidates, verifier reproduces and files, director plans the next iteration) — what differs is which SDK / model backend the agent runs on and which language it's written in.
 
+These agents are not a substitute for a skilled tester. If you are already proficient, using Claude Code interactively with the sectool MCP is faster and cheaper. Use the autonomous agents to broaden coverage and probe additional areas in parallel with your own testing.
+
 ## Prerequisites
 
 Every agent in this repo drives the `sectool` MCP API, which lives in the [go-appsec/toolbox](https://github.com/go-appsec/toolbox) repo and must be installed independently:
@@ -33,8 +35,9 @@ A Python controller built on the Claude Agent SDK. Workers run as Claude Code in
 
 Use `claude-controller` if:
 
-- You already pay for a Claude subscription via Claude Code and want to bill autonomous security exploration to that quota directly, without managing a separate API key.
-- You want the sharpest currently-available Claude models as workers and orchestrators with zero extra provider setup.
+- You prefer Anthropic models and want to bill autonomous exploration to your existing Claude subscription, with no separate API key required.
+- You want autonomous parallel probing: the director fans workers out across attack surface each iteration and can assign multiple workers to a promising area.
+- You want to expand coverage alongside manual testing, running the agent in the background while you focus elsewhere.
 
 See [`claude-controller/README.md`](claude-controller/README.md) for installation, flag reference, phase mechanics, and test instructions.
 

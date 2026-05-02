@@ -6,12 +6,19 @@ Autonomous security exploration controller that runs multiple Claude instances w
 
 - **Worker(s)** — Claude Code connected to sectool's MCP server and a small in-process `worker_tools` MCP server. Workers execute security tests with sectool (proxy, replay, crawl, OAST, analysis tools) and, when they find something suspicious, call `report_finding_candidate(...)` to flag it.
 - **Verifier** — dedicated Claude instance whose only job is to reproduce worker-reported candidates using the full sectool tool surface (`flow_get`, `replay_send`, `request_send`, `diff_flow`, `find_reflected`, `proxy_rule_*`, `crawl_*`, `oast_*`, …) and either `file_finding` or `dismiss_candidate`. Runs over multiple substeps per iteration so it can reflect between reproductions.
-- **Director** — dedicated Claude instance whose only job is to decide what each alive worker should do next (`continue_worker`, `expand_worker`, `stop_worker`, `plan_workers`, `done`) and how long it may run autonomously before escalating back (`autonomous_budget`). Also runs over multiple substeps per iteration.
+- **Director** — dedicated Claude instance whose only job is to decide what each alive worker should do next (`continue_worker`, `expand_worker`, `stop_worker`, `plan_workers`, `done`) and how long it may run autonomously before escalating back (`autonomous_budget`). Runs every iteration and issues a decision for every alive worker, regardless of whether candidates were filed.
 
 Splitting verification and direction into separate clients with separate system prompts forces each role to do its job thoroughly — the single-turn orchestrator of earlier versions tended to short-circuit both.
 
 All instances authenticate via Claude Code's built-in OAuth — no API key required.
 
+## When to use
+
+Use `claude-controller` when you want Anthropic models running autonomous, parallel security exploration billed to your existing Claude subscription, with no separate API key required. It is a good fit when:
+
+- **You prefer Anthropic models.** Workers and orchestrators run on Claude (Sonnet or Opus) with no extra provider setup.
+- **You want autonomous parallel probing.** The director fans workers out across attack surface each iteration and can assign multiple workers to a promising area, without requiring your attention at each step.
+- **You want to expand coverage alongside manual testing.** Start the controller against a target while you work elsewhere; it escalates confirmed findings automatically.
 ## Prerequisites
 
 - Python 3.10+
@@ -81,6 +88,21 @@ python controller.py \
 ```
 
 ## How It Works
+
+```
+   --prompt
+      │
+      ▼
+   recon problem
+      │
+      ▼
+   ┌──────────► workers explore ──► candidates ──► verifier ──┬──► file_finding
+   │              │                                           │
+   │              │                                           └──► dismiss
+   │              ▼
+   └───────── director steers
+              continue / expand / stop / spawn — or end_run to exit
+```
 
 1. **Launch MCP** — probes `--mcp-port`; if a server is already accepting requests, reuses it (and won't tear it down on exit). Otherwise starts `sectool mcp` as a subprocess on `--mcp-port` using the binary from `--sectool-bin` (or `PATH`). The controller does not build sectool; it must already be installed.
 2. **Connect worker 1, verifier, and director** — all three share the sectool MCP server; the workers get an in-process `worker_tools` MCP server (exposing `report_finding_candidate`), and the verifier and director each connect to the shared in-process `orch_tools` MCP server (tools are phase-gated — see below). The verifier gets the full sectool tool surface; the director gets only worker-control tools.
