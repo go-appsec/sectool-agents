@@ -25,7 +25,22 @@ See the individual agent READMEs for any additional language / runtime prerequis
 
 | Agent | Language | Backend | Auth |
 |-------|----------|---------|------|
+| [`secagent/`](secagent/) | Go | OpenAI-compatible chat completions (OpenAI, vLLM, llama.cpp, LM Studio, OpenRouter, …) | Endpoint-specific API key (or none for local) |
 | [`claude-controller/`](claude-controller/) | Python | Claude Agent SDK | Claude Code OAuth (uses your `claude` CLI session) |
+
+### [`secagent/`](secagent/)
+
+[![Vibe-Scale 3.0(V2|U1|T1): Significant AI with gaps](https://img.shields.io/badge/Vibe--Scale%203.0(V2%7CU1%7CT1)-Significant%20AI%20with%20gaps-ffe066)](https://github.com/vibesdk/vibe-scale/blob/main/scale/vibe-3.md#v2-u1-t1-score-30--significant-ai-with-gaps)
+
+A Go controller targeting any OpenAI-compatible chat-completions endpoint with tool-calling support. Workers, verifier, and director run as separate agents over a shared sectool MCP server, with phase-gated tool surfaces, layered context compaction, and an initial recon pass whose summary anchors every subsequent worker and the verifier.
+
+Use `secagent` if:
+
+- You want to drive the run with a local or self-hosted model (vLLM, llama.cpp, LM Studio, Ollama).
+- You want a single Go binary — suitable for CI workers, containerized pipelines.
+- You want structured JSON-line logs of every agent turn, tool call, phase transition, dedup verdict, async-merge outcome, stall warning, and finding write for full process visibility.
+
+See [`secagent/README.md`](secagent/README.md) for installation, flag reference, phase mechanics, and test instructions.
 
 ### [`claude-controller/`](claude-controller/)
 

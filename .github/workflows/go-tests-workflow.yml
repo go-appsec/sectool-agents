@@ -1,0 +1,50 @@
+name: Go Tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-tidy:
+    name: Verify Linting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: secagent/go.mod
+
+      - name: Set up golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.10.1/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.10.1
+
+      - name: Run lint check
+        run: make lint
+
+      - name: Run tidy check
+        run: |
+          (cd secagent && go mod tidy)
+          git diff --exit-code secagent/go.mod secagent/go.sum
+
+  test:
+    name: Verify Unit Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go:
+        - '1.26'
+        - '1.25'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Run unit tests
+        run: make test

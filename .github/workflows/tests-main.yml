@@ -10,3 +10,6 @@ permissions:
 jobs:
   claude-controller-tests:
     uses: ./.github/workflows/claude-controller-tests-workflow.yml
+
+  go-tests:
+    uses: ./.github/workflows/go-tests-workflow.yml

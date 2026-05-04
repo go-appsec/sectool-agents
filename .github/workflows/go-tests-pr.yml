@@ -1,0 +1,17 @@
+name: Go Tests - Pull Request
+
+on:
+  pull_request:
+    paths:
+      - 'secagent/**'
+      - '.golangci.yml'
+      - 'Makefile'
+      - '.github/workflows/go-tests-workflow.yml'
+      - '.github/workflows/go-tests-pr.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/go-tests-workflow.yml
