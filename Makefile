@@ -6,17 +6,12 @@ build:
 	cp secagent/bin/secagent bin/secagent
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ secagent/bin/
 	$(MAKE) -C secagent clean
 
 test:
 	$(MAKE) -C secagent test
-
-test-cover:
-	$(MAKE) -C secagent test-cover
-
-bench:
-	$(MAKE) -C secagent bench
+	cd claude-controller && python3 -m unittest discover tests
 
 lint:
 	$(MAKE) -C secagent lint
