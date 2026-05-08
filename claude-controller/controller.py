@@ -387,7 +387,7 @@ async def collect_worker_turn(
                     if verbose_tag:
                         first = (block.text or "").strip().split("\n", 1)[0]
                         if first:
-                            log(verbose_tag, f"text: {_short(first, 120)}")
+                            log(verbose_tag, _short(first, 120))
                 elif isinstance(block, ToolUseBlock):
                     rec = ToolCallRecord(
                         name=block.name,
@@ -398,8 +398,6 @@ async def collect_worker_turn(
                     for fid in extract_flow_ids(block.input or {}):
                         if fid not in summary.flow_ids_touched:
                             summary.flow_ids_touched.append(fid)
-                    if verbose_tag:
-                        log(verbose_tag, f"tool: {block.name}")
         elif isinstance(message, UserMessage):
             blocks = message.content if isinstance(message.content, list) else []
             for block in blocks:
@@ -568,7 +566,7 @@ async def synthesize_and_teardown_recon(
         summary_text = synth_turn.assistant_text.strip()
         if synth_turn.cost_usd:
             cost += synth_turn.cost_usd
-    except (ConnectionError, OSError) as exc:
+    except Exception as exc:
         log(f"worker {worker.worker_id}", f"Synthesis failed: {exc}")
 
     if not summary_text and worker.autonomous_turns:
@@ -698,7 +696,7 @@ async def run_worker_autonomous_turn(
         summary = await collect_worker_turn(
             worker.client, worker.worker_id, iteration, candidates, tag,
         )
-    except (ConnectionError, OSError) as exc:
+    except Exception as exc:
         log(f"worker {worker.worker_id}", f"Connection lost: {exc}")
         return None, "error"
 
@@ -727,7 +725,7 @@ async def run_worker_until_escalation(
                 await worker.client.query(
                     _build_worker_continue_prompt(findings_summary=""),
                 )
-            except (ConnectionError, OSError) as exc:
+            except Exception as exc:
                 log(f"worker {worker.worker_id}", f"Continue query failed: {exc}")
                 worker.escalation_reason = "error"
                 return run_turns
@@ -1172,65 +1170,54 @@ def _phase_tag(phase: str) -> str:
     return "verify" if phase == PHASE_VERIFICATION else "direct"
 
 
-def _print_phase_turn(
-    phase: str,
-    text: str,
-    tool_calls: list[str],
-    iteration: int,
-    substep: int,
-    verbose: bool,
-) -> None:
-    print(flush=True)
-    label = "Verifier" if phase == PHASE_VERIFICATION else "Director"
-    print(f"=== {label} (iter {iteration}, substep {substep}) ===", flush=True)
-    if verbose and text:
-        print(text, flush=True)
-    elif text:
-        print(_short(text, 500), flush=True)
-    if tool_calls:
-        counts: dict[str, int] = {}
-        for n in tool_calls:
-            counts[n] = counts.get(n, 0) + 1
-        ordered = sorted(counts.items())
-        summary = ", ".join(f"{n}×{c}" for n, c in ordered)
-        print(f"Tool calls: {summary}", flush=True)
-    else:
-        print("Tool calls: (none)", flush=True)
-    print("=" * 50, flush=True)
-    print(flush=True)
-
-
 async def run_phase_substep(
     client: ClaudeSDKClient,
     user_content: str,
     phase: str,
     iteration: int,
     substep: int,
-    verbose: bool,
+    verbose: bool,  # noqa: ARG001 — kept for API stability
 ) -> tuple[bool, float | None]:
-    """Send a substep message and drain. Returns (ok, cost). On error ok=False."""
-    text_parts: list[str] = []
-    tool_calls: list[str] = []
+    """Send a substep message and drain, streaming assistant text live.
+
+    Returns (ok, cost). On error ok=False. Tool calls are silent — the user
+    sees the verifier/director's reasoning text as it arrives, with a
+    closing line carrying the substep cost.
+    """
+    label = "Verifier" if phase == PHASE_VERIFICATION else "Director"
+    tag = _phase_tag(phase)
+    print(flush=True)
+    print(f"=== {label} (iter {iteration}, substep {substep}) ===", flush=True)
     cost: float | None = None
+    saw_text = False
     try:
         await client.query(user_content)
         async for msg in client.receive_response():
             if isinstance(msg, AssistantMessage):
                 for block in msg.content:
                     if isinstance(block, TextBlock):
-                        text_parts.append(block.text or "")
-                    elif isinstance(block, ToolUseBlock):
-                        tool_calls.append(block.name)
-                        if verbose:
-                            log(_phase_tag(phase), f"tool: {block.name}")
+                        chunk = (block.text or "").strip()
+                        if chunk:
+                            # Print first line live, truncate the rest
+                            lines = chunk.splitlines()
+                            if len(lines) == 1:
+                                print(_short(lines[0], 200), flush=True)
+                            else:
+                                print(_short(lines[0], 200), flush=True)
+                                print(f"  ... ({len(lines) - 1} more lines)", flush=True)
+                            saw_text = True
             elif isinstance(msg, ResultMessage):
                 cost = msg.total_cost_usd
                 break
-    except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
-        log(_phase_tag(phase), f"Substep error iter {iteration} sub {substep}: {exc}")
+    except Exception as exc:
+        log(tag, f"Substep error iter {iteration} sub {substep}: {exc}")
         return False, None
 
-    _print_phase_turn(phase, "\n".join(text_parts).strip(), tool_calls, iteration, substep, verbose)
+    if not saw_text:
+        print("(no text output)", flush=True)
+    cost_str = f" cost=${cost:.4f}" if cost is not None else ""
+    print(f"=== end {label} substep{cost_str} ===", flush=True)
+    print(flush=True)
     return True, cost
 
 
@@ -1595,7 +1582,7 @@ async def apply_plan_diff(
             w.stall_warned = False
             try:
                 await w.client.query(p.assignment)
-            except (ConnectionError, OSError):
+            except Exception:
                 await attempt_worker_recovery(w)
         else:
             if len(existing_ids) >= max_workers:
@@ -1661,7 +1648,7 @@ async def apply_decision(
     worker.last_instruction = decision.instruction
     try:
         await worker.client.query(decision.instruction)
-    except (ConnectionError, OSError):
+    except Exception:
         await attempt_worker_recovery(worker)
 
 
@@ -1743,9 +1730,10 @@ async def run(config: Config) -> None:
             alive_worker_ids=lambda: [w.worker_id for w in workers if w.alive],
         )
 
-        base_options = ClaudeAgentOptions(cwd=cwd, max_turns=100)
-        if config.worker_model_id:
-            base_options.model = config.worker_model_id
+        base_options = ClaudeAgentOptions(
+            cwd=cwd, max_turns=100,
+            model=config.worker_model_id or config.orchestrator_model_id,
+        )
 
         verifier_options = ClaudeAgentOptions(
             mcp_servers={
@@ -1828,7 +1816,7 @@ async def run(config: Config) -> None:
             workers[0].assignment = config.prompt
             try:
                 await workers[0].client.query(_RECON_KICKOFF)
-            except (ConnectionError, OSError) as exc:
+            except Exception as exc:
                 log("worker", f"Initial prompt failed: {exc}. Recovery...")
                 if not await attempt_worker_recovery(workers[0]):
                     raise SystemExit(1)
@@ -1899,15 +1887,6 @@ async def run(config: Config) -> None:
                         f"Worker {w.worker_id}: turns={len(w.autonomous_turns)} "
                         f"escalation={w.escalation_reason} cost=${cost_this:.4f}")
 
-                if config.verbose:
-                    for w in alive:
-                        if not w.autonomous_turns:
-                            continue
-                        print(f"\n--- Worker {w.worker_id} autonomous run (iter {iteration}) ---")
-                        for i, s in enumerate(w.autonomous_turns, 1):
-                            print(f"[turn {i}] {s.assistant_text}")
-                        print(f"--- End Worker {w.worker_id} autonomous run ---\n")
-
                 # 3b) Iter-1 only: harvest the recon worker's surface synthesis
                 # and tear it down. After this point the recon worker no
                 # longer exists; iter 2+ skips this block entirely.
@@ -1919,10 +1898,6 @@ async def run(config: Config) -> None:
                     log(f"iter {iteration}",
                         f"Recon synthesis captured ({len(recon_summary)} chars, "
                         f"cost=${synth_cost:.4f}).")
-                    if config.verbose:
-                        print("\n--- Recon summary ---")
-                        print(recon_summary)
-                        print("--- End recon summary ---\n")
 
                 if config.max_cost is not None and total_cost >= config.max_cost:
                     log(f"iter {iteration}", f"Cost ceiling reached (${total_cost:.2f}). Stopping.")
@@ -2051,7 +2026,7 @@ async def run(config: Config) -> None:
                         await w.client.query(_build_worker_continue_prompt(
                             findings_summary=worker_findings_summary,
                         ))
-                    except (ConnectionError, OSError):
+                    except Exception:
                         await attempt_worker_recovery(w)
 
                 # 11) Forced stop for stalled workers
