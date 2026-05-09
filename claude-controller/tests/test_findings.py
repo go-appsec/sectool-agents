@@ -85,13 +85,44 @@ class TestFindingWriter(unittest.TestCase):
                 "F1",
                 rationale="Same vuln, additional endpoint",
                 additional_endpoint="GET /lookup",
-                additional_evidence="param `q` reflected on /lookup as well",
             )
             self.assertEqual(merged, path)
             body = open(path).read()
-            self.assertIn("## Merge addendum (F1)", body)
-            self.assertIn("Additional endpoint:** GET /lookup", body)
-            self.assertIn("param `q` reflected", body)
+            self.assertIn("## Additional affected surfaces", body)
+            self.assertIn("- GET /lookup — Same vuln, additional endpoint", body)
+
+    def test_merge_repeated_appends_to_single_section(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            path = w.write(_make("Reflected XSS", endpoint="GET /search"))
+            w.merge("F1", rationale="endpoint two", additional_endpoint="GET /lookup")
+            w.merge("F1", rationale="endpoint three", additional_endpoint="POST /search-v2")
+            body = open(path).read()
+            # Single section heading, both bullets present.
+            self.assertEqual(body.count("## Additional affected surfaces"), 1)
+            self.assertIn("- GET /lookup — endpoint two", body)
+            self.assertIn("- POST /search-v2 — endpoint three", body)
+
+    def test_merge_without_endpoint_records_rationale(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            path = w.write(_make("Reflected XSS", endpoint="GET /search"))
+            w.merge("F1", rationale="stronger evidence on the same surface")
+            body = open(path).read()
+            self.assertIn("- _(same surface)_ — stronger evidence on the same surface", body)
+
+    def test_merge_with_evidence_note_renders_sub_bullet(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            path = w.write(_make("Reflected XSS", endpoint="GET /search"))
+            w.merge(
+                "F1",
+                rationale="same surface, stronger payload",
+                evidence_note="payload bypassed CSP via SVG",
+            )
+            body = open(path).read()
+            self.assertIn("- _(same surface)_ — same surface, stronger payload", body)
+            self.assertIn("  - payload bypassed CSP via SVG", body)
 
     def test_merge_unknown_finding_id_returns_none(self):
         with tempfile.TemporaryDirectory() as td:

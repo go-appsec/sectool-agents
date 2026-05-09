@@ -1650,10 +1650,7 @@ async def run_verification_phase(
                 mg.finding_id,
                 rationale=mg.rationale,
                 additional_endpoint=mg.additional_endpoint,
-                additional_evidence=mg.additional_evidence,
-                additional_reproduction_steps=mg.additional_reproduction_steps,
-                additional_verification_notes=mg.additional_verification_notes,
-                additional_impact=mg.additional_impact,
+                evidence_note=mg.evidence_note,
             )
             if path is None:
                 log("finding",

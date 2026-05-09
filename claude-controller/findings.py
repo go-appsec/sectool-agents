@@ -10,6 +10,8 @@ import re
 
 from tools import FindingCandidate, FindingFiled
 
+_ADDENDUM_HEADING = "## Additional affected surfaces"
+
 
 def slugify(text: str) -> str:
     text = text.lower().strip()
@@ -280,42 +282,36 @@ class FindingWriter:
         *,
         rationale: str,
         additional_endpoint: str = "",
-        additional_evidence: str = "",
-        additional_reproduction_steps: str = "",
-        additional_verification_notes: str = "",
-        additional_impact: str = "",
+        evidence_note: str = "",
     ) -> str | None:
-        """Append a verifier-supplied addendum to an existing finding.
+        """Append a verifier-supplied merge entry to an existing finding.
 
-        The verifier calls this when a new candidate represents the same
-        underlying vulnerability as a previously-filed finding (typically a
-        new endpoint surface or new evidence). Returns the finding's path on
-        success, None when `finding_id` doesn't resolve.
+        Adds one bullet to a single `## Additional affected surfaces`
+        section so repeated merges accumulate into a bounded list rather
+        than ballooning the file with per-merge multi-section blocks.
+        When `evidence_note` is provided, it is appended as a single
+        indented sub-bullet — useful for same-surface merges where the
+        new contribution is stronger evidence rather than a new endpoint.
+        Returns the finding's path on success, None when `finding_id`
+        doesn't resolve.
         """
         entry = self.get_by_finding_id(finding_id)
         if entry is None:
             return None
 
-        sections: list[str] = []
-        sections.append(f"\n\n## Merge addendum ({finding_id})\n")
-        sections.append(f"**Rationale:** {rationale.strip() or '(none)'}")
-        if additional_endpoint.strip():
-            sections.append(f"\n**Additional endpoint:** {additional_endpoint.strip()}")
-        if additional_evidence.strip():
-            sections.append("\n### Additional evidence\n")
-            sections.append(additional_evidence.strip())
-        if additional_reproduction_steps.strip():
-            sections.append("\n### Additional reproduction steps\n")
-            sections.append(additional_reproduction_steps.strip())
-        if additional_verification_notes.strip():
-            sections.append("\n### Additional verification notes\n")
-            sections.append(additional_verification_notes.strip())
-        if additional_impact.strip():
-            sections.append("\n### Impact addendum\n")
-            sections.append(additional_impact.strip())
+        ep_display = additional_endpoint.strip() or "_(same surface)_"
+        bullet = f"- {ep_display} — {rationale.strip() or '(no rationale)'}"
+        note = evidence_note.strip()
+        line = f"{bullet}\n  - {note}" if note else bullet
 
-        with open(entry["path"], "a") as f:
-            f.write("\n".join(sections) + "\n")
+        path = entry["path"]
+        with open(path) as f:
+            body = f.read()
+        needs_heading = _ADDENDUM_HEADING not in body
+        leading_nl = "" if body.endswith("\n") else "\n"
+        heading_block = f"\n{_ADDENDUM_HEADING}\n\n" if needs_heading else ""
+        with open(path, "a") as f:
+            f.write(f"{leading_nl}{heading_block}{line}\n")
 
         # Reflect merged content in the verifier-facing roster so the next
         # substep's `summary_for_verifier` shows the additional endpoint and
@@ -328,4 +324,4 @@ class FindingWriter:
                 extra_endpoints.append(ep_canon)
         merge_notes = entry.setdefault("merge_notes", [])
         merge_notes.append(rationale.strip())
-        return entry["path"]
+        return path

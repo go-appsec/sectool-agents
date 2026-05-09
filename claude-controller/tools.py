@@ -230,10 +230,7 @@ class FindingMerged:
     finding_id: str
     rationale: str
     additional_endpoint: str = ""
-    additional_evidence: str = ""
-    additional_reproduction_steps: str = ""
-    additional_verification_notes: str = ""
-    additional_impact: str = ""
+    evidence_note: str = ""
     supersedes_candidate_ids: list[str] = field(default_factory=list)
     follow_up_hint: str = ""
 
@@ -1014,13 +1011,18 @@ def build_orch_mcp_server(
     @tool(
         "merge_into_finding",
         (
-            "Merge a candidate's evidence into an already-filed finding instead "
-            "of filing a near-duplicate. Use when the candidate represents the "
-            "same underlying vulnerability as an existing finding (e.g. another "
-            "endpoint exhibiting the same flaw, or stronger evidence for an "
-            "already-filed issue). Reference the target by its `finding_id` "
-            "(e.g. 'F1', 'F2') from the findings list. Append-only: the merge "
-            "addendum is added to the existing finding's markdown, not a new file."
+            "Merge a candidate into an already-filed finding instead of "
+            "filing a near-duplicate. Use when the candidate represents the "
+            "same underlying vulnerability as an existing finding (typically "
+            "the same flaw on another endpoint, or stronger evidence on an "
+            "already-covered surface). Reference the target by its "
+            "`finding_id` (e.g. 'F1', 'F2') from the findings list. Adds one "
+            "bullet to the finding's `## Additional affected surfaces` "
+            "section — keep `rationale` to a single short sentence. Use "
+            "`evidence_note` for a single-line summary of stronger evidence "
+            "(e.g. a successful payload that bypasses a previously suspected "
+            "control). If the candidate would need a multi-paragraph writeup, "
+            "file it as a separate finding instead."
         ),
         {
             "type": "object",
@@ -1036,27 +1038,17 @@ def build_orch_mcp_server(
                 "additional_endpoint": {
                     "type": "string",
                     "default": "",
-                    "description": "If the merge adds a new affected endpoint, name it here.",
+                    "description": "If the merge adds a new affected endpoint, name it here (METHOD /path).",
                 },
-                "additional_evidence": {
+                "evidence_note": {
                     "type": "string",
                     "default": "",
-                    "description": "New observable proof — no flow IDs or session references.",
-                },
-                "additional_reproduction_steps": {
-                    "type": "string",
-                    "default": "",
-                    "description": "New reproduction steps — no flow IDs or session references.",
-                },
-                "additional_verification_notes": {
-                    "type": "string",
-                    "default": "",
-                    "description": "How you reproduced this variant — no flow IDs or session IDs.",
-                },
-                "additional_impact": {
-                    "type": "string",
-                    "default": "",
-                    "description": "Any expanded impact this addendum demonstrates.",
+                    "description": (
+                        "Optional single-line summary of new observable proof "
+                        "this candidate adds (e.g. 'payload bypassed CSP via "
+                        "SVG'). No flow IDs or session references. Rendered "
+                        "as a sub-bullet under the merge entry."
+                    ),
                 },
                 "supersedes_candidate_ids": {
                     "type": "array",
@@ -1098,10 +1090,7 @@ def build_orch_mcp_server(
             finding_id=finding_id,
             rationale=rationale,
             additional_endpoint=str(args.get("additional_endpoint", "")).strip(),
-            additional_evidence=str(args.get("additional_evidence", "")).strip(),
-            additional_reproduction_steps=str(args.get("additional_reproduction_steps", "")).strip(),
-            additional_verification_notes=str(args.get("additional_verification_notes", "")).strip(),
-            additional_impact=str(args.get("additional_impact", "")).strip(),
+            evidence_note=str(args.get("evidence_note", "")).strip(),
             supersedes_candidate_ids=[
                 str(c) for c in (args.get("supersedes_candidate_ids") or [])
             ],

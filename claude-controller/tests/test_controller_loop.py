@@ -1400,7 +1400,7 @@ class TestFindingLifecycle(unittest.TestCase):
             finding_id="F1",
             rationale="same vuln, additional endpoint",
             additional_endpoint="GET /s2",
-            additional_evidence="param `q` reflected on /s2 too",
+            evidence_note="param `q` reflected on /s2 too",
             supersedes_candidate_ids=[c2],
         ))
 
@@ -1415,7 +1415,7 @@ class TestFindingLifecycle(unittest.TestCase):
                     mg.finding_id,
                     rationale=mg.rationale,
                     additional_endpoint=mg.additional_endpoint,
-                    additional_evidence=mg.additional_evidence,
+                    evidence_note=mg.evidence_note,
                 ))
                 for cid in mg.supersedes_candidate_ids:
                     pool.mark(cid, "verified")
