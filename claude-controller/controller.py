@@ -99,6 +99,14 @@ def log(tag: str, msg: str) -> None:
 _pause_gate: asyncio.Event = asyncio.Event()
 _pause_gate.set()  # set = "go"; clear = "pause"
 
+# Auto-engaged when an AssistantMessage arrives with error="rate_limit". Shares
+# the same `_pause_gate` as the spacebar pause so callers don't need a second
+# wait point. Cleared only by the user pressing space (manual override) — there
+# is no auto-resume timer; rate-limit windows from Anthropic are typically on
+# the order of an hour and there's no machine-readable retry-after on the SDK
+# error literal.
+_rate_limited: bool = False
+
 
 class InflightRegistry:
     """Tracks currently-draining receive_response() loops by label."""
@@ -151,6 +159,7 @@ class StatusBar:
     def __init__(self) -> None:
         self._enabled = False
         self._paused = False
+        self._rate_limited = False
         self._iteration = 0
         self._height = 0
         self._width = 0
@@ -199,6 +208,10 @@ class StatusBar:
         self._paused = paused
         self.refresh()
 
+    def set_rate_limited(self, rate_limited: bool) -> None:
+        self._rate_limited = rate_limited
+        self.refresh()
+
     def set_iteration(self, iteration: int) -> None:
         self._iteration = iteration
         self.refresh()
@@ -219,13 +232,14 @@ class StatusBar:
             sys.stdout.write(f"\033[{self._height - 1};1H")
         snapshot = _inflight.snapshot()
         count = len(snapshot)
-        if self._paused:
+        if self._rate_limited or self._paused:
+            tag = "RATE-LIMITED" if self._rate_limited else "PAUSED"
             if count == 0:
-                msg = " [PAUSED — space to resume] idle "
+                msg = f" [{tag} — space to resume] idle "
             else:
                 labels = ", ".join(snapshot[:5])
                 more = f" +{count - 5} more" if count > 5 else ""
-                msg = f" [PAUSED — space to resume] {count} turn(s) finishing: {labels}{more} "
+                msg = f" [{tag} — space to resume] {count} turn(s) finishing: {labels}{more} "
         else:
             iter_part = f"iter {self._iteration}" if self._iteration else "starting"
             msg = f" [RUNNING] {iter_part} · in-flight={count} · space to pause "
@@ -247,7 +261,22 @@ _inflight: InflightRegistry = InflightRegistry()
 
 
 def toggle_pause() -> None:
-    """Flip the pause gate; called from the spacebar listener."""
+    """Flip the pause gate; called from the spacebar listener.
+
+    Spacebar also clears an auto-engaged rate-limit pause: when the controller
+    is paused due to a `rate_limit` response, pressing space resumes
+    immediately rather than toggling into a deeper "manual + rate-limited"
+    state. Resuming is the only thing the user can usefully do here, so the
+    keypress maps to that.
+    """
+    global _rate_limited
+    if _rate_limited:
+        _rate_limited = False
+        _pause_gate.set()
+        _status_bar.set_rate_limited(False)
+        if not _status_bar.enabled:
+            log("rate-lim", "Resumed (manual override).")
+        return
     if _pause_gate.is_set():
         _pause_gate.clear()
         _status_bar.set_paused(True)
@@ -258,6 +287,19 @@ def toggle_pause() -> None:
         _status_bar.set_paused(False)
         if not _status_bar.enabled:
             log("paused", "Resumed.")
+
+
+def engage_rate_limit_pause(assistant_text: str = "") -> None:
+    """Auto-pause on rate_limit response; spacebar is the only resume."""
+    global _rate_limited
+    if _rate_limited:
+        return  # already engaged; don't double-log
+    _rate_limited = True
+    _pause_gate.clear()
+    _status_bar.set_rate_limited(True)
+    snippet = _short(assistant_text.strip().replace("\n", " "), 160) if assistant_text else ""
+    detail = f" — {snippet}" if snippet else ""
+    log("rate-lim", f"Rate-limited{detail}. Press space to resume.")
 
 
 async def _status_tick() -> None:
@@ -600,6 +642,11 @@ async def collect_worker_turn(
                         for fid in extract_flow_ids(block.input or {}):
                             if fid not in summary.flow_ids_touched:
                                 summary.flow_ids_touched.append(fid)
+                if message.error == "rate_limit":
+                    summary.rate_limited = True
+                    summary.rate_limit_text = "".join(
+                        b.text for b in message.content if isinstance(b, TextBlock)
+                    )
             elif isinstance(message, UserMessage):
                 blocks = message.content if isinstance(message.content, list) else []
                 for block in blocks:
@@ -901,6 +948,13 @@ async def run_worker_autonomous_turn(
     except Exception as exc:
         log(f"worker {worker.worker_id}", f"Connection lost: {exc}")
         return None, "error"
+
+    if summary.rate_limited:
+        engage_rate_limit_pause(summary.rate_limit_text)
+        # Drop this worker's remaining autonomous budget for the iteration.
+        # The iteration's verify+direct still runs on whatever candidates the
+        # surviving turns produced; the pause holds before the next iteration.
+        return summary, "rate_limit"
 
     return summary, _classify_escalation(summary)
 
@@ -1393,29 +1447,43 @@ async def run_phase_substep(
     print(f"=== {label} (iter {iteration}, substep {substep}) ===", flush=True)
     cost: float | None = None
     saw_text = False
-    try:
-        await submit_query(client, user_content)
-        async with inflight(f"{label.lower()} sub {substep}"):
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, TextBlock):
-                            chunk = (block.text or "").strip()
-                            if chunk:
-                                # Print first line live, truncate the rest
-                                lines = chunk.splitlines()
-                                if len(lines) == 1:
-                                    print(_short(lines[0], 200), flush=True)
-                                else:
-                                    print(_short(lines[0], 200), flush=True)
-                                    print(f"  ... ({len(lines) - 1} more lines)", flush=True)
-                                saw_text = True
-                elif isinstance(msg, ResultMessage):
-                    cost = msg.total_cost_usd
-                    break
-    except Exception as exc:
-        log(tag, f"Substep error iter {iteration} sub {substep}: {exc}")
-        return False, None
+    # Retry on rate_limit: submit_query at the top blocks on the gate, so
+    # after engage_rate_limit_pause clears it (manual spacebar resume), the
+    # next loop iteration re-issues the same prompt. Other errors fall through
+    # to the existing exception path.
+    while True:
+        saw_rate_limit = False
+        try:
+            await submit_query(client, user_content)
+            async with inflight(f"{label.lower()} sub {substep}"):
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantMessage):
+                        for block in msg.content:
+                            if isinstance(block, TextBlock):
+                                chunk = (block.text or "").strip()
+                                if chunk:
+                                    # Print first line live, truncate the rest
+                                    lines = chunk.splitlines()
+                                    if len(lines) == 1:
+                                        print(_short(lines[0], 200), flush=True)
+                                    else:
+                                        print(_short(lines[0], 200), flush=True)
+                                        print(f"  ... ({len(lines) - 1} more lines)", flush=True)
+                                    saw_text = True
+                        if msg.error == "rate_limit":
+                            saw_rate_limit = True
+                            text = "".join(
+                                b.text for b in msg.content if isinstance(b, TextBlock)
+                            )
+                            engage_rate_limit_pause(text)
+                    elif isinstance(msg, ResultMessage):
+                        cost = msg.total_cost_usd
+                        break
+        except Exception as exc:
+            log(tag, f"Substep error iter {iteration} sub {substep}: {exc}")
+            return False, None
+        if not saw_rate_limit:
+            break
 
     if not saw_text:
         print("(no text output)", flush=True)

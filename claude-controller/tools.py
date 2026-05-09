@@ -55,6 +55,10 @@ class WorkerTurnSummary:
     flow_ids_touched: list[str] = field(default_factory=list)
     candidate_ids: list[str] = field(default_factory=list)
     cost_usd: float | None = None
+    # Set when the assistant message arrived with error="rate_limit"; the turn
+    # produced no useful work and is not counted against the autonomous budget.
+    rate_limited: bool = False
+    rate_limit_text: str = ""
 
 
 # ---------------------------------------------------------------------------

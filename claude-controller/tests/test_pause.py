@@ -4,6 +4,10 @@ Covers the pause gate (submit_query), the in-flight registry, the status
 bar's TTY-detection no-op behaviour, and a regex audit that every
 client.query call site routes through submit_query so the chokepoint
 discipline holds across future edits.
+
+Also covers the auto-engaged rate-limit pause: detection in
+collect_worker_turn / run_phase_substep, idempotent engage, spacebar
+override via toggle_pause, and substep retry once the gate clears.
 """
 
 import asyncio
@@ -11,7 +15,10 @@ import os
 import re
 import unittest
 
+from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
 import controller
+from tools import CandidatePool
 
 
 def _run(coro):
@@ -172,6 +179,141 @@ class TestChokepointAudit(unittest.TestCase):
             "Found client.query call(s) bypassing submit_query — pause gate "
             "would leak. Wrap with submit_query(client, ...).",
         )
+
+
+def _assistant(text: str, error: str | None = None) -> AssistantMessage:
+    return AssistantMessage(content=[TextBlock(text=text)], model="claude", error=error)
+
+
+def _result(cost: float | None = 0.0) -> ResultMessage:
+    return ResultMessage(
+        subtype="success" if cost is not None else "error",
+        duration_ms=0,
+        duration_api_ms=0,
+        is_error=cost is None,
+        num_turns=1,
+        session_id="s",
+        total_cost_usd=cost,
+    )
+
+
+class _ScriptedClient:
+    """Fake ClaudeSDKClient that yields a scripted batch per query() call.
+
+    Each call to query() pops the next batch off `batches`; receive_response()
+    then yields that batch. Used for collect_worker_turn / _run_phase_substep
+    drive-throughs without the real SDK.
+    """
+
+    def __init__(self, batches: list[list]) -> None:
+        self._batches = list(batches)
+        self.queries: list[str] = []
+        self._current: list = []
+        # When set, the client unblocks the rate-limit pause after yielding
+        # the current batch — used by tests that expect the substep loop to
+        # retry once the gate clears.
+        self.auto_resume: bool = False
+
+    async def query(self, prompt: str) -> None:
+        self.queries.append(prompt)
+        self._current = self._batches.pop(0) if self._batches else []
+
+    async def receive_response(self):
+        # `try/finally` is load-bearing: the substep loop `break`s on the
+        # ResultMessage, which runs aclose() on this generator. Without the
+        # finally, the auto-resume code below would never execute and the
+        # retry test would deadlock waiting on the gate.
+        try:
+            for msg in self._current:
+                yield msg
+        finally:
+            if self.auto_resume and self._batches:
+                controller._rate_limited = False
+                controller._pause_gate.set()
+
+
+def _reset_pause_state() -> None:
+    controller._pause_gate = asyncio.Event()
+    controller._pause_gate.set()
+    controller._rate_limited = False
+    controller._inflight = controller.InflightRegistry()
+    controller._status_bar = controller.StatusBar()
+
+
+class TestRateLimitGate(unittest.TestCase):
+    def setUp(self) -> None:
+        _reset_pause_state()
+
+    def test_engage_rate_limit_clears_gate(self):
+        controller.engage_rate_limit_pause("try again at 4:30pm")
+        self.assertTrue(controller._rate_limited)
+        self.assertFalse(controller._pause_gate.is_set())
+
+    def test_engage_is_idempotent(self):
+        controller.engage_rate_limit_pause("first")
+        controller.engage_rate_limit_pause("second")
+        self.assertTrue(controller._rate_limited)
+        self.assertFalse(controller._pause_gate.is_set())
+
+    def test_spacebar_clears_rate_limit_pause(self):
+        controller.engage_rate_limit_pause("rate-limited")
+        self.assertTrue(controller._rate_limited)
+        controller.toggle_pause()
+        self.assertFalse(controller._rate_limited)
+        self.assertTrue(controller._pause_gate.is_set())
+
+    def test_collect_worker_turn_flags_rate_limited(self):
+        client = _ScriptedClient([
+            [
+                _assistant("Service rate-limited; try again at 4:30pm.", error="rate_limit"),
+                _result(cost=None),
+            ],
+        ])
+
+        async def go():
+            await client.query("ignored")
+            candidates = CandidatePool()
+            return await controller.collect_worker_turn(client, 1, 1, candidates)
+
+        summary = _run(go())
+        self.assertTrue(summary.rate_limited)
+        self.assertIn("try again at 4:30pm", summary.rate_limit_text)
+
+    def test_substep_retries_after_resume(self):
+        """First batch is rate-limited, second succeeds; the substep loop
+        must retry without the caller resending."""
+        client = _ScriptedClient([
+            [
+                _assistant("rate-limited; try again at 5:00pm", error="rate_limit"),
+                _result(cost=None),
+            ],
+            [
+                _assistant("verification done"),
+                _result(cost=0.01),
+            ],
+        ])
+        # The scripted client clears the gate after the first batch yields,
+        # simulating a user pressing space to resume.
+        client.auto_resume = True
+
+        async def go():
+            return await controller.run_phase_substep(
+                client,
+                "verify candidates",
+                controller.PHASE_VERIFICATION,
+                iteration=1,
+                substep=1,
+                verbose=False,
+            )
+
+        ok, cost = _run(go())
+        self.assertTrue(ok)
+        self.assertEqual(cost, 0.01)
+        self.assertEqual(len(client.queries), 2)
+        # Second submit reuses the same prompt.
+        self.assertEqual(client.queries[0], client.queries[1])
+        self.assertFalse(controller._rate_limited)
+        self.assertTrue(controller._pause_gate.is_set())
 
 
 if __name__ == "__main__":

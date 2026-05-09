@@ -193,6 +193,8 @@ Press **space** while the controller is running to pause submission of any new C
 
 When `stdout` is a TTY, a status line at the bottom of the terminal shows the current state and how many turns are still draining (e.g. `[PAUSED — space to resume] 2 turn(s) finishing: worker 1, verifier sub 3`). When stdin/stdout is redirected (CI, `nohup`, piped) the feature is disabled silently and the controller behaves as before. Ctrl-C remains effective during a pause.
 
+A `rate_limit` response from Claude auto-engages the same gate; the status line shows `[RATE-LIMITED — space to resume]`. Press **space** once the window clears. Rate-limited workers drop their remaining autonomous budget; verifier and director substeps retry the same prompt on resume.
+
 ## Graceful Shutdown (Ctrl-C)
 
 The controller installs a triple-Ctrl-C handler so an in-flight run can be wound down without losing already-collected work:
