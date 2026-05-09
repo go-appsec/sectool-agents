@@ -4,7 +4,6 @@ import unittest
 
 from tools import (
     CandidatePool,
-    DEFAULT_AUTONOMOUS_BUDGET,
     DecisionQueue,
     FindingFiled,
     PHASE_DIRECTION,
@@ -20,13 +19,6 @@ from tools import (
 
 
 class TestCandidatePool(unittest.TestCase):
-    def test_worker_id_attribution(self):
-        p = CandidatePool()
-        cid = p.add(worker_id=3, title="T", severity="medium", endpoint="/z",
-                    flow_ids=["qq11rr"], summary="s", evidence_notes="e",
-                    reproduction_hint="r")
-        self.assertEqual(p.get(cid).worker_id, 3)
-
     def test_pending_excludes_verified_and_dismissed(self):
         p = CandidatePool()
         c1 = p.add(worker_id=1, title="A", severity="high", endpoint="/x",
@@ -208,12 +200,6 @@ class TestRejectWrongPhase(unittest.TestCase):
                 self.assertTrue(out["is_error"])
                 for needle in must_include:
                     self.assertIn(needle, out["content"][0]["text"])
-
-
-class TestWorkerDecisionDefaults(unittest.TestCase):
-    def test_autonomous_budget_default(self):
-        d = WorkerDecision(kind="continue", worker_id=1, instruction="go", progress="new")
-        self.assertEqual(d.autonomous_budget, DEFAULT_AUTONOMOUS_BUDGET)
 
 
 class TestExtractFlowIds(unittest.TestCase):

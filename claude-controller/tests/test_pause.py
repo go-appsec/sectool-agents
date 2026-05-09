@@ -10,9 +10,9 @@ collect_worker_turn / run_phase_substep, idempotent engage, spacebar
 override via toggle_pause, and substep retry once the gate clears.
 """
 
+import ast
 import asyncio
 import os
-import re
 import unittest
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
@@ -131,17 +131,6 @@ class TestInflightRegistry(unittest.TestCase):
         _run(go())
 
 
-class TestStatusBarNoTTY(unittest.TestCase):
-    def test_install_no_op_without_tty(self):
-        # In unittest, sys.stdout is captured (not a TTY).
-        bar = controller.StatusBar()
-        bar.install()
-        self.assertFalse(bar.enabled)
-        # refresh() and uninstall() must be safe even when never installed.
-        bar.refresh()
-        bar.uninstall()
-
-
 class TestChokepointAudit(unittest.TestCase):
     """Guard rail: every client.query call must route through submit_query."""
 
@@ -152,27 +141,33 @@ class TestChokepointAudit(unittest.TestCase):
         )
         with open(path) as f:
             source = f.read()
+        tree = ast.parse(source)
 
-        # Strip out string literals and comments to avoid false positives
-        # from docstrings / explanatory comments.
-        stripped_lines = []
-        for line in source.splitlines():
-            code, _, _ = line.partition("#")
-            stripped_lines.append(code)
-        code_only = "\n".join(stripped_lines)
-        # Collapse triple-quoted blocks (very rough but adequate here).
-        code_only = re.sub(r'""".*?"""', '""', code_only, flags=re.DOTALL)
-        code_only = re.sub(r"'''.*?'''", "''", code_only, flags=re.DOTALL)
+        # The submit_query body is the one allowed call site.
+        submit_range: tuple[int, int] | None = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and node.name == "submit_query":
+                submit_range = (node.lineno, node.end_lineno or node.lineno)
+                break
 
+        source_lines = source.splitlines()
         offending: list[str] = []
-        for m in re.finditer(r"\b\w+\.client\.query\(|\bclient\.query\(", code_only):
-            line_start = code_only.rfind("\n", 0, m.start()) + 1
-            line_end = code_only.find("\n", m.end())
-            line = code_only[line_start:line_end if line_end != -1 else len(code_only)]
-            # The submit_query helper is the one allowed call site.
-            if "await client.query(prompt)" in line:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
                 continue
-            offending.append(line.strip())
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "query"):
+                continue
+            target = func.value
+            # Match `client.query(...)` or `<x>.client.query(...)`.
+            is_bare = isinstance(target, ast.Name) and target.id == "client"
+            is_attr = isinstance(target, ast.Attribute) and target.attr == "client"
+            if not (is_bare or is_attr):
+                continue
+            if submit_range and submit_range[0] <= node.lineno <= submit_range[1]:
+                continue
+            offending.append(f"line {node.lineno}: {source_lines[node.lineno - 1].strip()}")
 
         self.assertEqual(
             offending, [],

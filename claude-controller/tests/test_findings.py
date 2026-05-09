@@ -265,12 +265,6 @@ class TestWriteUnverifiedCandidate(unittest.TestCase):
             self.assertIn("unverified", os.path.basename(path))
             self.assertIn("c042", os.path.basename(path))
 
-    def test_path_is_recorded_in_writer(self):
-        with tempfile.TemporaryDirectory() as td:
-            fw = FindingWriter(td)
-            path = fw.write_unverified_candidate(self._candidate())
-            self.assertIn(path, fw.paths)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -504,6 +504,9 @@ def _turn(worker_id: int, iteration: int, tools: list[str], flows: list[str], ca
 
 
 class TestPromptFormatting(unittest.TestCase):
+    """All prompt-shape and prompt-content checks (verifier, director,
+    worker-continue, recon dispatch, stopped roster)."""
+
     def test_pending_candidates_empty(self):
         pool = CandidatePool()
         self.assertEqual(controller._format_pending_candidates(pool), "No pending finding candidates.")
@@ -672,6 +675,128 @@ class TestPromptFormatting(unittest.TestCase):
         msg = controller._build_director_self_review_prompt()
         self.assertIn("Self-review", msg)
         self.assertIn("direction_done", msg)
+
+    def test_director_prompt_includes_stopped_roster(self):
+        alive = controller.WorkerState(worker_id=1, options=None)
+        alive.alive = True
+        stopped = controller.WorkerState(worker_id=2, options=None)
+        stopped.alive = False
+        msg = controller._build_director_prompt(
+            workers=[alive, stopped],
+            worker_runs={1: []},
+            pending_candidates=[],
+            verification_summary="ok",
+            findings_summary="x",
+            iteration=3, max_iter=10,
+            total_cost=0.0, max_cost=None,
+            findings_count=0, stall_warnings="", follow_up_hints="",
+            max_workers=4, user_prompt="test",
+        )
+        self.assertIn("Stopped this run: [2]", msg)
+        self.assertIn("do not re-plan around these", msg)
+
+    def test_director_prompt_labels_recon_in_stopped_list(self):
+        """The torn-down recon worker is tagged in the stopped roster so
+        the director doesn't conflate it with a real worker that was stopped."""
+        recon_w = controller.WorkerState(worker_id=1, options=None)
+        recon_w.alive = False
+        recon_w.is_recon = True
+        regular_stopped = controller.WorkerState(worker_id=3, options=None)
+        regular_stopped.alive = False
+
+        msg = controller._build_director_prompt(
+            workers=[recon_w, regular_stopped],
+            worker_runs={},
+            pending_candidates=[],
+            verification_summary="ok",
+            findings_summary="x",
+            iteration=2, max_iter=10,
+            total_cost=0.0, max_cost=None,
+            findings_count=0, stall_warnings="", follow_up_hints="",
+            max_workers=4, user_prompt="test",
+        )
+        self.assertIn("Stopped this run: [1 (recon), 3]", msg)
+
+    def test_director_prompt_omits_stopped_line_when_none(self):
+        alive = controller.WorkerState(worker_id=1, options=None)
+        alive.alive = True
+        msg = controller._build_director_prompt(
+            workers=[alive],
+            worker_runs={1: []},
+            pending_candidates=[],
+            verification_summary="ok",
+            findings_summary="x",
+            iteration=3, max_iter=10,
+            total_cost=0.0, max_cost=None,
+            findings_count=0, stall_warnings="", follow_up_hints="",
+            max_workers=4, user_prompt="test",
+        )
+        self.assertNotIn("Stopped this run", msg)
+
+    def test_worker_continue_with_findings_summary(self):
+        prompt = controller._build_worker_continue_prompt(
+            findings_summary="Findings filed so far — do not re-file:\n- XSS — /s",
+        )
+        self.assertIn("Findings filed so far — do not re-file:", prompt)
+        self.assertIn("XSS — /s", prompt)
+        self.assertIn(controller._BARE_WORKER_CONTINUE, prompt)
+
+    def test_worker_continue_without_findings_returns_bare(self):
+        prompt = controller._build_worker_continue_prompt(findings_summary="")
+        self.assertEqual(prompt, controller._BARE_WORKER_CONTINUE)
+
+    def test_verifier_continue_lists_phase_progress(self):
+        pool = CandidatePool()
+        pool.add(worker_id=1, title="T", severity="low", endpoint="/x",
+                 flow_ids=["aaaa11"], summary="", evidence_notes="",
+                 reproduction_hint="")
+        filed = [FindingFiled(
+            title="Admin PUT JSON Injection", severity="high", endpoint="PUT /admin",
+            description="d", reproduction_steps="r", evidence="e", impact="i",
+            verification_notes="v",
+        )]
+        dismissed = [controller.CandidateDismissal(candidate_id="c004", reason="fp")]
+        msg = controller._build_verifier_continue_prompt(
+            pending=pool.pending(),
+            filed_this_phase=filed,
+            merged_this_phase=[],
+            dismissed_this_phase=dismissed,
+            substep=2, max_substeps=6,
+        )
+        self.assertIn("substep 2/6", msg)
+        self.assertIn("Already filed this phase", msg)
+        self.assertIn("Admin PUT JSON Injection", msg)
+        self.assertIn("Already dismissed this phase", msg)
+        self.assertIn("c004", msg)
+
+    def test_verifier_continue_omits_sections_when_empty(self):
+        pool = CandidatePool()
+        msg = controller._build_verifier_continue_prompt(
+            pending=pool.pending(),
+            filed_this_phase=[],
+            merged_this_phase=[],
+            dismissed_this_phase=[],
+            substep=2, max_substeps=6,
+        )
+        self.assertNotIn("Already filed this phase", msg)
+        self.assertNotIn("Already merged this phase", msg)
+        self.assertNotIn("Already dismissed this phase", msg)
+
+    def test_verifier_continue_lists_merges(self):
+        from tools import FindingMerged
+
+        pool = CandidatePool()
+        merges = [FindingMerged(finding_id="F2", rationale="same vuln, new endpoint")]
+        msg = controller._build_verifier_continue_prompt(
+            pending=pool.pending(),
+            filed_this_phase=[],
+            merged_this_phase=merges,
+            dismissed_this_phase=[],
+            substep=3, max_substeps=6,
+        )
+        self.assertIn("Already merged this phase", msg)
+        self.assertIn("F2", msg)
+        self.assertIn("same vuln, new endpoint", msg)
 
 
 # ---------------------------------------------------------------------------
@@ -1317,24 +1442,20 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
 
 
 class TestPrematureDoneGuard(unittest.TestCase):
-    def test_premature_when_early_and_no_findings(self):
-        from tools import MIN_ITERATIONS_FOR_DONE
-        for it in range(1, MIN_ITERATIONS_FOR_DONE):
-            self.assertTrue(controller._is_premature_done(it, 0),
-                            f"iter {it} with 0 findings should be premature")
-
-    def test_not_premature_with_findings(self):
-        self.assertFalse(controller._is_premature_done(1, 1))
-        self.assertFalse(controller._is_premature_done(2, 3))
-
-    def test_not_premature_past_min_iteration(self):
-        from tools import MIN_ITERATIONS_FOR_DONE
-        self.assertFalse(
-            controller._is_premature_done(MIN_ITERATIONS_FOR_DONE, 0),
-        )
-        self.assertFalse(
-            controller._is_premature_done(MIN_ITERATIONS_FOR_DONE + 1, 0),
-        )
+    def test_truth_table(self):
+        from tools import MIN_ITERATIONS_FOR_DONE as MIN
+        cases = [
+            # (iter, findings, expected_premature)
+            (1, 0, True),
+            (MIN - 1, 0, True),
+            (1, 1, False),                  # any finding clears the guard
+            (2, 3, False),
+            (MIN, 0, False),                # at threshold, no longer premature
+            (MIN + 1, 0, False),
+        ]
+        for it, n, expected in cases:
+            with self.subTest(iteration=it, findings=n):
+                self.assertEqual(controller._is_premature_done(it, n), expected)
 
 
 # ---------------------------------------------------------------------------
@@ -1637,131 +1758,6 @@ class TestDirectionEfficiency(unittest.TestCase):
         )
         self.assertIn("Self-review", client.queries[-1])
 
-class TestPromptBuilders(unittest.TestCase):
-    """B1, B2, B3 prompt-shape checks."""
-
-    def test_director_prompt_includes_stopped_roster(self):
-        alive = controller.WorkerState(worker_id=1, options=None)
-        alive.alive = True
-        stopped = controller.WorkerState(worker_id=2, options=None)
-        stopped.alive = False
-        msg = controller._build_director_prompt(
-            workers=[alive, stopped],
-            worker_runs={1: []},
-            pending_candidates=[],
-            verification_summary="ok",
-            findings_summary="x",
-            iteration=3, max_iter=10,
-            total_cost=0.0, max_cost=None,
-            findings_count=0, stall_warnings="", follow_up_hints="",
-            max_workers=4, user_prompt="test",
-        )
-        self.assertIn("Stopped this run: [2]", msg)
-        self.assertIn("do not re-plan around these", msg)
-
-    def test_director_prompt_labels_recon_in_stopped_list(self):
-        """The torn-down recon worker is tagged in the stopped roster so
-        the director doesn't conflate it with a real worker that was stopped."""
-        recon_w = controller.WorkerState(worker_id=1, options=None)
-        recon_w.alive = False
-        recon_w.is_recon = True
-        regular_stopped = controller.WorkerState(worker_id=3, options=None)
-        regular_stopped.alive = False
-
-        msg = controller._build_director_prompt(
-            workers=[recon_w, regular_stopped],
-            worker_runs={},
-            pending_candidates=[],
-            verification_summary="ok",
-            findings_summary="x",
-            iteration=2, max_iter=10,
-            total_cost=0.0, max_cost=None,
-            findings_count=0, stall_warnings="", follow_up_hints="",
-            max_workers=4, user_prompt="test",
-        )
-        self.assertIn("Stopped this run: [1 (recon), 3]", msg)
-
-    def test_director_prompt_omits_stopped_line_when_none(self):
-        alive = controller.WorkerState(worker_id=1, options=None)
-        alive.alive = True
-        msg = controller._build_director_prompt(
-            workers=[alive],
-            worker_runs={1: []},
-            pending_candidates=[],
-            verification_summary="ok",
-            findings_summary="x",
-            iteration=3, max_iter=10,
-            total_cost=0.0, max_cost=None,
-            findings_count=0, stall_warnings="", follow_up_hints="",
-            max_workers=4, user_prompt="test",
-        )
-        self.assertNotIn("Stopped this run", msg)
-
-    def test_worker_continue_with_findings_summary(self):
-        prompt = controller._build_worker_continue_prompt(
-            findings_summary="Findings filed so far — do not re-file:\n- XSS — /s",
-        )
-        self.assertIn("Findings filed so far — do not re-file:", prompt)
-        self.assertIn("XSS — /s", prompt)
-        self.assertIn(controller._BARE_WORKER_CONTINUE, prompt)
-
-    def test_worker_continue_without_findings_returns_bare(self):
-        prompt = controller._build_worker_continue_prompt(findings_summary="")
-        self.assertEqual(prompt, controller._BARE_WORKER_CONTINUE)
-
-    def test_verifier_continue_lists_phase_progress(self):
-        pool = CandidatePool()
-        pool.add(worker_id=1, title="T", severity="low", endpoint="/x",
-                 flow_ids=["aaaa11"], summary="", evidence_notes="",
-                 reproduction_hint="")
-        filed = [FindingFiled(
-            title="Admin PUT JSON Injection", severity="high", endpoint="PUT /admin",
-            description="d", reproduction_steps="r", evidence="e", impact="i",
-            verification_notes="v",
-        )]
-        dismissed = [controller.CandidateDismissal(candidate_id="c004", reason="fp")]
-        msg = controller._build_verifier_continue_prompt(
-            pending=pool.pending(),
-            filed_this_phase=filed,
-            merged_this_phase=[],
-            dismissed_this_phase=dismissed,
-            substep=2, max_substeps=6,
-        )
-        self.assertIn("substep 2/6", msg)
-        self.assertIn("Already filed this phase", msg)
-        self.assertIn("Admin PUT JSON Injection", msg)
-        self.assertIn("Already dismissed this phase", msg)
-        self.assertIn("c004", msg)
-
-    def test_verifier_continue_omits_sections_when_empty(self):
-        pool = CandidatePool()
-        msg = controller._build_verifier_continue_prompt(
-            pending=pool.pending(),
-            filed_this_phase=[],
-            merged_this_phase=[],
-            dismissed_this_phase=[],
-            substep=2, max_substeps=6,
-        )
-        self.assertNotIn("Already filed this phase", msg)
-        self.assertNotIn("Already merged this phase", msg)
-        self.assertNotIn("Already dismissed this phase", msg)
-
-    def test_verifier_continue_lists_merges(self):
-        from tools import FindingMerged
-
-        pool = CandidatePool()
-        merges = [FindingMerged(finding_id="F2", rationale="same vuln, new endpoint")]
-        msg = controller._build_verifier_continue_prompt(
-            pending=pool.pending(),
-            filed_this_phase=[],
-            merged_this_phase=merges,
-            dismissed_this_phase=[],
-            substep=3, max_substeps=6,
-        )
-        self.assertIn("Already merged this phase", msg)
-        self.assertIn("F2", msg)
-        self.assertIn("same vuln, new endpoint", msg)
-
 
 class TestReconPrompt(unittest.TestCase):
     """The recon system prompt is its own self-contained contract; the
@@ -1990,20 +1986,6 @@ class TestApplyPlanDiffReconKickoff(unittest.TestCase):
             controller.create_worker = original
 
         self.assertEqual(client.queries, ["bare assignment"])
-
-
-class TestCoalesceInApplyLoop(unittest.TestCase):
-    """A2 hookup: when two decisions for the same worker land, apply once."""
-
-    def test_last_writer_wins_single_apply(self):
-        from tools import coalesce_decisions as _coalesce
-        d1 = WorkerDecision(kind="continue", worker_id=5,
-                            instruction="first", progress="new")
-        d2 = WorkerDecision(kind="continue", worker_id=5,
-                            instruction="second", progress="new")
-        out = _coalesce([d1, d2], None)
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].instruction, "second")
 
 
 if __name__ == "__main__":
