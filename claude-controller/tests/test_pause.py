@@ -18,6 +18,8 @@ import unittest
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 import controller
+import runtime
+import worker
 from tools import CandidatePool
 
 
@@ -38,15 +40,15 @@ class _RecorderClient:
 class TestPauseGate(unittest.TestCase):
     def setUp(self) -> None:
         # Reset module-level state between tests.
-        controller._pause_gate = asyncio.Event()
-        controller._pause_gate.set()
-        controller._inflight = controller.InflightRegistry()
+        runtime._pause_gate = asyncio.Event()
+        runtime._pause_gate.set()
+        runtime._inflight = runtime.InflightRegistry()
 
     def test_gate_passes_when_unpaused(self):
         client = _RecorderClient()
 
         async def go():
-            await controller.submit_query(client, "hello")
+            await runtime.submit_query(client, "hello")
 
         _run(go())
         self.assertEqual(client.queries, ["hello"])
@@ -55,13 +57,13 @@ class TestPauseGate(unittest.TestCase):
         client = _RecorderClient()
 
         async def go():
-            controller._pause_gate.clear()
-            task = asyncio.create_task(controller.submit_query(client, "hello"))
+            runtime._pause_gate.clear()
+            task = asyncio.create_task(runtime.submit_query(client, "hello"))
             # Give the task a chance to hit the gate.
             await asyncio.sleep(0)
             self.assertFalse(task.done())
             self.assertEqual(client.queries, [])
-            controller._pause_gate.set()
+            runtime._pause_gate.set()
             await task
             self.assertEqual(client.queries, ["hello"])
 
@@ -71,15 +73,15 @@ class TestPauseGate(unittest.TestCase):
         clients = [_RecorderClient() for _ in range(5)]
 
         async def go():
-            controller._pause_gate.clear()
+            runtime._pause_gate.clear()
             tasks = [
-                asyncio.create_task(controller.submit_query(c, f"q{i}"))
+                asyncio.create_task(runtime.submit_query(c, f"q{i}"))
                 for i, c in enumerate(clients)
             ]
             await asyncio.sleep(0)
             for t in tasks:
                 self.assertFalse(t.done())
-            controller._pause_gate.set()
+            runtime._pause_gate.set()
             await asyncio.gather(*tasks)
             for i, c in enumerate(clients):
                 self.assertEqual(c.queries, [f"q{i}"])
@@ -89,22 +91,22 @@ class TestPauseGate(unittest.TestCase):
     def test_toggle_pause_flips_event(self):
         # toggle_pause emits a log line in non-TTY mode; capture stdout to
         # keep test output clean.
-        controller._status_bar = controller.StatusBar()  # fresh, not installed
-        self.assertTrue(controller._pause_gate.is_set())
-        controller.toggle_pause()
-        self.assertFalse(controller._pause_gate.is_set())
-        controller.toggle_pause()
-        self.assertTrue(controller._pause_gate.is_set())
+        runtime._status_bar = runtime.StatusBar()  # fresh, not installed
+        self.assertTrue(runtime._pause_gate.is_set())
+        runtime.toggle_pause()
+        self.assertFalse(runtime._pause_gate.is_set())
+        runtime.toggle_pause()
+        self.assertTrue(runtime._pause_gate.is_set())
 
 
 class TestInflightRegistry(unittest.TestCase):
     def setUp(self) -> None:
-        controller._inflight = controller.InflightRegistry()
+        runtime._inflight = runtime.InflightRegistry()
         # Reset status bar so refresh() called by enter/exit is a no-op.
-        controller._status_bar = controller.StatusBar()
+        runtime._status_bar = runtime.StatusBar()
 
     def test_enter_exit_round_trip(self):
-        reg = controller._inflight
+        reg = runtime._inflight
         self.assertEqual(reg.count(), 0)
         a = reg.enter("worker 1")
         b = reg.enter("verifier")
@@ -116,15 +118,15 @@ class TestInflightRegistry(unittest.TestCase):
         self.assertEqual(reg.count(), 0)
 
     def test_exit_with_unknown_id_is_safe(self):
-        reg = controller._inflight
+        reg = runtime._inflight
         reg.exit(999)  # must not raise
         self.assertEqual(reg.count(), 0)
 
     def test_inflight_context_manager(self):
-        reg = controller._inflight
+        reg = runtime._inflight
 
         async def go():
-            async with controller.inflight("director sub 1"):
+            async with runtime.inflight("director sub 1"):
                 self.assertEqual(reg.snapshot(), ["director sub 1"])
             self.assertEqual(reg.count(), 0)
 
@@ -132,42 +134,49 @@ class TestInflightRegistry(unittest.TestCase):
 
 
 class TestChokepointAudit(unittest.TestCase):
-    """Guard rail: every client.query call must route through submit_query."""
+    """Guard rail: every client.query call must route through submit_query.
 
-    def test_no_unwrapped_query_calls_in_controller(self):
-        path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "controller.py",
-        )
-        with open(path) as f:
-            source = f.read()
-        tree = ast.parse(source)
+    Scans controller.py, worker.py, and runtime.py — the three modules that
+    handle SDK clients. The single allowed call site is `submit_query`'s
+    body in runtime.py.
+    """
 
-        # The submit_query body is the one allowed call site.
-        submit_range: tuple[int, int] | None = None
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                    and node.name == "submit_query":
-                submit_range = (node.lineno, node.end_lineno or node.lineno)
-                break
-
-        source_lines = source.splitlines()
+    def test_no_unwrapped_query_calls(self):
+        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        targets = ["controller.py", "worker.py", "runtime.py"]
         offending: list[str] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not (isinstance(func, ast.Attribute) and func.attr == "query"):
-                continue
-            target = func.value
-            # Match `client.query(...)` or `<x>.client.query(...)`.
-            is_bare = isinstance(target, ast.Name) and target.id == "client"
-            is_attr = isinstance(target, ast.Attribute) and target.attr == "client"
-            if not (is_bare or is_attr):
-                continue
-            if submit_range and submit_range[0] <= node.lineno <= submit_range[1]:
-                continue
-            offending.append(f"line {node.lineno}: {source_lines[node.lineno - 1].strip()}")
+        for fname in targets:
+            path = os.path.join(pkg_dir, fname)
+            with open(path) as f:
+                source = f.read()
+            tree = ast.parse(source)
+
+            # The submit_query body is the one allowed call site (only in runtime.py).
+            submit_range: tuple[int, int] | None = None
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                        and node.name == "submit_query":
+                    submit_range = (node.lineno, node.end_lineno or node.lineno)
+                    break
+
+            source_lines = source.splitlines()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if not (isinstance(func, ast.Attribute) and func.attr == "query"):
+                    continue
+                target = func.value
+                # Match `client.query(...)` or `<x>.client.query(...)`.
+                is_bare = isinstance(target, ast.Name) and target.id == "client"
+                is_attr = isinstance(target, ast.Attribute) and target.attr == "client"
+                if not (is_bare or is_attr):
+                    continue
+                if submit_range and submit_range[0] <= node.lineno <= submit_range[1]:
+                    continue
+                offending.append(
+                    f"{fname}:{node.lineno}: {source_lines[node.lineno - 1].strip()}",
+                )
 
         self.assertEqual(
             offending, [],
@@ -223,16 +232,16 @@ class _ScriptedClient:
                 yield msg
         finally:
             if self.auto_resume and self._batches:
-                controller._rate_limited = False
-                controller._pause_gate.set()
+                runtime._rate_limited = False
+                runtime._pause_gate.set()
 
 
 def _reset_pause_state() -> None:
-    controller._pause_gate = asyncio.Event()
-    controller._pause_gate.set()
-    controller._rate_limited = False
-    controller._inflight = controller.InflightRegistry()
-    controller._status_bar = controller.StatusBar()
+    runtime._pause_gate = asyncio.Event()
+    runtime._pause_gate.set()
+    runtime._rate_limited = False
+    runtime._inflight = runtime.InflightRegistry()
+    runtime._status_bar = runtime.StatusBar()
 
 
 class TestRateLimitGate(unittest.TestCase):
@@ -240,22 +249,22 @@ class TestRateLimitGate(unittest.TestCase):
         _reset_pause_state()
 
     def test_engage_rate_limit_clears_gate(self):
-        controller.engage_rate_limit_pause("try again at 4:30pm")
-        self.assertTrue(controller._rate_limited)
-        self.assertFalse(controller._pause_gate.is_set())
+        runtime.engage_rate_limit_pause("try again at 4:30pm")
+        self.assertTrue(runtime._rate_limited)
+        self.assertFalse(runtime._pause_gate.is_set())
 
     def test_engage_is_idempotent(self):
-        controller.engage_rate_limit_pause("first")
-        controller.engage_rate_limit_pause("second")
-        self.assertTrue(controller._rate_limited)
-        self.assertFalse(controller._pause_gate.is_set())
+        runtime.engage_rate_limit_pause("first")
+        runtime.engage_rate_limit_pause("second")
+        self.assertTrue(runtime._rate_limited)
+        self.assertFalse(runtime._pause_gate.is_set())
 
     def test_spacebar_clears_rate_limit_pause(self):
-        controller.engage_rate_limit_pause("rate-limited")
-        self.assertTrue(controller._rate_limited)
-        controller.toggle_pause()
-        self.assertFalse(controller._rate_limited)
-        self.assertTrue(controller._pause_gate.is_set())
+        runtime.engage_rate_limit_pause("rate-limited")
+        self.assertTrue(runtime._rate_limited)
+        runtime.toggle_pause()
+        self.assertFalse(runtime._rate_limited)
+        self.assertTrue(runtime._pause_gate.is_set())
 
     def test_collect_worker_turn_flags_rate_limited(self):
         client = _ScriptedClient([
@@ -268,7 +277,7 @@ class TestRateLimitGate(unittest.TestCase):
         async def go():
             await client.query("ignored")
             candidates = CandidatePool()
-            return await controller.collect_worker_turn(client, 1, 1, candidates)
+            return await worker.collect_worker_turn(client, 1, 1, candidates)
 
         summary = _run(go())
         self.assertTrue(summary.rate_limited)
@@ -307,8 +316,8 @@ class TestRateLimitGate(unittest.TestCase):
         self.assertEqual(len(client.queries), 2)
         # Second submit reuses the same prompt.
         self.assertEqual(client.queries[0], client.queries[1])
-        self.assertFalse(controller._rate_limited)
-        self.assertTrue(controller._pause_gate.is_set())
+        self.assertFalse(runtime._rate_limited)
+        self.assertTrue(runtime._pause_gate.is_set())
 
 
 if __name__ == "__main__":

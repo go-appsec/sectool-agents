@@ -20,6 +20,8 @@ from claude_agent_sdk import (
 )
 
 import controller
+import runtime
+import worker as worker_mod
 from findings import FindingWriter
 from tools import (
     CandidatePool,
@@ -142,7 +144,7 @@ class TestCollectWorkerTurn(unittest.TestCase):
                 _result(0.02),
             ],
         ])
-        s = _run(controller.collect_worker_turn(client, worker_id=1, iteration=1, candidates=pool))
+        s = _run(worker_mod.collect_worker_turn(client, worker_id=1, iteration=1, candidates=pool))
         self.assertEqual(s.worker_id, 1)
         self.assertIn("Tested /search", s.assistant_text)
         self.assertEqual(len(s.tool_calls), 1)
@@ -196,7 +198,7 @@ class TestCollectWorkerTurn(unittest.TestCase):
                 _result(),
             ],
         ])
-        s = _run(controller.collect_worker_turn(client, worker_id=2, iteration=3, candidates=pool))
+        s = _run(worker_mod.collect_worker_turn(client, worker_id=2, iteration=3, candidates=pool))
         self.assertEqual(s.candidate_ids, ["c002"])
         self.assertEqual(pool.get("c002").worker_id, 2)
 
@@ -315,7 +317,7 @@ class TestRunWorkerAutonomousTurn(unittest.TestCase):
                         worker_id=5,
                     )
                 w = self._make_worker(client)
-                s, reason = _run(controller.run_worker_autonomous_turn(w, 1, pool, verbose=False))
+                s, reason = _run(worker_mod.run_worker_autonomous_turn(w, 1, pool, verbose=False))
                 if case == "productive":
                     self.assertIsNotNone(s)
                     self.assertIsNone(reason)
@@ -340,7 +342,7 @@ class TestRunWorkerUntilEscalation(unittest.TestCase):
         scripts = [_productive_turn("pp01a"), _productive_turn("pp01b"), _productive_turn("pp01c")]
         client = FakeSDKClient(scripts)
         w = self._make_worker(client, budget=3)
-        runs = _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
+        runs = _run(worker_mod.run_worker_until_escalation(w, 1, pool, verbose=False))
         self.assertEqual(len(runs), 3)
         self.assertEqual(w.escalation_reason, "budget")
         # First turn does not send a Continue query; subsequent ones do.
@@ -364,7 +366,7 @@ class TestRunWorkerUntilEscalation(unittest.TestCase):
                     client = _CandidateInjectingClient(scripts, pool, add_on_turn_indexes=[1],
                                                        worker_id=9)
                 w = self._make_worker(client, budget=3)
-                runs = _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
+                runs = _run(worker_mod.run_worker_until_escalation(w, 1, pool, verbose=False))
                 self.assertEqual(len(runs), 2)
                 self.assertEqual(w.escalation_reason, expected_reason)
 
@@ -373,7 +375,7 @@ class TestRunWorkerUntilEscalation(unittest.TestCase):
         scripts = [_productive_turn("tt01"), _silent_turn()]
         client = FakeSDKClient(scripts)
         w = self._make_worker(client, budget=4)
-        _run(controller.run_worker_until_escalation(w, 1, pool, verbose=False))
+        _run(worker_mod.run_worker_until_escalation(w, 1, pool, verbose=False))
         self.assertEqual(len(w.autonomous_turns), 2)
 
 
@@ -1205,7 +1207,7 @@ class TestClearLeakedCancellations(unittest.TestCase):
 
     def test_no_pending_cancellation_returns_zero(self):
         async def body():
-            return controller._clear_leaked_cancellations("test")
+            return runtime._clear_leaked_cancellations("test")
         self.assertEqual(_run(body()), 0)
 
     def test_drains_pending_cancellations(self):
@@ -1228,7 +1230,7 @@ class TestClearLeakedCancellations(unittest.TestCase):
                 return
             task.cancel()
             captured["before"] = task.cancelling()
-            captured["cleared"] = controller._clear_leaked_cancellations()
+            captured["cleared"] = runtime._clear_leaked_cancellations()
             captured["after"] = task.cancelling()
 
         async def body():
@@ -1249,7 +1251,7 @@ class TestClearLeakedCancellations(unittest.TestCase):
     def test_survives_no_current_task(self):
         """Helper returns 0 when called outside an async task context."""
         # Called synchronously (no running event loop / current task).
-        self.assertEqual(controller._clear_leaked_cancellations(), 0)
+        self.assertEqual(runtime._clear_leaked_cancellations(), 0)
 
 
 class TestManagedTeardown(unittest.TestCase):
@@ -1315,14 +1317,14 @@ class TestCancelledErrorIsolation(unittest.TestCase):
             worker.escalation_reason = "silent"
             return []
 
-        orig = controller.run_worker_until_escalation
-        controller.run_worker_until_escalation = fake_run
+        orig = worker_mod.run_worker_until_escalation
+        worker_mod.run_worker_until_escalation = fake_run
         try:
             results = _run(controller.run_all_workers_until_escalation(
                 [w1, w2], iteration=1, candidates=CandidatePool(), verbose=False,
             ))
         finally:
-            controller.run_worker_until_escalation = orig
+            worker_mod.run_worker_until_escalation = orig
 
         # Both workers were entered.
         self.assertEqual(call_count["w1"], 1)
@@ -1348,7 +1350,7 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
         """A CancelledError raised inside the runner task must not leak onto
         the main task after aclose. This is the core invariant that makes
         ManagedSDKClient useful."""
-        orig = controller.ClaudeSDKClient
+        orig = worker_mod.ClaudeSDKClient
 
         class _CancelDuringExitClient:
             def __init__(self, options):
@@ -1366,7 +1368,7 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
             async def query(self, content: str) -> None:
                 pass
 
-        controller.ClaudeSDKClient = _CancelDuringExitClient
+        worker_mod.ClaudeSDKClient = _CancelDuringExitClient
         try:
             async def body():
                 m = controller.ManagedSDKClient(options=object())
@@ -1379,12 +1381,12 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
 
             self.assertTrue(_run(body()))
         finally:
-            controller.ClaudeSDKClient = orig
+            worker_mod.ClaudeSDKClient = orig
 
     def test_connect_aclose_roundtrip(self):
         """Verify ManagedSDKClient.connect + aclose works end-to-end without
         a real SDK by stubbing `ClaudeSDKClient` on the controller module."""
-        orig = controller.ClaudeSDKClient
+        orig = worker_mod.ClaudeSDKClient
 
         class _FakeClient:
             def __init__(self, options):
@@ -1399,7 +1401,7 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
             async def query(self, content: str) -> None:
                 pass
 
-        controller.ClaudeSDKClient = _FakeClient
+        worker_mod.ClaudeSDKClient = _FakeClient
         try:
             async def body():
                 m = controller.ManagedSDKClient(options=object())
@@ -1410,11 +1412,11 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
 
             self.assertTrue(_run(body()))
         finally:
-            controller.ClaudeSDKClient = orig
+            worker_mod.ClaudeSDKClient = orig
 
     def test_connect_surfaces_enter_exception(self):
         """If __aenter__ raises, connect() must propagate the error."""
-        orig = controller.ClaudeSDKClient
+        orig = worker_mod.ClaudeSDKClient
 
         class _FailClient:
             def __init__(self, options):
@@ -1426,7 +1428,7 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
             async def __aexit__(self, *exc):
                 return False
 
-        controller.ClaudeSDKClient = _FailClient
+        worker_mod.ClaudeSDKClient = _FailClient
         try:
             async def body():
                 m = controller.ManagedSDKClient(options=object())
@@ -1438,7 +1440,7 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
 
             self.assertEqual(_run(body()), "boom")
         finally:
-            controller.ClaudeSDKClient = orig
+            worker_mod.ClaudeSDKClient = orig
 
 
 class TestPrematureDoneGuard(unittest.TestCase):
