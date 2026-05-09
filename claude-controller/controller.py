@@ -10,9 +10,11 @@ Iteration anatomy (see README):
 """
 
 import asyncio
+import atexit
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -34,6 +36,7 @@ from claude_agent_sdk import (
 
 from config import Config, parse_args
 from findings import FindingWriter, match_pending_candidates
+from keypress import start_spacebar_listener
 from prompts import orchestrator_director as director_prompts
 from prompts import orchestrator_verifier as verifier_prompts
 from prompts import worker as worker_prompts
@@ -79,6 +82,204 @@ DIRECTION_MAX_SUBSTEPS = 4
 
 def log(tag: str, msg: str) -> None:
     print(f"[{tag:<8s}] {msg}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Pause gate, in-flight tracking, status bar
+# ---------------------------------------------------------------------------
+#
+# Spacebar pause: every billed API submission goes through `submit_query`,
+# which awaits `_pause_gate` before forwarding to the SDK. Toggling pause
+# from the spacebar listener clears/sets the event, halting new turns while
+# letting in-flight `receive_response()` loops drain naturally.
+#
+# `_inflight` records currently-draining turns so the status bar can show
+# what is still finishing during pause.
+
+_pause_gate: asyncio.Event = asyncio.Event()
+_pause_gate.set()  # set = "go"; clear = "pause"
+
+
+class InflightRegistry:
+    """Tracks currently-draining receive_response() loops by label."""
+
+    def __init__(self) -> None:
+        self._next_id = 0
+        self._entries: dict[int, str] = {}
+
+    def enter(self, label: str) -> int:
+        self._next_id += 1
+        self._entries[self._next_id] = label
+        _status_bar.refresh()
+        return self._next_id
+
+    def exit(self, entry_id: int) -> None:
+        if self._entries.pop(entry_id, None) is not None:
+            _status_bar.refresh()
+
+    def snapshot(self) -> list[str]:
+        return list(self._entries.values())
+
+    def count(self) -> int:
+        return len(self._entries)
+
+
+class _InflightContext:
+    """Async context manager for in-flight tracking."""
+
+    def __init__(self, label: str) -> None:
+        self._label = label
+        self._id: int | None = None
+
+    async def __aenter__(self) -> "_InflightContext":
+        self._id = _inflight.enter(self._label)
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        if self._id is not None:
+            _inflight.exit(self._id)
+        return False
+
+
+def inflight(label: str) -> _InflightContext:
+    return _InflightContext(label)
+
+
+class StatusBar:
+    """Bottom-row status line via ANSI scroll region. No-op when not a TTY."""
+
+    def __init__(self) -> None:
+        self._enabled = False
+        self._paused = False
+        self._iteration = 0
+        self._height = 0
+        self._width = 0
+
+    def install(self) -> None:
+        if not sys.stdout.isatty():
+            return
+        try:
+            size = shutil.get_terminal_size()
+        except OSError:
+            return
+        if size.lines < 5:
+            return
+        self._height = size.lines
+        self._width = size.columns
+        # Scroll region rows 1..(H-1); row H is the static status line.
+        sys.stdout.write(f"\033[1;{self._height - 1}r")
+        # Move cursor inside scroll region so the next print lands above status.
+        sys.stdout.write(f"\033[{self._height - 1};1H")
+        sys.stdout.flush()
+        self._enabled = True
+        atexit.register(self._safe_uninstall)
+        self.refresh()
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def _safe_uninstall(self) -> None:
+        try:
+            self.uninstall()
+        except Exception:
+            pass
+
+    def uninstall(self) -> None:
+        if not self._enabled:
+            return
+        self._enabled = False
+        # Reset scroll region; clear status row; show cursor.
+        sys.stdout.write("\033[r")
+        sys.stdout.write(f"\033[{self._height};1H\033[2K")
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+
+    def set_paused(self, paused: bool) -> None:
+        self._paused = paused
+        self.refresh()
+
+    def set_iteration(self, iteration: int) -> None:
+        self._iteration = iteration
+        self.refresh()
+
+    def refresh(self) -> None:
+        if not self._enabled:
+            return
+        # Re-read size every refresh — automatic resize handling.
+        try:
+            size = shutil.get_terminal_size()
+        except OSError:
+            return
+        if (size.lines, size.columns) != (self._height, self._width):
+            self._height, self._width = size.lines, size.columns
+            sys.stdout.write(f"\033[1;{self._height - 1}r")
+            # Reposition cursor inside new scroll region so a shrink doesn't
+            # leave it parked below the status row.
+            sys.stdout.write(f"\033[{self._height - 1};1H")
+        snapshot = _inflight.snapshot()
+        count = len(snapshot)
+        if self._paused:
+            if count == 0:
+                msg = " [PAUSED — space to resume] idle "
+            else:
+                labels = ", ".join(snapshot[:5])
+                more = f" +{count - 5} more" if count > 5 else ""
+                msg = f" [PAUSED — space to resume] {count} turn(s) finishing: {labels}{more} "
+        else:
+            iter_part = f"iter {self._iteration}" if self._iteration else "starting"
+            msg = f" [RUNNING] {iter_part} · in-flight={count} · space to pause "
+        msg = msg[: max(0, self._width)]
+        sys.stdout.write(
+            "\0337"
+            f"\033[{self._height};1H"
+            "\033[2K"
+            "\033[7m"
+            f"{msg}"
+            "\033[0m"
+            "\0338"
+        )
+        sys.stdout.flush()
+
+
+_status_bar: StatusBar = StatusBar()
+_inflight: InflightRegistry = InflightRegistry()
+
+
+def toggle_pause() -> None:
+    """Flip the pause gate; called from the spacebar listener."""
+    if _pause_gate.is_set():
+        _pause_gate.clear()
+        _status_bar.set_paused(True)
+        if not _status_bar.enabled:
+            log("paused", f"Paused — {_inflight.count()} turn(s) finishing. Press space to resume.")
+    else:
+        _pause_gate.set()
+        _status_bar.set_paused(False)
+        if not _status_bar.enabled:
+            log("paused", "Resumed.")
+
+
+async def _status_tick() -> None:
+    """Periodic refresh so in-flight count decays visibly during pause."""
+    try:
+        while True:
+            await asyncio.sleep(0.5)
+            _status_bar.refresh()
+    except asyncio.CancelledError:
+        return
+
+
+async def submit_query(client, prompt: str) -> None:
+    """Pause-gated wrapper around client.query().
+
+    Every billed API submission in this module routes through here so the
+    spacebar pause has exactly one chokepoint to gate. The pause check
+    happens before submission; once query() returns, the turn is committed
+    and the receive_response loop must be allowed to finish.
+    """
+    await _pause_gate.wait()
+    await client.query(prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -379,39 +580,40 @@ async def collect_worker_turn(
     summary = WorkerTurnSummary(worker_id=worker_id, iteration=iteration)
     pending_calls: dict[str, ToolCallRecord] = {}
 
-    async for message in client.receive_response():
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    summary.assistant_text += (block.text or "")
-                    if verbose_tag:
-                        first = (block.text or "").strip().split("\n", 1)[0]
-                        if first:
-                            log(verbose_tag, _short(first, 120))
-                elif isinstance(block, ToolUseBlock):
-                    rec = ToolCallRecord(
-                        name=block.name,
-                        input_summary=_summarize_input(block.input or {}),
-                    )
-                    pending_calls[block.id] = rec
-                    summary.tool_calls.append(rec)
-                    for fid in extract_flow_ids(block.input or {}):
-                        if fid not in summary.flow_ids_touched:
-                            summary.flow_ids_touched.append(fid)
-        elif isinstance(message, UserMessage):
-            blocks = message.content if isinstance(message.content, list) else []
-            for block in blocks:
-                if isinstance(block, ToolResultBlock):
-                    rec = pending_calls.pop(block.tool_use_id, None)
-                    if rec is not None:
-                        rec.result_summary = _summarize_result(block.content)
-                        rec.is_error = bool(block.is_error)
-                    for fid in extract_flow_ids(block.content):
-                        if fid not in summary.flow_ids_touched:
-                            summary.flow_ids_touched.append(fid)
-        elif isinstance(message, ResultMessage):
-            summary.cost_usd = message.total_cost_usd
-            break
+    async with inflight(f"worker {worker_id}"):
+        async for message in client.receive_response():
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        summary.assistant_text += (block.text or "")
+                        if verbose_tag:
+                            first = (block.text or "").strip().split("\n", 1)[0]
+                            if first:
+                                log(verbose_tag, _short(first, 120))
+                    elif isinstance(block, ToolUseBlock):
+                        rec = ToolCallRecord(
+                            name=block.name,
+                            input_summary=_summarize_input(block.input or {}),
+                        )
+                        pending_calls[block.id] = rec
+                        summary.tool_calls.append(rec)
+                        for fid in extract_flow_ids(block.input or {}):
+                            if fid not in summary.flow_ids_touched:
+                                summary.flow_ids_touched.append(fid)
+            elif isinstance(message, UserMessage):
+                blocks = message.content if isinstance(message.content, list) else []
+                for block in blocks:
+                    if isinstance(block, ToolResultBlock):
+                        rec = pending_calls.pop(block.tool_use_id, None)
+                        if rec is not None:
+                            rec.result_summary = _summarize_result(block.content)
+                            rec.is_error = bool(block.is_error)
+                        for fid in extract_flow_ids(block.content):
+                            if fid not in summary.flow_ids_touched:
+                                summary.flow_ids_touched.append(fid)
+            elif isinstance(message, ResultMessage):
+                summary.cost_usd = message.total_cost_usd
+                break
 
     # Scope candidates to this worker so concurrent drains don't cross-attribute.
     summary.candidate_ids = candidates.ids_since_for_worker(candidates_before, worker_id)
@@ -511,7 +713,7 @@ async def attempt_worker_recovery(state: WorkerState) -> bool:
             state.alive = True
             log(f"worker {state.worker_id}", f"Recovery succeeded (attempt {attempt})")
             if state.last_instruction:
-                await client.query(state.last_instruction)
+                await submit_query(client, state.last_instruction)
             return True
         except Exception as exc:
             log(f"worker {state.worker_id}", f"Recovery attempt {attempt} failed: {exc}")
@@ -559,7 +761,7 @@ async def synthesize_and_teardown_recon(
     log(f"worker {worker.worker_id}", "Synthesizing recon report...")
     tag = f"w{worker.worker_id}" if verbose else None
     try:
-        await worker.client.query(_RECON_SYNTHESIS_QUERY)
+        await submit_query(worker.client, _RECON_SYNTHESIS_QUERY)
         synth_turn = await collect_worker_turn(
             worker.client, worker.worker_id, iteration, candidates, tag,
         )
@@ -722,7 +924,8 @@ async def run_worker_until_escalation(
             try:
                 # Intra-iteration between-turn requery: tokens precious,
                 # skip the findings roster.
-                await worker.client.query(
+                await submit_query(
+                    worker.client,
                     _build_worker_continue_prompt(findings_summary=""),
                 )
             except Exception as exc:
@@ -1191,24 +1394,25 @@ async def run_phase_substep(
     cost: float | None = None
     saw_text = False
     try:
-        await client.query(user_content)
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        chunk = (block.text or "").strip()
-                        if chunk:
-                            # Print first line live, truncate the rest
-                            lines = chunk.splitlines()
-                            if len(lines) == 1:
-                                print(_short(lines[0], 200), flush=True)
-                            else:
-                                print(_short(lines[0], 200), flush=True)
-                                print(f"  ... ({len(lines) - 1} more lines)", flush=True)
-                            saw_text = True
-            elif isinstance(msg, ResultMessage):
-                cost = msg.total_cost_usd
-                break
+        await submit_query(client, user_content)
+        async with inflight(f"{label.lower()} sub {substep}"):
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            chunk = (block.text or "").strip()
+                            if chunk:
+                                # Print first line live, truncate the rest
+                                lines = chunk.splitlines()
+                                if len(lines) == 1:
+                                    print(_short(lines[0], 200), flush=True)
+                                else:
+                                    print(_short(lines[0], 200), flush=True)
+                                    print(f"  ... ({len(lines) - 1} more lines)", flush=True)
+                                saw_text = True
+                elif isinstance(msg, ResultMessage):
+                    cost = msg.total_cost_usd
+                    break
     except Exception as exc:
         log(tag, f"Substep error iter {iteration} sub {substep}: {exc}")
         return False, None
@@ -1581,7 +1785,7 @@ async def apply_plan_diff(
             w.progress_none_streak = 0
             w.stall_warned = False
             try:
-                await w.client.query(p.assignment)
+                await submit_query(w.client, p.assignment)
             except Exception:
                 await attempt_worker_recovery(w)
         else:
@@ -1609,7 +1813,7 @@ async def apply_plan_diff(
                     )
                 else:
                     kickoff = p.assignment
-                await new_w.client.query(kickoff)
+                await submit_query(new_w.client, kickoff)
                 workers.append(new_w)
                 existing_ids.add(p.worker_id)
                 log(f"worker {p.worker_id}", "Connected and assigned.")
@@ -1647,7 +1851,7 @@ async def apply_decision(
 
     worker.last_instruction = decision.instruction
     try:
-        await worker.client.query(decision.instruction)
+        await submit_query(worker.client, decision.instruction)
     except Exception:
         await attempt_worker_recovery(worker)
 
@@ -1711,6 +1915,14 @@ async def run(config: Config) -> None:
     candidates = CandidatePool()
     decisions = DecisionQueue()
     total_cost = 0.0
+
+    _status_bar.install()
+    stop_spacebar = start_spacebar_listener(
+        asyncio.get_running_loop(), toggle_pause,
+    )
+    if stop_spacebar is not None:
+        log("controls", "Press space to pause/resume (graceful — finishes in-flight turns).")
+    status_tick_task = asyncio.create_task(_status_tick())
 
     try:
         if server_proc is not None:
@@ -1815,7 +2027,7 @@ async def run(config: Config) -> None:
             workers[0].last_instruction = _RECON_KICKOFF
             workers[0].assignment = config.prompt
             try:
-                await workers[0].client.query(_RECON_KICKOFF)
+                await submit_query(workers[0].client, _RECON_KICKOFF)
             except Exception as exc:
                 log("worker", f"Initial prompt failed: {exc}. Recovery...")
                 if not await attempt_worker_recovery(workers[0]):
@@ -1846,12 +2058,19 @@ async def run(config: Config) -> None:
                     dump_unverified_event.set()
                 else:
                     log("ctrl-c", "Force-exit.")
+                    # os._exit skips atexit/finally, so restore the terminal
+                    # synchronously here or the scroll region and cbreak mode
+                    # leak into the parent shell.
+                    if stop_spacebar is not None:
+                        stop_spacebar()
+                    _status_bar.uninstall()
                     os._exit(130)
 
             loop.add_signal_handler(signal.SIGINT, _on_sigint)
 
             # Main loop
             for iteration in range(1, config.max_iterations + 1):
+                _status_bar.set_iteration(iteration)
                 alive = [w for w in workers if w.alive]
                 if not alive:
                     log(f"iter {iteration}", "No alive workers. Stopping.")
@@ -2023,9 +2242,12 @@ async def run(config: Config) -> None:
                         f"Worker {w.worker_id}: no explicit decision — implicit continue "
                         f"(budget={w.autonomous_budget}).")
                     try:
-                        await w.client.query(_build_worker_continue_prompt(
-                            findings_summary=worker_findings_summary,
-                        ))
+                        await submit_query(
+                            w.client,
+                            _build_worker_continue_prompt(
+                                findings_summary=worker_findings_summary,
+                            ),
+                        )
                     except Exception:
                         await attempt_worker_recovery(w)
 
@@ -2059,6 +2281,14 @@ async def run(config: Config) -> None:
                 print(f"              {path}")
 
     finally:
+        status_tick_task.cancel()
+        try:
+            await status_tick_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        if stop_spacebar is not None:
+            stop_spacebar()
+        _status_bar.uninstall()
         if server_proc is not None:
             terminate_process(server_proc, server_log)
             log("server", "MCP server terminated.")

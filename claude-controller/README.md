@@ -187,6 +187,12 @@ Each file has Title, Severity, Affected Endpoint, Description, Reproduction Step
 - **Stall detection**: controller-observed via each worker's `escalation_reason`. Three consecutive silent escalations (no tool calls, no new flow IDs) issue a warning in the director prompt; four force a worker stop.
 - **Verification required**: findings are only filed after the verifier calls `file_finding` with non-empty `verification_notes`.
 
+## Pause/Resume (spacebar)
+
+Press **space** while the controller is running to pause submission of any new Claude API turns. In-flight turns finish naturally — no work is interrupted, no tokens are wasted on a half-completed turn — and the orchestrator simply waits at the next gate. Press **space** again to resume; every paused worker, the verifier, and the director pick up from exactly where they were.
+
+When `stdout` is a TTY, a status line at the bottom of the terminal shows the current state and how many turns are still draining (e.g. `[PAUSED — space to resume] 2 turn(s) finishing: worker 1, verifier sub 3`). When stdin/stdout is redirected (CI, `nohup`, piped) the feature is disabled silently and the controller behaves as before. Ctrl-C remains effective during a pause.
+
 ## Graceful Shutdown (Ctrl-C)
 
 The controller installs a triple-Ctrl-C handler so an in-flight run can be wound down without losing already-collected work:
