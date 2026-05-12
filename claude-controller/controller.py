@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -42,6 +43,7 @@ from runtime import (
     submit_query,
     toggle_pause,
 )
+import version_check
 from tools import (
     DIRECTION_SELF_REVIEW_MAX_ROUNDS,
     DIRECTOR_TOOL_ALLOWED,
@@ -109,12 +111,7 @@ def start_mcp_server(
     log_file = open(log_path, "w")  # noqa: SIM115
     log("server", f"Starting sectool MCP server on :{mcp_port} (proxy :{proxy_port})")
     log("server", f"Server stderr → {log_path}")
-    try:
-        proc = subprocess.Popen(cmd, stderr=log_file, stdout=subprocess.DEVNULL)
-    except FileNotFoundError:
-        log("server", f"sectool binary not found: {sectool_bin!r}. Install sectool and either put it on PATH or pass --sectool-bin.")
-        log_file.close()
-        sys.exit(1)
+    proc = subprocess.Popen(cmd, stderr=log_file, stdout=subprocess.DEVNULL)
     return proc, log_file
 
 
@@ -1058,11 +1055,21 @@ async def run(config: Config) -> None:
     server_proc = None
     server_log = None
 
-    if is_server_running(config.mcp_port):
+    # stale-installed sectool is fatal only when the controller will spawn it;
+    # in attach mode the local binary isn't invoked, so log and continue.
+    attached = is_server_running(config.mcp_port)
+    state_path = os.path.join(tempfile.gettempdir(), "claude-controller-state.json")
+    sectool_bin = version_check.run(
+        config.sectool_bin, state_path,
+        skip_version=config.skip_version_check,
+        fatal_on_stale=not attached,
+    )
+
+    if attached:
         log("server", f"Detected existing MCP server on :{config.mcp_port}; reusing.")
     else:
         server_proc, server_log = start_mcp_server(
-            config.sectool_bin, config.proxy_port, config.mcp_port,
+            sectool_bin, config.proxy_port, config.mcp_port,
         )
 
     iteration = 0

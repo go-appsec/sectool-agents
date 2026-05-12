@@ -25,8 +25,11 @@ type Config struct {
 	KeepThinkTurns     int
 
 	// Sectool
-	ProxyPort int
-	MCPPort   int
+	ProxyPort        int
+	MCPPort          int
+	SkipVersionCheck bool   // skip the best-effort sectool version staleness check at startup
+	SectoolBinary    string // user preference via --sectool-bin; main overwrites with the resolved absolute path
+	SectoolStatePath string // resolved at startup (not flag-backed); set by main
 
 	// Loop
 	Prompt           string
@@ -91,6 +94,8 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 
 	fs.IntVar(&c.ProxyPort, "proxy-port", 8181, "sectool proxy port")
 	fs.IntVar(&c.MCPPort, "mcp-port", 9119, "sectool MCP port")
+	fs.StringVar(&c.SectoolBinary, "sectool-bin", "", "path to sectool binary (default: alongside secagent or on $PATH)")
+	fs.BoolVar(&c.SkipVersionCheck, "skip-version-check", false, "skip the best-effort sectool version staleness check at startup")
 
 	fs.StringVar(&c.Prompt, "prompt", "", "initial task prompt (required)")
 	fs.IntVar(&c.MaxIterations, "max-iterations", 30, "hard iteration cap")

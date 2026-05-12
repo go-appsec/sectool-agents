@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/go-appsec/secagent/cli"
 	"github.com/go-appsec/secagent/config"
 	"github.com/go-appsec/secagent/orchestrator"
+	"github.com/go-appsec/secagent/sectoolcheck"
 )
 
 func main() {
@@ -35,6 +37,17 @@ func main() {
 	defer cancel()
 	sd := orchestrator.NewShutdown(ctx, log)
 
+	cfg.SectoolStatePath = filepath.Join(os.TempDir(), "secagent-state.json")
+	attached := orchestrator.MCPReachable(ctx, cfg.MCPPort)
+
+	// version check may be fatal if not found or is old and we need to launch the mcp server
+	resolved, err := sectoolcheck.CheckVersion(ctx, log.Log, cfg.SectoolBinary, cfg.SectoolStatePath, cfg.SkipVersionCheck, !attached)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+	cfg.SectoolBinary = resolved
+
 	// three-stage Ctrl+C / SIGTERM: verify-only, dump unvalidated, kill
 	sig := make(chan os.Signal, 4)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -58,7 +71,7 @@ func main() {
 		}
 	}()
 
-	if err := orchestrator.Run(ctx, cfg, log, sd); err != nil {
+	if err := orchestrator.Run(ctx, cfg, attached, log, sd); err != nil {
 		log.Log("controller", "fatal", map[string]any{"err": err.Error()})
 		_, _ = fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)

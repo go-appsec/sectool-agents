@@ -104,6 +104,8 @@ bin/secagent \
 |------|---------|-------------|
 | `--proxy-port` | `8181` | Port for sectool's native proxy |
 | `--mcp-port` | `9119` | Port for sectool's MCP server (auto-attaches when one is already running) |
+| `--sectool-bin` | `""` | Path to the sectool binary. Empty falls back to a binary co-located with secagent, then `$PATH` |
+| `--skip-version-check` | `false` | Skip the best-effort sectool version staleness check at startup. See "Sectool version check" below |
 
 **Loop**
 
@@ -133,6 +135,14 @@ bin/secagent \
 |------|---------|-------------|
 | `--narrate-interval` | `5m` | Min interval between async narrator summaries (0 disables). Per-summary timeout is auto-computed as `max(2 × narrate-interval, 15m)`. |
 | `--log-file` | `secagent.log` | Structured JSON log destination |
+
+## Sectool version check
+
+The resolved or configured sectool is used for both the version check and the MCP launch. Unless `--skip-version-check` is set, secagent then performs a best-effort staleness check:
+
+- `sectool --version` is compared with the latest tagged release.
+- If a strictly newer release exists **and** secagent is about to spawn `sectool` itself, secagent exits with a `go install github.com/go-appsec/toolbox/sectool@latest` message. When attaching to an already-running MCP (see below) the same condition is logged and startup continues.
+- Results are cached at `<TMPDIR>/secagent-state.json` under `sectool_version_check` so subsequent startups are faster.
 
 ## Using with an Existing MCP Server
 

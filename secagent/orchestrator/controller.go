@@ -398,8 +398,9 @@ func newWorkerSpawner(mcpURL string, toolResultMaxBytes int,
 }
 
 // Run starts sectool and drives the iteration loop until cfg.MaxIterations is reached or the director ends the run.
-func Run(ctx context.Context, cfg *config.Config, log *Logger, sd *Shutdown) error {
-	srv, err := StartSectool(ctx, cfg.ProxyPort, cfg.MCPPort, log)
+// attached signals that an MCP server is already reachable at cfg.MCPPort; when true no child sectool is launched.
+func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd *Shutdown) error {
+	srv, err := StartSectool(ctx, cfg.ProxyPort, cfg.MCPPort, cfg.SectoolBinary, attached, log)
 	if err != nil {
 		return fmt.Errorf("sectool start: %w", err)
 	}

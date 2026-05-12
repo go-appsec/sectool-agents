@@ -24,21 +24,18 @@ type SectoolServer struct {
 // readinessProbeTimeout caps each MCP readiness probe.
 const readinessProbeTimeout = 500 * time.Millisecond
 
-// StartSectool returns a SectoolServer at mcpPort, attaching to an already-running endpoint
-// or otherwise launching `sectool mcp` and waiting for readiness.
-func StartSectool(ctx context.Context, proxyPort, mcpPort int, log *Logger) (*SectoolServer, error) {
+// StartSectool returns a SectoolServer at mcpPort. When attached is true the
+// caller has already verified that an MCP server is reachable and no child
+// process is started. Otherwise `sectool mcp` is launched (using binary) and
+// secagent waits for readiness.
+func StartSectool(ctx context.Context, proxyPort, mcpPort int, binary string, attached bool, log *Logger) (*SectoolServer, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort)
 
-	if mcpReachable(ctx, url) {
+	if attached {
 		log.Log("server", "attaching to running sectool", map[string]any{
 			"mcp_port": mcpPort, "url": url,
 		})
 		return &SectoolServer{URL: url}, nil
-	}
-
-	binary, err := resolveSectoolBinary()
-	if err != nil {
-		return nil, err
 	}
 
 	cwd, _ := os.Getwd()
@@ -88,23 +85,9 @@ func StartSectool(ctx context.Context, proxyPort, mcpPort int, log *Logger) (*Se
 	return nil, errors.New("sectool MCP server did not become ready within 10s")
 }
 
-// resolveSectoolBinary returns the sectool path, preferring a binary
-// co-located with the running secagent and falling back to $PATH.
-func resolveSectoolBinary() (string, error) {
-	if exe, err := os.Executable(); err == nil {
-		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-			exe = resolved
-		}
-		candidate := filepath.Join(filepath.Dir(exe), "sectool")
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-	binary, err := exec.LookPath("sectool")
-	if err != nil {
-		return "", fmt.Errorf("sectool not found alongside secagent or in $PATH: %w", err)
-	}
-	return binary, nil
+// MCPReachable reports whether the sectool MCP at mcpPort responds to an HTTP GET within readinessProbeTimeout.
+func MCPReachable(ctx context.Context, mcpPort int) bool {
+	return mcpReachable(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort))
 }
 
 // mcpReachable reports whether url responds to an HTTP GET within readinessProbeTimeout.

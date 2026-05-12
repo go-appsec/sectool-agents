@@ -54,6 +54,8 @@ Reading any single file under `secagent/` underspecifies the system — the mult
 - **`history/`** — long-term per-worker memory: `chronicle.go` is the persistent investigative chronicle that survives across iterations; `compactor.go` / `distill.go` / `summarize.go` produce LLM-driven summaries; `prune.go` / `self_prune.go` apply size-driven pruning; `llmexec.go` is the small LLM dispatcher used by these.
 - **`mcp/`** — JSON-RPC client to `sectool mcp`; turns sectool tool definitions into `agent.ToolHandler`s wired through to the orchestrator's per-tool timeout and parallelism caps.
 - **`config/`** — flag parsing + validation (caps `--max-workers` at 5, autonomous budget at 1–20, etc.).
+- **`sectoolcheck/`** — startup presence + best-effort staleness check on the external `sectool` binary. Fetches the latest release directly from the Go module proxy (no `go` toolchain dependency); persists the cache through the `state/` package. Stale-binary is fatal only when secagent is about to spawn `sectool` itself (informational in MCP-attach mode).
+- **`state/`** — generic on-disk JSON state shared across runs, with per-feature `omitempty` fields. Today only `sectool_version_check`; designed so future per-agent state can land here without migrations. Atomic tmp+rename saves.
 - **`cli/`** — terminal color helpers used by the narrator.
 - **`util/`** — small string and JSON helpers.
 
@@ -71,6 +73,8 @@ Python single-process orchestrator built on the Claude Agent SDK. Flatter than `
 - **`keypress.py`** — TTY-only spacebar listener (`/dev/tty` in cbreak mode) used by the pause feature; returns `None` when no controlling terminal is available.
 - **`tools.py`** — defines the in-process SDK MCP tool servers (`worker_tools` exposing `report_finding_candidate`; `orch_tools` exposing the phase-gated verifier and director surfaces). Tool handlers append to in-process queues; the controller drains them between substeps. Phase gating happens here.
 - **`findings.py`** — finding file writer with title-slug + canonicalized-endpoint dedup and pending-candidate tier matching (`match_pending_candidates`). Mirrors secagent's `findings.go` heuristics.
+- **`version_check.py`** — startup presence + best-effort staleness check on the external `sectool` binary; mirrors secagent's `sectoolcheck/`. Fetches the latest release directly from the Go module proxy (`proxy.golang.org`, no `go` toolchain dependency); persists the cache through the `state` module. Stale-binary is fatal only when the controller is about to spawn `sectool` itself (informational in MCP-attach mode).
+- **`state.py`** — generic on-disk JSON state shared across runs (mirrors secagent's `state/`). Single dict on disk with per-feature top-level keys; atomic tmp+rename saves; missing/corrupt files read back as `{}`.
 - **`config.py`** — CLI argument parsing + the `MODEL_MAP` from short names (`sonnet`/`opus`/`haiku`) to actual Claude model IDs. Update this map when a new Claude model is released.
 - **`prompts/`** — system prompts for the three roles (`worker.py`, `orchestrator_verifier.py`, `orchestrator_director.py`).
 - **`tests/`** — `unittest`-based smoke tests using a scripted fake `ClaudeSDKClient`; no network, no real SDK calls. `tests/conftest.py` puts the parent directory on `sys.path`.
@@ -87,6 +91,7 @@ Because both agents implement the same contract, certain invariants need to stay
 - **Substep caps** — verification 6, direction 4 in both. Worker count capped at 5 in both.
 - **Stall thresholds** — 3 silent escalations → director warning; 4 → forced stop.
 - **Finding output format** — both write `finding-NN-<slug>.md` with the same section list ending in a Verification section.
+- **Startup sectool check** — both accept `--sectool-bin` (user preference; falls back to the agent's resolver — co-located/`$PATH` in secagent, `shutil.which` in claude-controller). Resolution is owned by the version-check entry point (`sectoolcheck.CheckVersion` / `version_check.run`): it is the single place that exits if no usable binary is found, and it returns the resolved absolute path which both halves (version check + MCP launch) reuse. After resolution both agents probe `--mcp-port` for an existing MCP server, then run a best-effort version check (latest fetched from the Go module proxy). A strictly newer release is fatal only when the agent is about to spawn `sectool`; in attach mode it's logged and startup continues. Cache lives in the per-agent state file (`<TMPDIR>/secagent-state.json` / `<TMPDIR>/claude-controller-state.json`) under the `sectool_version_check` key.
 
 When you change one of these in one agent, check the README and code of the other to keep them in sync.
 

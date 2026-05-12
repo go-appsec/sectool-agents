@@ -22,6 +22,7 @@ class Config:
     worker_model: str | None = None
     verbose: bool = False
     sectool_bin: str = "sectool"
+    skip_version_check: bool = False
     max_workers: int = 4
     recon_budget: int = 2
 
@@ -80,6 +81,10 @@ def parse_args() -> Config:
         help="Path to the sectool binary (default: 'sectool' on PATH)",
     )
     parser.add_argument(
+        "--skip-version-check", action="store_true",
+        help="skip the best-effort sectool version staleness check at startup",
+    )
+    parser.add_argument(
         "--max-workers", type=int, default=4,
         help="Maximum parallel workers the orchestrator can assign (default: 4)",
     )
@@ -100,6 +105,7 @@ def parse_args() -> Config:
         worker_model=args.worker_model,
         verbose=args.verbose,
         sectool_bin=args.sectool_bin,
+        skip_version_check=args.skip_version_check,
         max_workers=max_workers,
         recon_budget=args.recon_budget,
     )

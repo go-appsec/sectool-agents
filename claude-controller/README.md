@@ -71,6 +71,7 @@ python controller.py \
 | `--recon-budget` | no | `2` | Autonomous-turn cap for the initial recon worker (choices: `2`, `3`, `4`) |
 | `--verbose` | no | false | Print full worker and orchestrator outputs |
 | `--sectool-bin` | no | `sectool` | Path to the sectool binary (default: looked up on `PATH`) |
+| `--skip-version-check` | no | `false` | Skip the best-effort sectool version staleness check at startup (see "Sectool version check") |
 
 ## Using with an Existing MCP Server
 
@@ -86,6 +87,14 @@ python controller.py \
   --proxy-port 8181 \
   --mcp-port 9119
 ```
+
+## Sectool version check
+
+The resolved or configured sectool is used for both the version check and the MCP launch. Unless `--skip-version-check` is set, the controller performs a best-effort staleness check:
+
+- `sectool --version` is compared with the latest tagged release.
+- If a strictly newer release exists **and** the controller is about to spawn `sectool` itself, it exits with a `go install github.com/go-appsec/toolbox/sectool@latest` message. When attaching to an already-running MCP (see below) the same condition is logged and startup continues.
+- Results are cached at `<TMPDIR>/claude-controller-state.json` under `sectool_version_check` to speed up subsequent startups.
 
 ## How It Works
 
