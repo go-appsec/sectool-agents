@@ -1,6 +1,7 @@
 """Defaults and CLI argument parsing for the controller."""
 
 import argparse
+import os
 from dataclasses import dataclass
 
 MODEL_MAP = {
@@ -37,12 +38,23 @@ class Config:
         return MODEL_MAP.get(self.worker_model, self.worker_model)
 
 
+def _resolve_prompt(value: str) -> str:
+    if os.path.isfile(value):
+        with open(value, "r", encoding="utf-8") as f:
+            contents = f.read().strip()
+        if not contents:
+            raise ValueError(f"--prompt: file {value} is empty")
+        return contents
+    return value
+
+
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(
         description="Autonomous security exploration controller using Claude Agent SDK",
     )
     parser.add_argument(
-        "--prompt", required=True, help="Initial task prompt for the worker",
+        "--prompt", required=True,
+        help="Initial task prompt for the worker, or path to a file containing the prompt",
     )
     parser.add_argument(
         "--proxy-port", type=int, default=8181,
@@ -95,7 +107,7 @@ def parse_args() -> Config:
     args = parser.parse_args()
     max_workers = max(1, min(5, args.max_workers))
     return Config(
-        prompt=args.prompt,
+        prompt=_resolve_prompt(args.prompt),
         proxy_port=args.proxy_port,
         mcp_port=args.mcp_port,
         findings_dir=args.findings_dir,
