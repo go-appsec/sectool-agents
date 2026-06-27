@@ -90,7 +90,7 @@ bin/secagent \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--max-context` | `32768` | Main-model context window in tokens |
+| `--max-context` | `200000` | Main-model context window in tokens |
 | `--log-max-context` | (= `--max-context`) | Log-model context window in tokens |
 | `--tool-result-max-bytes` | `8192` | Per-tool-result truncation cap |
 | `--compaction-high-watermark` | `0.80` | Fraction of context that triggers compaction |

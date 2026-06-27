@@ -3,6 +3,10 @@ package config
 import (
 	"errors"
 	"flag"
+	"fmt"
+	iofs "io/fs"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -84,7 +88,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.LogModel, "log-model", "", "model ID for narrator + candidate dedup; defaults to --model")
 	fs.IntVar(&c.AgentPoolSize, "agent-pool-size", 4, "concurrent model request bound (shared pool)")
 
-	fs.IntVar(&c.MaxContext, "max-context", 32768, "main-model context window (tokens)")
+	fs.IntVar(&c.MaxContext, "max-context", 200000, "main-model context window (tokens)")
 	fs.IntVar(&c.LogMaxContext, "log-max-context", 0, "log-model context window; 0 inherits --max-context")
 	fs.IntVar(&c.ToolResultMaxBytes, "tool-result-max-bytes", 8192, "per-tool-result truncation cap")
 	fs.Float64Var(&c.HighWatermark, "compaction-high-watermark", 0.80, "compaction trigger fraction")
@@ -97,7 +101,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.SectoolBinary, "sectool-bin", "", "path to sectool binary (default: alongside secagent or on $PATH)")
 	fs.BoolVar(&c.SkipVersionCheck, "skip-version-check", false, "skip the best-effort sectool version staleness check at startup")
 
-	fs.StringVar(&c.Prompt, "prompt", "", "initial task prompt (required)")
+	fs.StringVar(&c.Prompt, "prompt", "", "initial task prompt or path to a prompt file (required)")
 	fs.IntVar(&c.MaxIterations, "max-iterations", 30, "hard iteration cap")
 	fs.IntVar(&c.MaxWorkers, "max-workers", 4, "max parallel workers")
 	fs.IntVar(&c.AutonomousBudget, "autonomous-budget", DefaultAutoBudget, "turns per worker per iteration")
@@ -120,6 +124,19 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	}
 	if c.Prompt == "" {
 		return nil, errors.New("--prompt is required")
+	}
+	if info, err := os.Stat(c.Prompt); err == nil && info.Mode().IsRegular() {
+		data, err := os.ReadFile(c.Prompt)
+		if err != nil {
+			return nil, fmt.Errorf("--prompt: read %s: %w", c.Prompt, err)
+		}
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed == "" {
+			return nil, fmt.Errorf("--prompt: file %s is empty", c.Prompt)
+		}
+		c.Prompt = trimmed
+	} else if err != nil && !errors.Is(err, iofs.ErrNotExist) {
+		return nil, fmt.Errorf("--prompt: stat %s: %w", c.Prompt, err)
 	}
 	c.MaxWorkers = min(max(c.MaxWorkers, MinWorkers), MaxWorkers)
 	c.AutonomousBudget = min(max(c.AutonomousBudget, 1), MaxAutonomousBudget)
