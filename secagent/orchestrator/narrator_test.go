@@ -1,8 +1,10 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -80,6 +82,21 @@ func waitForCalls(t *testing.T, calls *int32, want int32) {
 
 	require.Eventually(t, func() bool {
 		return atomic.LoadInt32(calls) >= want
+	}, 2*time.Second, time.Millisecond)
+}
+
+// waitForLog polls the captured mirror buffer until it contains want. Unlike
+// waitForCalls (which observes call ENTRY), the narration log line is written
+// only after a firing commits its prior-summary ring and history cursor, so it
+// is the correct barrier before a follow-up firing depends on that state. Reads
+// under the logger mutex since narration goroutines write the buffer concurrently.
+func waitForLog(t *testing.T, l *Logger, buf *bytes.Buffer, want string) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return strings.Contains(buf.String(), want)
 	}, 2*time.Second, time.Millisecond)
 }
 
@@ -668,7 +685,7 @@ func TestNarratorAgentNarrationFlow(t *testing.T) {
 
 	t.Run("second_call_includes_first_summary_and_only_new_activity", func(t *testing.T) {
 		client := &scriptedClient{response: "first summary line"}
-		l, _, _ := newCapturedLogger(t)
+		l, _, buf := newCapturedLogger(t)
 		pool := agent.NewClientPoolWithClients([]agent.ChatClient{client})
 		a := agent.NewOpenAIAgent(agent.OpenAIAgentConfig{Model: "m", Pool: pool})
 		appendAssistantMessage(a, "earlier work")
@@ -681,7 +698,9 @@ func TestNarratorAgentNarrationFlow(t *testing.T) {
 
 		recordSubstantiveEvents(n, narratorMinEvents)
 		n.TriggerNow()
-		waitForCalls(t, &client.calls, 2)
+		// Wait for the first firing to commit its summary + cursor, not just enter
+		// the call; the second firing reads that state to build its prompt.
+		waitForLog(t, l, buf, "worker-1:")
 
 		appendAssistantMessage(a, "newer probe of /api/v2")
 		recordSubstantiveEvents(n, narratorMinEvents)
