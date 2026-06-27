@@ -44,7 +44,8 @@ class TestFindingWriter(unittest.TestCase):
             w = FindingWriter(td)
             path = w.write(_make("Reflected XSS in search"))
             self.assertEqual(os.path.basename(path), "finding-01-reflected-xss-in-search.md")
-            body = open(path).read()
+            with open(path) as f:
+                body = f.read()
             self.assertIn("# Reflected XSS in search", body)
             self.assertIn("**Severity**: high", body)
             self.assertIn("## Verification", body)
@@ -87,7 +88,8 @@ class TestFindingWriter(unittest.TestCase):
                 additional_endpoint="GET /lookup",
             )
             self.assertEqual(merged, path)
-            body = open(path).read()
+            with open(path) as f:
+                body = f.read()
             self.assertIn("## Additional affected surfaces", body)
             self.assertIn("- GET /lookup — Same vuln, additional endpoint", body)
 
@@ -97,7 +99,8 @@ class TestFindingWriter(unittest.TestCase):
             path = w.write(_make("Reflected XSS", endpoint="GET /search"))
             w.merge("F1", rationale="endpoint two", additional_endpoint="GET /lookup")
             w.merge("F1", rationale="endpoint three", additional_endpoint="POST /search-v2")
-            body = open(path).read()
+            with open(path) as f:
+                body = f.read()
             # Single section heading, both bullets present.
             self.assertEqual(body.count("## Additional affected surfaces"), 1)
             self.assertIn("- GET /lookup — endpoint two", body)
@@ -108,7 +111,8 @@ class TestFindingWriter(unittest.TestCase):
             w = FindingWriter(td)
             path = w.write(_make("Reflected XSS", endpoint="GET /search"))
             w.merge("F1", rationale="stronger evidence on the same surface")
-            body = open(path).read()
+            with open(path) as f:
+                body = f.read()
             self.assertIn("- _(same surface)_ — stronger evidence on the same surface", body)
 
     def test_merge_with_evidence_note_renders_sub_bullet(self):
@@ -120,7 +124,8 @@ class TestFindingWriter(unittest.TestCase):
                 rationale="same surface, stronger payload",
                 evidence_note="payload bypassed CSP via SVG",
             )
-            body = open(path).read()
+            with open(path) as f:
+                body = f.read()
             self.assertIn("- _(same surface)_ — same surface, stronger payload", body)
             self.assertIn("  - payload bypassed CSP via SVG", body)
 
