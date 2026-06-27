@@ -2,8 +2,9 @@ package agent
 
 import (
 	"slices"
-	"strings"
 	"sync"
+
+	"github.com/go-appsec/secagent/util"
 )
 
 // Message is one entry in an agent's history.
@@ -220,11 +221,7 @@ func (h *History) Len() int {
 	return len(h.messages)
 }
 
-// Summarize120 returns the first 120 chars of s, with an ellipsis on overflow.
+// Summarize120 returns the first 120 runes of s, with an ellipsis on overflow.
 func Summarize120(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= 120 {
-		return s
-	}
-	return s[:119] + "…"
+	return util.Truncate(s, 120)
 }

@@ -61,6 +61,11 @@ func Save(path string, s *State) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write tmp: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("sync tmp: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close tmp: %w", err)

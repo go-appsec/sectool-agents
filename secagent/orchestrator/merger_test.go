@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -111,7 +112,36 @@ func TestAsyncMerger(t *testing.T) {
 		require.NoError(t, log.Close())
 
 		logged := mustReadFile(t, lpath)
-		assert.Contains(t, logged, "async-merge classify error")
+		assert.Contains(t, logged, "async-merge error")
+	})
+
+	t.Run("concurrent_merges_preserve_all", func(t *testing.T) {
+		writer := NewFindingWriter(t.TempDir())
+		path, err := writer.Write(FindingFiled{
+			Title: "Base", Severity: "low", Endpoint: "GET /x", Evidence: "base",
+		})
+		require.NoError(t, err)
+
+		rev := &fakeReviewer{}
+		var wg sync.WaitGroup
+		for i := range 4 {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				secondary := FindingFiled{Evidence: fmt.Sprintf("ev%d", i)}
+				_, merr := writer.MergeExisting(path, func(existing FindingFiled) (FindingFiled, error) {
+					return rev.Merge(context.Background(), existing, secondary)
+				})
+				assert.NoError(t, merr)
+			}(i)
+		}
+		wg.Wait()
+
+		body := mustReadFile(t, path)
+		assert.Contains(t, body, "base")
+		for i := range 4 {
+			assert.Contains(t, body, fmt.Sprintf("ev%d", i))
+		}
 	})
 
 	t.Run("wait_blocks_on_submits", func(t *testing.T) {

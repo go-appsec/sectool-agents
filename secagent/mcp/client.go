@@ -130,5 +130,5 @@ func truncateResult(s string, maxBytes int) string {
 		"\n…(truncated: %d of %d bytes shown. Reduce scope — e.g., add filters, raise `since`, or request specific fields — then call again.)",
 		maxBytes, len(s),
 	)
-	return s[:maxBytes] + notice
+	return util.TruncateBytes(s, maxBytes) + notice
 }

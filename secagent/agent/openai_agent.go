@@ -20,7 +20,6 @@ type OpenAIAgentConfig struct {
 	SystemPrompt      string
 	Pool              *ClientPool
 	MaxContext        int
-	MaxToolRepairs    int // per-assistant-message
 	TurnTimeout       time.Duration
 	PerToolTimeout    time.Duration // per-tool-call timeout; 0 disables.
 	MaxParallelTools  int           // bound on concurrent tool dispatch; <=1 runs serial.
@@ -82,9 +81,6 @@ type OpenAIAgent struct {
 func NewOpenAIAgent(cfg OpenAIAgentConfig) *OpenAIAgent {
 	if cfg.MaxContext <= 0 {
 		cfg.MaxContext = 32768
-	}
-	if cfg.MaxToolRepairs <= 0 {
-		cfg.MaxToolRepairs = 2
 	}
 	if cfg.TurnTimeout == 0 {
 		cfg.TurnTimeout = 300 * time.Second
@@ -287,7 +283,6 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 	}()
 
 	summary := TurnSummary{}
-	repairsLeft := a.cfg.MaxToolRepairs
 	extractFlow := a.cfg.FlowIDExtractor
 
 	for round := 0; ; round++ {
@@ -367,9 +362,7 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 			}
 		}
 
-		a.dispatchToolCalls(inner, resp.ToolCalls, &summary, &repairsLeft, extractFlow)
-		// reset repair budget per assistant response
-		repairsLeft = a.cfg.MaxToolRepairs
+		a.dispatchToolCalls(inner, resp.ToolCalls, &summary, extractFlow)
 	}
 }
 
@@ -379,7 +372,6 @@ type toolOutcome struct {
 	rec     ToolCallRecord
 	histMsg Message
 	flowIDs []string
-	skip    bool // true for repair-failure path that consumed a repair slot
 }
 
 // dispatchToolCalls runs handlers for calls and folds each outcome into history and summary in original order.
@@ -387,13 +379,12 @@ func (a *OpenAIAgent) dispatchToolCalls(
 	inner context.Context,
 	calls []ToolCall,
 	summary *TurnSummary,
-	repairsLeft *int,
 	extractFlow func(...any) []string,
 ) {
 	outcomes := make([]toolOutcome, len(calls))
 
-	// Phase 1: synchronous pre-flight (repair + flow-id extraction). We do this single-threaded so repair-budget
-	// accounting is deterministic and malformed outcomes land in slot order regardless of handler scheduling.
+	// Phase 1: synchronous pre-flight (repair + flow-id extraction). Single-threaded so malformed
+	// outcomes land in slot order regardless of handler scheduling.
 	parsed := make([]json.RawMessage, len(calls))
 	ok := make([]bool, len(calls))
 	for i, tc := range calls {
@@ -416,9 +407,6 @@ func (a *OpenAIAgent) dispatchToolCalls(
 					Summary120:    Summarize120(errText),
 					IsRepairError: true,
 				},
-			}
-			if *repairsLeft > 0 {
-				*repairsLeft--
 			}
 			continue
 		}
@@ -454,9 +442,6 @@ func (a *OpenAIAgent) dispatchToolCalls(
 
 	// Phase 3: serial fold, append to history and summary in tool_calls order
 	for _, o := range outcomes {
-		if o.skip {
-			continue
-		}
 		summary.ToolCalls = append(summary.ToolCalls, o.rec)
 		for _, f := range o.flowIDs {
 			summary.FlowIDs = appendUnique(summary.FlowIDs, f)

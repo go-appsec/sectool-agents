@@ -61,7 +61,7 @@ func (m *asyncMerger) Wait() {
 }
 
 func (m *asyncMerger) runOne(matchedFilename string, incoming AddInput) {
-	existing, path, ok := m.writer.LookupByFilename(matchedFilename)
+	_, path, ok := m.writer.LookupByFilename(matchedFilename)
 	if !ok {
 		m.log.Log("finding", "async-merge target missing", map[string]any{
 			"matched_filename": matchedFilename,
@@ -69,17 +69,11 @@ func (m *asyncMerger) runOne(matchedFilename string, incoming AddInput) {
 		return
 	}
 	secondary := candidateAsFindingFiled(incoming)
-	merged, err := m.reviewer.Merge(m.ctx, existing, secondary)
+	newPath, err := m.writer.MergeExisting(path, func(existing FindingFiled) (FindingFiled, error) {
+		return m.reviewer.Merge(m.ctx, existing, secondary)
+	})
 	if err != nil {
-		m.log.Log("finding", "async-merge classify error", map[string]any{
-			"matched_filename": matchedFilename,
-			"err":              err.Error(),
-		})
-		return
-	}
-	newPath, err := m.writer.Replace(path, merged)
-	if err != nil {
-		m.log.Log("finding", "async-merge replace error", map[string]any{
+		m.log.Log("finding", "async-merge error", map[string]any{
 			"matched_filename": matchedFilename,
 			"err":              err.Error(),
 		})

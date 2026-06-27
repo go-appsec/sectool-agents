@@ -157,7 +157,11 @@ func MatchPendingCandidatesTiered(filed FindingFiled, pending []FindingCandidate
 
 // FindingWriter persists verified findings.
 type FindingWriter struct {
-	mu          sync.Mutex
+	mu sync.Mutex
+	// mergeMu serializes read-modify-write composites on existing findings
+	// (Replace / MergeExisting) so concurrent merges cannot clobber each
+	// other. Always acquired before mu.
+	mergeMu     sync.Mutex
 	findingsDir string
 	// Count is the highest finding-NN-*.md sequence on disk.
 	Count int
@@ -404,6 +408,38 @@ func (w *FindingWriter) Write(filed FindingFiled) (string, error) {
 // Replace rewrites the finding at oldPath with filed, preserving the
 // sequence number and renaming if the slug differs. Returns the new path.
 func (w *FindingWriter) Replace(oldPath string, filed FindingFiled) (string, error) {
+	w.mergeMu.Lock()
+	defer w.mergeMu.Unlock()
+	return w.replaceLocked(oldPath, filed)
+}
+
+// MergeExisting atomically merges into the finding at oldPath: it re-reads the
+// latest content, applies mergeFn (which may issue an LLM call) with no index
+// lock held, then writes the result back preserving the sequence number.
+// Serialized against concurrent Replace/MergeExisting via mergeMu so in-flight
+// merges cannot clobber one another. Returns the new path.
+func (w *FindingWriter) MergeExisting(oldPath string, mergeFn func(existing FindingFiled) (FindingFiled, error)) (string, error) {
+	w.mergeMu.Lock()
+	defer w.mergeMu.Unlock()
+
+	w.mu.Lock()
+	idx := w.indexOfPath(oldPath)
+	if idx < 0 {
+		w.mu.Unlock()
+		return "", fmt.Errorf("merge: path not tracked: %s", oldPath)
+	}
+	existing, curPath := w.index[idx].filed, w.index[idx].path
+	w.mu.Unlock()
+
+	merged, err := mergeFn(existing)
+	if err != nil {
+		return "", err
+	}
+	return w.replaceLocked(curPath, merged)
+}
+
+// replaceLocked performs Replace's work assuming mergeMu is held by the caller.
+func (w *FindingWriter) replaceLocked(oldPath string, filed FindingFiled) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

@@ -2,6 +2,7 @@ package util
 
 import (
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -28,6 +29,35 @@ func TestTruncate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, Truncate(tc.in, tc.n))
+		})
+	}
+}
+
+func TestTruncateBytes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		in       string
+		maxBytes int
+		want     string
+	}{
+		{name: "empty", in: "", maxBytes: 10, want: ""},
+		{name: "within_limit", in: "hello", maxBytes: 10, want: "hello"},
+		{name: "exact_limit", in: "hello", maxBytes: 5, want: "hello"},
+		{name: "ascii_cut", in: "hello world", maxBytes: 7, want: "hello w"},
+		{name: "zero_max", in: "hello", maxBytes: 0, want: ""},
+		{name: "negative_max", in: "hello", maxBytes: -1, want: ""},
+		{name: "multibyte_not_split", in: "héllo", maxBytes: 2, want: "h"},
+		{name: "multibyte_kept_whole", in: "héllo", maxBytes: 3, want: "hé"},
+		{name: "emoji_not_split", in: "🦀x", maxBytes: 2, want: ""},
+		{name: "emoji_kept_whole", in: "🦀x", maxBytes: 4, want: "🦀"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := TruncateBytes(tc.in, tc.maxBytes)
+			assert.Equal(t, tc.want, got)
+			assert.True(t, utf8.ValidString(got))
 		})
 	}
 }

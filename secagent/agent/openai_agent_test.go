@@ -262,7 +262,7 @@ func TestOpenAIAgent_MalformedArgs(t *testing.T) {
 		}
 		var malformed int32
 		a := NewOpenAIAgent(OpenAIAgentConfig{
-			Model: "m", Pool: newPoolWith(client), MaxToolRepairs: 2,
+			Model: "m", Pool: newPoolWith(client),
 			OnMalformedCall: func(_ string, _ error) { atomic.AddInt32(&malformed, 1) },
 		})
 		a.SetTools([]ToolDef{{

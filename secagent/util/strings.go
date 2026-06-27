@@ -29,6 +29,21 @@ func Truncate(s string, n int) string {
 	return s
 }
 
+// TruncateBytes returns the longest prefix of s that fits in at most maxBytes
+// bytes without splitting a multi-byte UTF-8 codepoint.
+func TruncateBytes(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
 // StripCodeFences removes a leading and trailing markdown fenced-code line from s.
 func StripCodeFences(s string) string {
 	lines := strings.Split(s, "\n")

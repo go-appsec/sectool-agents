@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // Think-block variants seen in practice; case-insensitive, non-greedy.
@@ -103,6 +104,9 @@ func compactThinkTail(s string, maxChars int) string {
 		return collapsed
 	}
 	tail := collapsed[len(collapsed)-maxChars:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
 	if sp := strings.IndexByte(tail, ' '); sp > 0 {
 		tail = tail[sp+1:]
 	}

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/go-appsec/secagent/util"
@@ -154,7 +155,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 		}
 
 		thinkCount++
-		h.ReplaceAll(msgs)
+		h.ReplaceAll(slices.Clone(msgs))
 		if h.EstimateTokens() <= target {
 			break
 		}
@@ -180,7 +181,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 
 		if StubToolResult(&msgs[i]) {
 			stubbed++
-			h.ReplaceAll(msgs)
+			h.ReplaceAll(slices.Clone(msgs))
 			if h.EstimateTokens() <= target {
 				break
 			}
@@ -215,7 +216,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 		if first != msgs[i].Content {
 			msgs[i].Content = first
 			truncCount++
-			h.ReplaceAll(msgs)
+			h.ReplaceAll(slices.Clone(msgs))
 			if h.EstimateTokens() <= target {
 				break
 			}

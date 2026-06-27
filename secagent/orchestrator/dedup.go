@@ -368,17 +368,15 @@ func ApplyDedupVerdict(ctx context.Context,
 		return false, similar.Path, nil
 
 	case dedupActionPartial:
-		primary, secondary := similar.Filed, incoming
-		if verdict.MoreComplete == "new" {
-			primary, secondary = incoming, similar.Filed
-		}
-		merged, merr := reviewer.Merge(ctx, primary, secondary)
+		newPath, merr := writer.MergeExisting(similar.Path, func(existing FindingFiled) (FindingFiled, error) {
+			primary, secondary := existing, incoming
+			if verdict.MoreComplete == "new" {
+				primary, secondary = incoming, existing
+			}
+			return reviewer.Merge(ctx, primary, secondary)
+		})
 		if merr != nil {
 			return false, "", merr
-		}
-		newPath, rerr := writer.Replace(similar.Path, merged)
-		if rerr != nil {
-			return false, "", rerr
 		}
 		log.Log("finding", "dedup-partial-merge", map[string]any{
 			"path": newPath, "merged_into": similar.Path, "more_complete": verdict.MoreComplete,

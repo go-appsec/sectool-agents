@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -372,6 +373,42 @@ func TestCompactRemainder(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, report.PassesApplied, "hard-truncate")
 		assertToolPairing(t, h.Snapshot())
+	})
+
+	// Regression for the in-place compaction race: the narrator reads an agent's
+	// history (Snapshot/EstimateTokens, both locked) while CompactRemainder runs
+	// its in-place passes. Fails under -race if the passes mutate the live
+	// backing array without the lock.
+	t.Run("concurrent_readers_race", func(t *testing.T) {
+		big := strings.Repeat("x", 6_000)
+		h := buildFattyHistory(8192, big)
+
+		stop := make(chan struct{})
+		var readers sync.WaitGroup
+		for range 4 {
+			readers.Add(1)
+			go func() {
+				defer readers.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						_ = h.Snapshot()
+						_ = h.EstimateTokens()
+					}
+				}
+			}()
+		}
+
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
+		})
+		close(stop)
+		readers.Wait()
+
+		require.NoError(t, err)
+		assert.NotEmpty(t, report.PassesApplied)
 	})
 }
 
