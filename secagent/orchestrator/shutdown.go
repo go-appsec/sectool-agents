@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"slices"
+	"sync"
 	"sync/atomic"
 )
 
@@ -30,6 +32,11 @@ type Shutdown struct {
 	// RootCtx is the parent context for teardown work outliving both worker- and verifier-level cancellations.
 	RootCtx context.Context
 
+	// mu guards the bound cancels; signal handling may race with Run binding them.
+	mu           sync.Mutex
+	workerStop   []context.CancelFunc // extra cancels for contexts Run derives from its own ctx
+	verifierStop []context.CancelFunc
+
 	log *Logger
 }
 
@@ -47,6 +54,48 @@ func NewShutdown(parent context.Context, log *Logger) *Shutdown {
 	}
 }
 
+// BindWorkerCancel registers cancel so stage transitions also stop a worker
+// context Run derives from its own ctx (rather than WorkersCtx).
+func (s *Shutdown) BindWorkerCancel(cancel context.CancelFunc) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.workerStop = append(s.workerStop, cancel)
+	s.mu.Unlock()
+}
+
+// BindVerifierCancel registers cancel so stage transitions also stop a verifier
+// context Run derives from its own ctx (rather than VerifierCtx).
+func (s *Shutdown) BindVerifierCancel(cancel context.CancelFunc) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.verifierStop = append(s.verifierStop, cancel)
+	s.mu.Unlock()
+}
+
+func (s *Shutdown) stopWorkers() {
+	s.workersCancel()
+	s.mu.Lock()
+	stops := slices.Clone(s.workerStop)
+	s.mu.Unlock()
+	for _, cancel := range stops {
+		cancel()
+	}
+}
+
+func (s *Shutdown) stopVerifiers() {
+	s.verifierCancel()
+	s.mu.Lock()
+	stops := slices.Clone(s.verifierStop)
+	s.mu.Unlock()
+	for _, cancel := range stops {
+		cancel()
+	}
+}
+
 // Phase returns the current shutdown phase.
 func (s *Shutdown) Phase() int32 {
 	if s == nil {
@@ -61,7 +110,7 @@ func (s *Shutdown) RequestVerifyOnly() {
 		return
 	}
 	if s.phase.CompareAndSwap(ShutdownPhaseRunning, ShutdownPhaseVerifyOnly) {
-		s.workersCancel()
+		s.stopWorkers()
 		s.log.Log("shutdown", "verify-only requested", map[string]any{"phase": ShutdownPhaseVerifyOnly})
 	}
 }
@@ -78,8 +127,8 @@ func (s *Shutdown) RequestDumpUnvalidated() {
 			return
 		}
 		if s.phase.CompareAndSwap(cur, ShutdownPhaseDumpUnvalidated) {
-			s.workersCancel()
-			s.verifierCancel()
+			s.stopWorkers()
+			s.stopVerifiers()
 			s.log.Log("shutdown", "dump-unvalidated requested", map[string]any{"phase": ShutdownPhaseDumpUnvalidated})
 			return
 		}
@@ -121,8 +170,8 @@ func (s *Shutdown) RequestKill() {
 			return
 		}
 		if s.phase.CompareAndSwap(cur, ShutdownPhaseKill) {
-			s.workersCancel()
-			s.verifierCancel()
+			s.stopWorkers()
+			s.stopVerifiers()
 			s.log.Log("shutdown", "kill requested", map[string]any{"phase": ShutdownPhaseKill})
 			return
 		}

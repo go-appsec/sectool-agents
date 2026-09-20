@@ -47,7 +47,7 @@ func StartSectool(ctx context.Context, proxyPort, mcpPort int, binary string, at
 	if err != nil {
 		return nil, fmt.Errorf("create log file: %w", err)
 	}
-	cmd := exec.Command(binary, "mcp",
+	cmd := exec.CommandContext(ctx, binary, "mcp",
 		fmt.Sprintf("--proxy-port=%d", proxyPort),
 		fmt.Sprintf("--port=%d", mcpPort),
 		"--workflow=multi",

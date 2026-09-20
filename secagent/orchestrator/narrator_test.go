@@ -156,7 +156,7 @@ func TestNarrator(t *testing.T) {
 		require.NotNil(t, n)
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
@@ -178,7 +178,7 @@ func TestNarrator(t *testing.T) {
 		require.NotNil(t, n)
 
 		recordSubstantiveEvents(n, narratorMinEvents-1)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		// TriggerNow short-circuits synchronously when below threshold,
 		// no goroutine spawned, so the buf inspection is race-free.
 		n.mu.Lock()
@@ -189,7 +189,7 @@ func TestNarrator(t *testing.T) {
 
 		// Crossing the threshold fires and carries the prior events with it
 		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 4})
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
@@ -208,15 +208,15 @@ func TestNarrator(t *testing.T) {
 		require.NotNil(t, n)
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow() // firing #1 blocks on gate
+		n.TriggerNow(t.Context()) // firing #1 blocks on gate
 		require.Eventually(t, func() bool {
 			return atomic.LoadInt32(&client.calls) == 1
 		}, time.Second, time.Millisecond)
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
-		n.TriggerNow()
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
+		n.TriggerNow(t.Context())
+		n.TriggerNow(t.Context())
 
 		close(gate)
 		waitForCalls(t, &client.calls, 2)
@@ -239,7 +239,7 @@ func TestNarrator(t *testing.T) {
 		require.NotNil(t, n)
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
@@ -280,7 +280,7 @@ func TestNarrator(t *testing.T) {
 		require.NotNil(t, n)
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(parentCtx)
 		require.Eventually(t, func() bool {
 			return atomic.LoadInt32(&client.calls) >= 1
 		}, time.Second, time.Millisecond)
@@ -305,13 +305,13 @@ func TestNarrator(t *testing.T) {
 		require.NotNil(t, n)
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.Tick() // inside interval, must NOT fire
+		n.Tick(t.Context()) // inside interval, must NOT fire
 		assert.Equal(t, int32(0), atomic.LoadInt32(&client.calls))
 
 		n.mu.Lock()
 		n.lastFireAt = time.Now().Add(-time.Second)
 		n.mu.Unlock()
-		n.Tick()
+		n.Tick(t.Context())
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
@@ -330,7 +330,7 @@ func TestNarrator(t *testing.T) {
 		n.Record("controller", "transition phase idle to autonomous", nil)
 		n.Record("controller", "iteration start", map[string]any{"iter": 1})
 		n.Record("worker", "seeded", map[string]any{"id": 1})
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		// TriggerNow short-circuits synchronously when unarmed, no goroutine is spawned, so the state check is race-free
 		n.mu.Lock()
 		armed := n.armed
@@ -339,7 +339,7 @@ func TestNarrator(t *testing.T) {
 		assert.Equal(t, int32(0), atomic.LoadInt32(&client.calls))
 
 		n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": 1})
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
@@ -358,7 +358,7 @@ func TestNarrator(t *testing.T) {
 		require.NotNil(t, n)
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
@@ -384,7 +384,7 @@ func TestNarratorContent(t *testing.T) {
 		require.NotNil(t, n)
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
@@ -403,7 +403,7 @@ func TestNarratorContent(t *testing.T) {
 		require.NotNil(t, n)
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
@@ -475,7 +475,7 @@ func TestNarratorContent(t *testing.T) {
 				require.NotNil(t, n)
 
 				recordSubstantiveEvents(n, narratorMinEvents)
-				n.TriggerNow()
+				n.TriggerNow(t.Context())
 				waitForCalls(t, calls, 1)
 				n.Close()
 				_ = l.Close()
@@ -518,7 +518,7 @@ func TestNarratorAgentDispatch(t *testing.T) {
 		})
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 3)
 		n.Close()
 		_ = l.Close()
@@ -556,7 +556,7 @@ func TestNarratorAgentDispatch(t *testing.T) {
 		})
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 2)
 		n.Close()
 		_ = l.Close()
@@ -589,7 +589,7 @@ func TestNarratorAgentDispatch(t *testing.T) {
 		n.SetActiveAgents([]NamedAgent{{Name: "worker-1", Agent: worker}})
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 2)
 		n.Close()
 		_ = l.Close()
@@ -612,7 +612,7 @@ func TestNarratorAgentDispatch(t *testing.T) {
 		// No SetActiveAgents call.
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 1)
 		n.Close()
 		_ = l.Close()
@@ -668,7 +668,7 @@ func TestNarratorAgentNarrationFlow(t *testing.T) {
 		n.SetActiveAgents([]NamedAgent{{Name: "worker-1", Agent: a}})
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 2)
 		n.Close()
 		_ = l.Close()
@@ -697,14 +697,14 @@ func TestNarratorAgentNarrationFlow(t *testing.T) {
 		n.SetActiveAgents([]NamedAgent{{Name: "worker-1", Agent: a}})
 
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		// Wait for the first firing to commit its summary + cursor, not just enter
 		// the call; the second firing reads that state to build its prompt.
 		waitForLog(t, l, buf, "worker-1:")
 
 		appendAssistantMessage(a, "newer probe of /api/v2")
 		recordSubstantiveEvents(n, narratorMinEvents)
-		n.TriggerNow()
+		n.TriggerNow(t.Context())
 		waitForCalls(t, &client.calls, 4)
 		n.Close()
 		_ = l.Close()
@@ -738,7 +738,7 @@ func TestNarratorAgentNarrationFlow(t *testing.T) {
 		for i := 0; i < 4; i++ {
 			appendAssistantMessage(a, "probe round")
 			recordSubstantiveEvents(n, narratorMinEvents)
-			n.TriggerNow()
+			n.TriggerNow(t.Context())
 			waitForCalls(t, &client.calls, int32((i+1)*2))
 		}
 		n.Close()

@@ -5,6 +5,7 @@ linters:
     - asasalint
     - asciicheck
     - bidichk
+    - contextcheck
     - decorder
     - durationcheck
     - errcheck
@@ -13,7 +14,6 @@ linters:
     - fatcontext
     - gocheckcompilerdirectives
     - gochecksumtype
-    - goconst
     - godoclint
     - gosmopolitan
     - grouper
@@ -22,6 +22,7 @@ linters:
     - mirror
     - misspell
     - musttag
+    - noctx
     - perfsprint
     - prealloc
     - reassign
@@ -33,10 +34,6 @@ linters:
     - unconvert
     - wastedassign
     - whitespace
-  settings:
-    goconst:
-      min-len: 4
-      min-occurrences: 4
 
 formatters:
   enable:

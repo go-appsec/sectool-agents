@@ -400,6 +400,15 @@ func newWorkerSpawner(mcpURL string, toolResultMaxBytes int,
 // Run starts sectool and drives the iteration loop until cfg.MaxIterations is reached or the director ends the run.
 // attached signals that an MCP server is already reachable at cfg.MCPPort; when true no child sectool is launched.
 func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd *Shutdown) error {
+	// derive phase-scoped contexts from ctx so staged shutdown (via the bound
+	// cancels) and caller cancellation both reach worker/verifier runs.
+	workerRunCtx, workerStop := context.WithCancel(ctx)
+	defer workerStop()
+	verifierRunCtx, verifierStop := context.WithCancel(ctx)
+	defer verifierStop()
+	sd.BindWorkerCancel(workerStop)
+	sd.BindVerifierCancel(verifierStop)
+
 	srv, err := StartSectool(ctx, cfg.ProxyPort, cfg.MCPPort, cfg.SectoolBinary, attached, log)
 	if err != nil {
 		return fmt.Errorf("sectool start: %w", err)
@@ -649,9 +658,13 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		// wait on narration that the operator doesn't care about anymore
 		Parent: ctx,
 	}, log)
+	// narrCtx cancels in-flight narration on Run teardown; derived from ctx so
+	// ctrl+c propagation and Close-based aborts both reach pending summaries.
+	narrCtx, narrCancel := context.WithCancel(ctx)
 	log.AttachNarrator(narrator)
 	defer func() {
 		log.AttachNarrator(nil)
+		narrCancel()
 		narrator.Close()
 	}()
 	fields := map[string]any{}
@@ -671,7 +684,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		currentPhase = to
 		narrator.SetActiveAgents(computeActiveAgents())
 		log.Log("controller", "transition phase "+from+" to "+to, nil)
-		narrator.TriggerNow()
+		narrator.TriggerNow(narrCtx)
 	}
 
 	// fires one worker's iter run as a goroutine; the returned func blocks for the result
@@ -726,14 +739,16 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 
 	w1.Chronicle.Install(w1.Agent, w1.LastInstruction)
 	inflight := map[int]func() []agent.TurnSummary{}
-	inflight[1] = fire(sd.WorkersCtx, w1)
+	// seed the first worker run on ctx so inherited cancellation and staged
+	// shutdown both apply to this pre-loop fire
+	inflight[1] = fire(workerRunCtx, w1)
 
 	var iteration int
 	for iteration = 1; iteration <= cfg.MaxIterations; iteration++ {
 		guardIteration = iteration
 
 		phaseTransition("idle", "autonomous")
-		narrator.Tick()
+		narrator.Tick(narrCtx)
 		workerRuns := harvestInflight(inflight)
 		inflight = map[int]func() []agent.TurnSummary{}
 
@@ -772,8 +787,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		if isDeadIteration(workerRuns, candidatesBefore, candidates.Counter()) {
 			log.Log("controller", "dead-iteration", map[string]any{"iter": iteration})
 			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
-			refireAlive(sd.WorkersCtx, workers, fire, inflight, log)
-			narrator.TriggerNow()
+			refireAlive(workerRunCtx, workers, fire, inflight, log)
+			narrator.TriggerNow(narrCtx)
 			continue
 		}
 
@@ -789,7 +804,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		log.Log("compose", "installed", map[string]any{"role": "verifier", "iter": iteration})
 		phaseTransition("autonomous", "verification")
 		verificationSummary := RunVerificationPhase(
-			sd.VerifierCtx, verifier, decisions, candidates, writer, dedupReviewer, log,
+			verifierRunCtx, verifier, decisions, candidates, writer, dedupReviewer, log,
 		)
 		if verifierOverflowed && !decisions.HasVerificationDone && len(candidates.Pending()) > 0 {
 			AutoDismissOnContextOverflow(candidates, decisions, log)
@@ -832,11 +847,11 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			LatchStallWarnings(workers, cfg.StallWarnAfter)
 
 			synthesisDirector.SetTools(nil)
-			RunIter1ReconReviewCall(sd.WorkersCtx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
+			RunIter1ReconReviewCall(workerRunCtx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
 
 			synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
 				SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
-			RunIter1ReconPlanCall(sd.WorkersCtx, synthesisDirector, dirChat, decisions, iterStatus, cfg.MaxWorkers, log)
+			RunIter1ReconPlanCall(workerRunCtx, synthesisDirector, dirChat, decisions, iterStatus, cfg.MaxWorkers, log)
 
 			if decisions.HasEndRun {
 				log.Log("controller", "end_run", map[string]any{"summary": decisions.EndRunSummary})
@@ -854,16 +869,16 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 					"recon_summary":   util.Truncate(factory.ReconSummary, 200),
 				})
 			}
-			applyPlanAndFire(sd.WorkersCtx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
+			applyPlanAndFire(workerRunCtx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
 			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
-			narrator.TriggerNow()
+			narrator.TriggerNow(narrCtx)
 			continue
 		}
 
 		// directors get sectool tools so they can spot-check rather than hallucinate
 		decisionDirector.SetTools(append(slices.Clone(decisionDirectorSectoolDefs),
 			DecisionToolDefs(decisions, takenIDsFn, log)...))
-		decRes := RunDecisionPhase(sd.WorkersCtx, DecisionPhaseInput{
+		decRes := RunDecisionPhase(workerRunCtx, DecisionPhaseInput{
 			Director: decisionDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, WorkerRuns: workerRuns,
 			IterationStatus: iterStatus, Iter: iteration, MaxWorkers: cfg.MaxWorkers,
@@ -877,7 +892,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 
 		synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
 			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
-		RunSynthesisPhase(sd.WorkersCtx, SynthesisPhaseInput{
+		RunSynthesisPhase(workerRunCtx, SynthesisPhaseInput{
 			Director: synthesisDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, Completed: completed,
 			VerifierSummary: verificationSummary, FindingsSummary: writer.SummaryForOrchestrator(),
@@ -897,11 +912,11 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			inflight[id] = j
 		}
 		if decisions.HasPlan {
-			applyPlanAndFire(sd.WorkersCtx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
+			applyPlanAndFire(workerRunCtx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
 		}
 
 		appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
-		narrator.TriggerNow()
+		narrator.TriggerNow(narrCtx)
 	}
 
 	// drain in-flight runs the loop fired but never harvested (end_run break)
@@ -923,7 +938,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 				"pending": len(candidates.Pending()),
 			})
 			RunVerificationPhase(
-				sd.VerifierCtx, verifier, decisions, candidates, writer, dedupReviewer, log,
+				verifierRunCtx, verifier, decisions, candidates, writer, dedupReviewer, log,
 			)
 			if verifierOverflowed && len(candidates.Pending()) > 0 {
 				AutoDismissOnContextOverflow(candidates, decisions, log)

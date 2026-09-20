@@ -138,7 +138,7 @@ func (n *Narrator) runTicker() {
 		case <-n.tickerStop:
 			return
 		case <-t.C:
-			n.Tick()
+			n.Tick(n.shutdownCtx)
 		}
 	}
 }
@@ -198,7 +198,7 @@ func isSubstantiveNarrationEvent(tag, msg string) bool {
 }
 
 // Tick fires a summary when armed, the buffer has narratorMinEvents, and Interval has elapsed since the last fire.
-func (n *Narrator) Tick() {
+func (n *Narrator) Tick(ctx context.Context) {
 	if n == nil {
 		return
 	}
@@ -207,13 +207,13 @@ func (n *Narrator) Tick() {
 	shouldFire := n.armed && len(n.buf) >= narratorMinEvents && now.Sub(n.lastFireAt) >= n.cfg.Interval
 	n.mu.Unlock()
 	if shouldFire {
-		n.fireAsync()
+		n.fireAsync(ctx)
 	}
 }
 
 // TriggerNow forces a firing regardless of cadence. No-op when not yet
 // armed or when fewer than narratorMinEvents are buffered.
-func (n *Narrator) TriggerNow() {
+func (n *Narrator) TriggerNow(ctx context.Context) {
 	if n == nil {
 		return
 	}
@@ -223,12 +223,12 @@ func (n *Narrator) TriggerNow() {
 	if skip {
 		return
 	}
-	n.fireAsync()
+	n.fireAsync(ctx)
 }
 
 // fireAsync spawns a firing goroutine. Concurrent callers either win the n.mu-guarded buffer snapshot (and proceed)
 // or see an empty buffer (and return); the log pool is the only cap on concurrent in-flight calls.
-func (n *Narrator) fireAsync() {
+func (n *Narrator) fireAsync(ctx context.Context) {
 	n.wg.Add(1)
 	go func() {
 		defer n.wg.Done()
@@ -242,18 +242,17 @@ func (n *Narrator) fireAsync() {
 		n.lastFireAt = time.Now()
 		n.mu.Unlock()
 
-		n.runSummary(snapshot)
+		n.runSummary(ctx, snapshot)
 	}()
 }
 
 // runSummary concurrently dispatches one orchestrator-level summary and one per-active-agent summary
 // under a shared timeout. Pool capacity gates real concurrency; surplus calls queue at Acquire.
-func (n *Narrator) runSummary(events []narratorEvent) {
-	// shutdownCtx parent so Close aborts in-flight HTTP calls
-	ctx, cancel := context.WithTimeout(n.shutdownCtx, n.cfg.CallBudget)
+func (n *Narrator) runSummary(ctx context.Context, events []narratorEvent) {
+	sctx, cancel := context.WithTimeout(ctx, n.cfg.CallBudget)
 	defer cancel()
 
-	if ctx.Err() != nil {
+	if sctx.Err() != nil {
 		return
 	}
 
@@ -265,7 +264,7 @@ func (n *Narrator) runSummary(events []narratorEvent) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		n.runOrchestratorSummary(ctx, events)
+		n.runOrchestratorSummary(sctx, events)
 	}()
 	for _, na := range agents {
 		if na.Agent == nil || na.Name == "" {
@@ -274,7 +273,7 @@ func (n *Narrator) runSummary(events []narratorEvent) {
 		wg.Add(1)
 		go func(na NamedAgent) {
 			defer wg.Done()
-			n.runAgentSummary(ctx, na)
+			n.runAgentSummary(sctx, na)
 		}(na)
 	}
 	wg.Wait()

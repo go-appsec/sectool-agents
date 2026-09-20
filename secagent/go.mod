@@ -3,7 +3,7 @@ module github.com/go-appsec/secagent
 go 1.25.5
 
 require (
-	github.com/go-analyze/bulk v0.1.5
+	github.com/go-analyze/bulk v0.1.6
 	github.com/mark3labs/mcp-go v1.1.0
 	github.com/sashabaranov/go-openai v1.42.1
 	github.com/stretchr/testify v1.12.1
