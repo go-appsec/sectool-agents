@@ -95,7 +95,7 @@ func TestDumpUnvalidatedCandidates(t *testing.T) {
 
 	t.Run("writes_unvalidated_files", func(t *testing.T) {
 		dir := t.TempDir()
-		writer := NewFindingWriter(dir)
+		writer := newTestFindingWriter(t, dir)
 		pending := []FindingCandidate{
 			{
 				CandidateID: "c001", WorkerID: 2, Title: "Reflected XSS",
@@ -139,7 +139,7 @@ func TestShutdownEscalateMidVerify(t *testing.T) {
 		Severity: "med", Endpoint: "GET /y",
 	})
 
-	writer := NewFindingWriter(t.TempDir())
+	writer := newTestFindingWriter(t, t.TempDir())
 	decisions := NewDecisionQueue()
 	sd := NewShutdown(t.Context(), nil)
 

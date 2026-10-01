@@ -451,7 +451,10 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 
 	candidates := NewCandidatePool()
 	decisions := NewDecisionQueue()
-	writer := NewFindingWriter(cfg.FindingsDir)
+	writer, err := NewFindingWriter(cfg.FindingsDir)
+	if err != nil {
+		return fmt.Errorf("load findings dir: %w", err)
+	}
 	// shared between worker hot path, verifier dedup, and async merger; main
 	// model only; the log model produced too many false-merge verdicts
 	dedupReviewer := &OpenAIDedupReviewer{

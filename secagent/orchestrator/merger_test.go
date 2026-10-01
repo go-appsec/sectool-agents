@@ -53,7 +53,7 @@ func TestAsyncMerger(t *testing.T) {
 	t.Parallel()
 
 	t.Run("submit_merges_into_existing", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		path, err := writer.Write(FindingFiled{
 			Title: "OAuth client enum", Severity: "medium", Endpoint: "GET /oauth2/authorize",
 			Description: "Existing notes.",
@@ -83,7 +83,7 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("target_missing_preserves_evidence", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		rev := &fakeReviewer{}
 		log, path, _ := newCapturedLogger(t)
 		candidates := NewCandidatePool()
@@ -103,7 +103,7 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("stale_filename_resolves_by_seq", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		path, err := writer.Write(FindingFiled{
 			Title: "OAuth client enum", Severity: "medium", Endpoint: "GET /oauth2/authorize",
 		})
@@ -129,7 +129,7 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("logs_classify_error", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		p, err := writer.Write(FindingFiled{
 			Title: "T", Severity: "low", Endpoint: "GET /",
 		})
@@ -151,7 +151,7 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("concurrent_merges_preserve_all", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		path, err := writer.Write(FindingFiled{
 			Title: "Base", Severity: "low", Endpoint: "GET /x", Evidence: "base",
 		})
@@ -180,7 +180,7 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("wait_blocks_on_submits", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		for i := range 3 {
 			_, err := writer.Write(FindingFiled{
 				Title: "F" + string(rune('A'+i)), Severity: "low", Endpoint: "GET /",
@@ -202,7 +202,7 @@ func TestAsyncMerger(t *testing.T) {
 	})
 
 	t.Run("canceled_context_skips", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		p, err := writer.Write(FindingFiled{
 			Title: "T", Severity: "low", Endpoint: "GET /",
 		})

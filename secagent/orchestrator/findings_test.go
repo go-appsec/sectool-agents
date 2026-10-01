@@ -92,11 +92,11 @@ func TestParseFindingMarkdown(t *testing.T) {
 	t.Run("disk_round_trip_seeds_dedup_index", func(t *testing.T) {
 		// Guards against silent dedup loss across process restart
 		dir := t.TempDir()
-		w := NewFindingWriter(dir)
+		w := newTestFindingWriter(t, dir)
 		_, err := w.Write(full)
 		require.NoError(t, err)
 
-		w2 := NewFindingWriter(dir)
+		w2 := newTestFindingWriter(t, dir)
 		assert.True(t, w2.IsDuplicate(full))
 	})
 }
@@ -115,14 +115,14 @@ func TestFindingWriterIsDuplicate(t *testing.T) {
 	}
 
 	t.Run("detects_duplicate", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(finding)
 		require.NoError(t, err)
 		assert.True(t, w.IsDuplicate(finding))
 	})
 
 	t.Run("different_title_not_duplicate", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(finding)
 		require.NoError(t, err)
 		other := finding
@@ -142,7 +142,7 @@ func TestFindingWriterIsDuplicate(t *testing.T) {
 			Severity: "high",
 			Endpoint: "POST /oauth2/register",
 		}
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(first)
 		require.NoError(t, err)
 		assert.True(t, w.IsDuplicate(second))
@@ -151,7 +151,7 @@ func TestFindingWriterIsDuplicate(t *testing.T) {
 	t.Run("same_title_missing_endpoint_not_duplicate", func(t *testing.T) {
 		// Endpoint divergence (one side empty) is not treated as duplicate here
 		// it falls through to FindSimilarEntries so the LLM reviewer can decide
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(finding)
 		require.NoError(t, err)
 		other := finding
@@ -160,7 +160,7 @@ func TestFindingWriterIsDuplicate(t *testing.T) {
 	})
 
 	t.Run("same_title_different_endpoint_not_duplicate", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(finding)
 		require.NoError(t, err)
 		other := finding
@@ -169,7 +169,7 @@ func TestFindingWriterIsDuplicate(t *testing.T) {
 	})
 
 	t.Run("similar_title_not_exact_slug_not_duplicate", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(finding)
 		require.NoError(t, err)
 		other := FindingFiled{
@@ -184,7 +184,7 @@ func TestFindingWriterIsDuplicate(t *testing.T) {
 func TestFindSimilarEntries(t *testing.T) {
 	t.Parallel()
 
-	w := NewFindingWriter(t.TempDir())
+	w := newTestFindingWriter(t, t.TempDir())
 	_, err := w.Write(FindingFiled{
 		Title: "Reflected XSS in search", Severity: "high", Endpoint: "GET /search",
 	})
@@ -226,7 +226,7 @@ func TestFindingWriterReplace(t *testing.T) {
 	t.Parallel()
 
 	t.Run("preserves_sequence_renames_on_title_change", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		p1, err := w.Write(FindingFiled{Title: "Original Title", Severity: "low", Endpoint: "GET /"})
 		require.NoError(t, err)
 
@@ -242,7 +242,7 @@ func TestFindingWriterReplace(t *testing.T) {
 	})
 
 	t.Run("same_title_writes_in_place", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		p1, err := w.Write(FindingFiled{Title: "Same", Severity: "low", Endpoint: "GET /"})
 		require.NoError(t, err)
 		p2, err := w.Replace(p1, FindingFiled{Title: "Same", Severity: "high", Endpoint: "GET /"})
@@ -252,9 +252,31 @@ func TestFindingWriterReplace(t *testing.T) {
 
 	t.Run("untracked_path_errors", func(t *testing.T) {
 		dir := t.TempDir()
-		w := NewFindingWriter(dir)
+		w := newTestFindingWriter(t, dir)
 		_, err := w.Replace(filepath.Join(dir, "finding-01-nope.md"), FindingFiled{Title: "x"})
 		assert.Error(t, err)
+	})
+
+	t.Run("remove_failure_rolls_back", func(t *testing.T) {
+		// New file landed but old removal failed: the new file must be
+		// rolled back so disk and index stay consistent.
+		dir := t.TempDir()
+		w := newTestFindingWriter(t, dir)
+		p1, err := w.Write(FindingFiled{Title: "Original", Severity: "low", Endpoint: "GET /"})
+		require.NoError(t, err)
+		// swap the finding file for a non-empty dir so os.Remove fails
+		require.NoError(t, os.Remove(p1))
+		require.NoError(t, os.Mkdir(p1, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(p1, "blocker"), []byte("x"), 0o644))
+
+		_, err = w.Replace(p1, FindingFiled{Title: "Renamed", Severity: "high", Endpoint: "GET /"})
+		require.Error(t, err)
+		_, statErr := os.Stat(filepath.Join(dir, "finding-01-renamed.md"))
+		assert.True(t, os.IsNotExist(statErr), "partial replace must not leave the new file behind")
+		title, path, ok := w.MatchesFiled("Original", "GET /")
+		assert.True(t, ok, "index must still point at the untouched old entry")
+		assert.Equal(t, p1, path)
+		assert.Equal(t, "Original", title)
 	})
 }
 
@@ -268,7 +290,7 @@ func TestFindingWriterMatchesFiled(t *testing.T) {
 	}
 
 	t.Run("exact_slug_match", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(seed)
 		require.NoError(t, err)
 		title, path, ok := w.MatchesFiled("Reflected XSS in search", "GET /search")
@@ -280,7 +302,7 @@ func TestFindingWriterMatchesFiled(t *testing.T) {
 	t.Run("endpoint_plus_similar_title_miss", func(t *testing.T) {
 		// Fuzzy title match no longer satisfies the deterministic fallback,
 		// it routes to the LLM CandidateDedupReviewer instead.
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(seed)
 		require.NoError(t, err)
 		_, _, ok := w.MatchesFiled("Reflected XSS in search endpoint", "GET /search")
@@ -288,7 +310,7 @@ func TestFindingWriterMatchesFiled(t *testing.T) {
 	})
 
 	t.Run("same_title_different_endpoint_miss", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(seed)
 		require.NoError(t, err)
 		_, _, ok := w.MatchesFiled("Reflected XSS in search", "GET /admin")
@@ -296,7 +318,7 @@ func TestFindingWriterMatchesFiled(t *testing.T) {
 	})
 
 	t.Run("distinct_title_and_endpoint_miss", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(seed)
 		require.NoError(t, err)
 		_, _, ok := w.MatchesFiled("SQL Injection in login", "POST /login")
@@ -304,7 +326,7 @@ func TestFindingWriterMatchesFiled(t *testing.T) {
 	})
 
 	t.Run("endpoint_equal_but_unrelated_title_miss", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(seed)
 		require.NoError(t, err)
 		_, _, ok := w.MatchesFiled("Open Redirect via return_to", "GET /search")
@@ -316,12 +338,12 @@ func TestFindingWriterSummaryForWorker(t *testing.T) {
 	t.Parallel()
 
 	t.Run("empty_returns_empty_string", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		assert.Empty(t, w.SummaryForWorker())
 	})
 
 	t.Run("lists_titles_and_endpoints_without_severity", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(FindingFiled{
 			Title: "Reflected XSS", Severity: "critical", Endpoint: "GET /search",
 		})
@@ -342,6 +364,15 @@ func TestFindingWriterSummaryForWorker(t *testing.T) {
 	})
 }
 
+// newTestFindingWriter constructs a FindingWriter, failing the test on
+// seeding errors.
+func newTestFindingWriter(t *testing.T, dir string) *FindingWriter {
+	t.Helper()
+	w, err := NewFindingWriter(dir)
+	require.NoError(t, err)
+	return w
+}
+
 func TestNewFindingWriter(t *testing.T) {
 	t.Parallel()
 
@@ -350,7 +381,7 @@ func TestNewFindingWriter(t *testing.T) {
 		for _, name := range []string{"finding-03-foo.md", "finding-07-bar.md", "unrelated.md"} {
 			require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
 		}
-		w := NewFindingWriter(dir)
+		w := newTestFindingWriter(t, dir)
 		assert.Equal(t, 7, w.Count)
 		assert.Equal(t, 0, w.RunCount, "RunCount must not be seeded from disk")
 
@@ -363,7 +394,7 @@ func TestNewFindingWriter(t *testing.T) {
 
 	t.Run("missing_dir_starts_at_zero", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "does-not-exist")
-		w := NewFindingWriter(dir)
+		w := newTestFindingWriter(t, dir)
 		assert.Equal(t, 0, w.Count)
 
 		path, err := w.Write(FindingFiled{Title: "First", Severity: "low", Endpoint: "GET /"})
@@ -376,7 +407,51 @@ func TestNewFindingWriter(t *testing.T) {
 		for _, name := range []string{"finding-ab-x.md", "finding-.md", "other.md"} {
 			require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
 		}
-		assert.Equal(t, 0, NewFindingWriter(dir).Count)
+		w, err := NewFindingWriter(dir)
+		require.NoError(t, err)
+		assert.Equal(t, 0, w.Count)
+	})
+
+	t.Run("unreadable_dir_errors", func(t *testing.T) {
+		// A ReadDir failure must surface instead of silently seeding the
+		// sequence to 0, which would truncate findings on the next write.
+		dir := filepath.Join(t.TempDir(), "file-not-dir")
+		require.NoError(t, os.WriteFile(dir, []byte("x"), 0o644))
+		_, err := NewFindingWriter(dir)
+		assert.Error(t, err)
+	})
+}
+
+func TestFindingWriterWriteCollision(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bumps_sequence_on_name_collision", func(t *testing.T) {
+		// An unknown-to-index file at the target name must never be truncated.
+		dir := t.TempDir()
+		occupied := filepath.Join(dir, "finding-01-reflected-xss.md")
+		require.NoError(t, os.WriteFile(occupied, []byte("# Pre-existing"), 0o644))
+
+		w := newTestFindingWriter(t, dir)
+		path, err := w.Write(FindingFiled{Title: "Reflected XSS", Severity: "high", Endpoint: "GET /"})
+		require.NoError(t, err)
+		assert.Equal(t, "finding-02-reflected-xss.md", filepath.Base(path))
+		assert.Equal(t, 2, w.Count)
+
+		raw, err := os.ReadFile(occupied)
+		require.NoError(t, err)
+		assert.Equal(t, "# Pre-existing", string(raw))
+	})
+
+	t.Run("unvalidated_bumps_sequence_on_collision", func(t *testing.T) {
+		dir := t.TempDir()
+		occupied := filepath.Join(dir, "unvalidated-01-loose-sso-cookie.md")
+		require.NoError(t, os.WriteFile(occupied, []byte("x"), 0o644))
+
+		w := newTestFindingWriter(t, dir)
+		path, err := w.WriteUnvalidated(FindingCandidate{CandidateID: "c1", Title: "Loose SSO Cookie"})
+		require.NoError(t, err)
+		assert.Equal(t, "unvalidated-02-loose-sso-cookie.md", filepath.Base(path))
+		assert.Equal(t, 2, w.UnvalidatedCount)
 	})
 }
 
@@ -496,7 +571,7 @@ func TestFindingWriterWriteUnvalidated(t *testing.T) {
 	t.Parallel()
 
 	t.Run("writes_with_unvalidated_prefix_and_banner", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 
 		path, err := w.WriteUnvalidated(FindingCandidate{
 			CandidateID:      "c001",
@@ -537,7 +612,7 @@ func TestFindingWriterWriteUnvalidated(t *testing.T) {
 		} {
 			require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
 		}
-		w := NewFindingWriter(dir)
+		w := newTestFindingWriter(t, dir)
 		assert.Equal(t, 5, w.UnvalidatedCount)
 		assert.Equal(t, 1, w.Count, "finding-01-real.md still bumps Count via filename")
 
@@ -552,7 +627,7 @@ func TestFindingWriterWriteUnvalidated(t *testing.T) {
 	})
 
 	t.Run("untitled_fallback", func(t *testing.T) {
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 
 		path, err := w.WriteUnvalidated(FindingCandidate{CandidateID: "c001"})
 		require.NoError(t, err)
@@ -561,13 +636,13 @@ func TestFindingWriterWriteUnvalidated(t *testing.T) {
 
 	t.Run("does_not_pollute_finding_index", func(t *testing.T) {
 		dir := t.TempDir()
-		w := NewFindingWriter(dir)
+		w := newTestFindingWriter(t, dir)
 		_, err := w.WriteUnvalidated(FindingCandidate{Title: "tip"})
 		require.NoError(t, err)
 
 		// A fresh writer over the same dir must NOT see the unvalidated file
 		// as a real finding (would otherwise inflate Count and confuse dedup)
-		w2 := NewFindingWriter(dir)
+		w2 := newTestFindingWriter(t, dir)
 		assert.Equal(t, 0, w2.Count)
 		assert.Equal(t, 1, w2.UnvalidatedCount)
 	})

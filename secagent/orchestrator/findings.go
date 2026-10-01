@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -189,23 +190,35 @@ type SimilarFinding struct {
 }
 
 // NewFindingWriter returns a FindingWriter for findingsDir. Count and
-// UnvalidatedCount are seeded from existing files in the directory.
-func NewFindingWriter(findingsDir string) *FindingWriter {
-	index, count := loadExistingFindingIndex(findingsDir)
-	unvalidated := loadExistingUnvalidatedMax(findingsDir)
+// UnvalidatedCount are seeded from existing files in the directory; a missing
+// directory seeds at zero. Returns an error when existing files cannot be
+// read, since writing on top of an unknown sequence could truncate findings.
+func NewFindingWriter(findingsDir string) (*FindingWriter, error) {
+	index, count, err := loadExistingFindingIndex(findingsDir)
+	if err != nil {
+		return nil, err
+	}
+	unvalidated, err := loadExistingUnvalidatedMax(findingsDir)
+	if err != nil {
+		return nil, err
+	}
 	return &FindingWriter{
 		findingsDir:      findingsDir,
 		Count:            count,
 		UnvalidatedCount: unvalidated,
 		index:            index,
-	}
+	}, nil
 }
 
-// loadExistingUnvalidatedMax returns the highest unvalidated-NN-*.md sequence in findingsDir, or 0 if none.
-func loadExistingUnvalidatedMax(findingsDir string) int {
+// loadExistingUnvalidatedMax returns the highest unvalidated-NN-*.md sequence
+// in findingsDir, or 0 when the directory is missing.
+func loadExistingUnvalidatedMax(findingsDir string) (int, error) {
 	entries, err := os.ReadDir(findingsDir)
 	if err != nil {
-		return 0
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("scan findings dir: %w", err)
 	}
 	var max int
 	for _, e := range entries {
@@ -224,13 +237,16 @@ func loadExistingUnvalidatedMax(findingsDir string) int {
 			max = n
 		}
 	}
-	return max
+	return max, nil
 }
 
-func loadExistingFindingIndex(findingsDir string) ([]findingIndexEntry, int) {
+func loadExistingFindingIndex(findingsDir string) ([]findingIndexEntry, int, error) {
 	entries, err := os.ReadDir(findingsDir)
 	if err != nil {
-		return nil, 0
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, fmt.Errorf("scan findings dir: %w", err)
 	}
 	type diskFinding struct {
 		seq   int
@@ -274,7 +290,7 @@ func loadExistingFindingIndex(findingsDir string) ([]findingIndexEntry, int) {
 	for _, item := range loaded {
 		index = append(index, item.entry)
 	}
-	return index, max
+	return index, max, nil
 }
 
 func parseFindingMarkdown(raw string) (FindingFiled, bool) {
@@ -385,7 +401,9 @@ func (w *FindingWriter) FindSimilarEntries(filed FindingFiled) []SimilarFinding 
 	return out
 }
 
-// Write persists the finding to disk and updates the index.
+// Write persists the finding to disk atomically and updates the index. The
+// target sequence is bumped past any existing file so a write can never
+// truncate one.
 func (w *FindingWriter) Write(filed FindingFiled) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -395,7 +413,11 @@ func (w *FindingWriter) Write(filed FindingFiled) (string, error) {
 	}
 	nextCount := w.Count + 1
 	path := filepath.Join(w.findingsDir, findingFilename(nextCount, filed.Title))
-	if err := os.WriteFile(path, []byte(renderFinding(filed)), 0o644); err != nil {
+	for pathExists(path) {
+		nextCount++
+		path = filepath.Join(w.findingsDir, findingFilename(nextCount, filed.Title))
+	}
+	if err := util.WriteFileAtomic(path, []byte(renderFinding(filed)), 0o644); err != nil {
 		return "", err
 	}
 	w.Count = nextCount
@@ -452,12 +474,17 @@ func (w *FindingWriter) replaceLocked(oldPath string, filed FindingFiled) (strin
 		return "", fmt.Errorf("replace: cannot parse sequence from %s", oldPath)
 	}
 	newPath := filepath.Join(w.findingsDir, findingFilename(seq, filed.Title))
-	if err := os.WriteFile(newPath, []byte(renderFinding(filed)), 0o644); err != nil {
+	if err := util.WriteFileAtomic(newPath, []byte(renderFinding(filed)), 0o644); err != nil {
 		return "", err
 	}
 	if newPath != oldPath {
 		if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
-			return "", err
+			// Roll back so the index matches a rescan; keeping both files
+			// would duplicate the entry on next start.
+			if rmErr := os.Remove(newPath); rmErr != nil {
+				err = errors.Join(err, rmErr)
+			}
+			return "", fmt.Errorf("replace: remove old %s: %w", oldPath, err)
 		}
 	}
 	w.index[idx] = indexEntry(filed, newPath)
@@ -480,6 +507,14 @@ func (w *FindingWriter) indexOfPath(path string) int {
 }
 
 func findingFilename(seq int, title string) string {
+	return fmt.Sprintf("finding-%02d-%s.md", seq, titleSlug(title))
+}
+
+func unvalidatedFilename(seq int, title string) string {
+	return fmt.Sprintf("unvalidated-%02d-%s.md", seq, titleSlug(title))
+}
+
+func titleSlug(title string) string {
 	slug := util.Slugify(title)
 	if slug == "" {
 		slug = "untitled"
@@ -487,7 +522,13 @@ func findingFilename(seq int, title string) string {
 	if len(slug) > 60 {
 		slug = strings.TrimRight(slug[:60], "-")
 	}
-	return fmt.Sprintf("finding-%02d-%s.md", seq, slug)
+	return slug
+}
+
+// pathExists reports whether path is present on disk.
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func findingSeqFromPath(path string) int {
@@ -679,14 +720,11 @@ func (w *FindingWriter) WriteUnvalidated(c FindingCandidate) (string, error) {
 		return "", err
 	}
 	next := w.UnvalidatedCount + 1
-	slug := util.Slugify(c.Title)
-	if slug == "" {
-		slug = "untitled"
+	name := unvalidatedFilename(next, c.Title)
+	for pathExists(filepath.Join(w.findingsDir, name)) {
+		next++
+		name = unvalidatedFilename(next, c.Title)
 	}
-	if len(slug) > 60 {
-		slug = strings.TrimRight(slug[:60], "-")
-	}
-	name := fmt.Sprintf("unvalidated-%02d-%s.md", next, slug)
 	path := filepath.Join(w.findingsDir, name)
 	flowList := noneSentinel
 	if len(c.FlowIDs) > 0 {
@@ -707,7 +745,7 @@ func (w *FindingWriter) WriteUnvalidated(c FindingCandidate) (string, error) {
 		orDefault(c.ReproductionHint, noneSentinel),
 		flowList,
 	)
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := util.WriteFileAtomic(path, []byte(body), 0o644); err != nil {
 		return "", err
 	}
 	w.UnvalidatedCount = next

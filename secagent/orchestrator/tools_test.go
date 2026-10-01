@@ -85,7 +85,7 @@ func TestWorkerToolDefs(t *testing.T) {
 
 	t.Run("rejects_filed_duplicate_exact_slug", func(t *testing.T) {
 		pool := NewCandidatePool()
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		_, err := writer.Write(FindingFiled{
 			Title:    "XSS",
 			Severity: "high",
@@ -107,7 +107,7 @@ func TestWorkerToolDefs(t *testing.T) {
 		// fallback only short-circuits exact slug+endpoint matches.
 		// Similar titles route to the verifier-side dedup pipeline instead.
 		pool := NewCandidatePool()
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		_, err := writer.Write(FindingFiled{
 			Title:    "Reflected XSS in search",
 			Severity: "high",
@@ -127,7 +127,7 @@ func TestWorkerToolDefs(t *testing.T) {
 
 	t.Run("admits_distinct_title_and_endpoint", func(t *testing.T) {
 		pool := NewCandidatePool()
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		_, err := writer.Write(FindingFiled{
 			Title:    "XSS",
 			Severity: "high",
@@ -159,7 +159,7 @@ func TestWorkerToolDefs(t *testing.T) {
 	primeWriter := func(t *testing.T) *FindingWriter {
 		t.Helper()
 
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		_, err := w.Write(FindingFiled{
 			Title: "Open redirect on /go", Severity: "medium", Endpoint: "GET /go",
 			Description: "Existing description.",
@@ -254,7 +254,7 @@ func TestWorkerToolDefs(t *testing.T) {
 
 	t.Run("empty_index_skips_dedup", func(t *testing.T) {
 		pool := NewCandidatePool()
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		dedup := &fakeCandidateDedup{}
 		rc := findTool(WorkerToolDefs(pool, writer, 1, dedup, &fakeMerger{}), "report_finding_candidate")
 

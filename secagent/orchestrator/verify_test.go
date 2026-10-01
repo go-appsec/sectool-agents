@@ -18,7 +18,7 @@ func TestRunVerificationPhase(t *testing.T) {
 
 	t.Run("files_and_dismisses", func(t *testing.T) {
 		dir := t.TempDir()
-		writer := NewFindingWriter(dir)
+		writer := newTestFindingWriter(t, dir)
 		candidates := NewCandidatePool()
 		c1 := candidates.Add(AddInput{
 			WorkerID: 1, Title: "Reflected XSS in search",
@@ -60,7 +60,7 @@ func TestRunVerificationPhase(t *testing.T) {
 	})
 
 	t.Run("no_pending_skips", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		candidates := NewCandidatePool()
 		decisions := NewDecisionQueue()
 		verifier := &agent.FakeAgent{} // no scripted turns, would error if reached
@@ -71,7 +71,7 @@ func TestRunVerificationPhase(t *testing.T) {
 	})
 
 	t.Run("dismiss_dedup_logs_once_per_id", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		candidates := NewCandidatePool()
 		c1 := candidates.Add(AddInput{WorkerID: 1, Title: "x"})
 
@@ -100,7 +100,7 @@ func TestRunVerificationPhase(t *testing.T) {
 	})
 
 	t.Run("dismiss_cannot_override_verified", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		candidates := NewCandidatePool()
 		c1 := candidates.Add(AddInput{
 			WorkerID: 1, Title: "Dup title",
@@ -126,7 +126,7 @@ func TestRunVerificationPhase(t *testing.T) {
 
 	t.Run("duplicate_finding_skipped", func(t *testing.T) {
 		dir := t.TempDir()
-		writer := NewFindingWriter(dir)
+		writer := newTestFindingWriter(t, dir)
 		// Prime the writer with an existing finding so the next is a duplicate
 		_, err := writer.Write(FindingFiled{
 			Title: "Reflected XSS in search", Severity: "high", Endpoint: "GET /search",
@@ -154,7 +154,7 @@ func TestRunVerificationPhase(t *testing.T) {
 
 	t.Run("match_fallback_logs_tier", func(t *testing.T) {
 		// Title diverges but endpoint matches: verified via endpoint-only tier with match-fallback log
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		candidates := NewCandidatePool()
 		c1 := candidates.Add(AddInput{
 			WorkerID: 1, Title: "Standard User Cookie Reuse on Admin API",
@@ -184,7 +184,7 @@ func TestRunVerificationPhase(t *testing.T) {
 	})
 
 	t.Run("orphan_candidate_logged_when_no_match", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		candidates := NewCandidatePool()
 		orphan := candidates.Add(AddInput{
 			WorkerID: 1, Title: "completely_unrelated",
@@ -213,7 +213,7 @@ func TestRunVerificationPhase(t *testing.T) {
 	})
 
 	t.Run("finding_duplicate_logged_once_per_substep", func(t *testing.T) {
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		// Prime the writer with an existing finding so the burst below all match as duplicates against disk
 		_, err := writer.Write(FindingFiled{
 			Title: "Same title", Severity: "high", Endpoint: "GET /x",
@@ -247,7 +247,7 @@ func TestRunVerificationPhase(t *testing.T) {
 	t.Run("errored_substep_still_writes_findings", func(t *testing.T) {
 		// A drain that files a finding and then fails must not lose the filed work
 		dir := t.TempDir()
-		writer := NewFindingWriter(dir)
+		writer := newTestFindingWriter(t, dir)
 		candidates := NewCandidatePool()
 		c1 := candidates.Add(AddInput{
 			WorkerID: 1, Title: "Late drain finding",
@@ -290,7 +290,7 @@ func TestRunVerificationPhase(t *testing.T) {
 
 	t.Run("llm_wedge_leaves_candidate_pending", func(t *testing.T) {
 		// Pure LLM-side wedge (drain errors twice). The next iteration's fresh-compose gives it a clean shot.
-		writer := NewFindingWriter(t.TempDir())
+		writer := newTestFindingWriter(t, t.TempDir())
 		candidates := NewCandidatePool()
 		c1 := candidates.Add(AddInput{
 			WorkerID: 1, Title: "Stuck finding",

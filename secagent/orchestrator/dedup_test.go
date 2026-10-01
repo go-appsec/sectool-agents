@@ -158,7 +158,7 @@ func TestReviewAndWrite(t *testing.T) {
 	seed := func(t *testing.T) (*FindingWriter, string) {
 		t.Helper()
 
-		w := NewFindingWriter(t.TempDir())
+		w := newTestFindingWriter(t, t.TempDir())
 		path, err := w.Write(FindingFiled{
 			Title: "Reflected XSS in search", Severity: "high",
 			Endpoint: "GET /search", Description: "existing desc",
