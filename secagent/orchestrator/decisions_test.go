@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
 func TestDecisionQueue(t *testing.T) {

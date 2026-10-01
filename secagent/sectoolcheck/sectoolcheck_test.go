@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-appsec/secagent/state"
+	"github.com/go-appsec/sectool-agents/secagent/state"
 )
 
 type logEntry struct {

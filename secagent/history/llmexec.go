@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
 // RunOneShot runs a single chat completion via pool; returns the trimmed response content.

@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
 func TestRunWorkerUntilEscalation(t *testing.T) {

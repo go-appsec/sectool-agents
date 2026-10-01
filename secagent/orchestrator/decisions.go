@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"sync"
 
-	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
 // WorkerDecision is the director's decision for one worker via decide_worker.

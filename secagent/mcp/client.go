@@ -10,8 +10,8 @@ import (
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // Client wraps a mcp-go streamable-HTTP client.

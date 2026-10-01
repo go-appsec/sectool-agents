@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
 // scriptedClient returns a canned response and captures every incoming ChatRequest so tests can assert request params.

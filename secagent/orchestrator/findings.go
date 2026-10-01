@@ -12,7 +12,7 @@ import (
 
 	"github.com/go-analyze/bulk"
 
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 var findingIndexRe = regexp.MustCompile(`^finding-(\d+)-.*\.md$`)

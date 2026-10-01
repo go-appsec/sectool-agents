@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // CompactionOptions controls compaction thresholds.

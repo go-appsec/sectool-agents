@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // SectoolServer represents the sectool MCP endpoint. Cmd is nil when secagent attached to an already-running server.

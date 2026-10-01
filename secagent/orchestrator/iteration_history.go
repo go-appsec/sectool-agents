@@ -5,7 +5,7 @@ import (
 
 	"github.com/go-analyze/bulk"
 
-	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
 // appendIterationHistory appends one IterationEntry per worker alive at iter start.

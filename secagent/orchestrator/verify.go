@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // VerificationMaxSubsteps is the hard cap on verifier substeps per iteration.

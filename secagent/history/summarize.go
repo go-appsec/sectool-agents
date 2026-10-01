@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // Summarizer produces on-demand recon and worker-retire recaps via the shared pool.

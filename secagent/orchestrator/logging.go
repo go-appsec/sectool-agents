@@ -13,7 +13,7 @@ import (
 
 	"github.com/go-analyze/bulk"
 
-	"github.com/go-appsec/secagent/cli"
+	"github.com/go-appsec/sectool-agents/secagent/cli"
 )
 
 // Tool-lifecycle event messages.

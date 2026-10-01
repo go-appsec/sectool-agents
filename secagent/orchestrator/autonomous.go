@@ -3,8 +3,8 @@ package orchestrator
 import (
 	"context"
 
-	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/orchestrator/prompts"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/orchestrator/prompts"
 )
 
 // drainOne drains one turn on w and returns its summary, also appending

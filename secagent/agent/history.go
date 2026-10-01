@@ -4,7 +4,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // Message is one entry in an agent's history.

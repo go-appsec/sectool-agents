@@ -5,7 +5,7 @@ import (
 
 	"github.com/go-analyze/bulk"
 
-	"github.com/go-appsec/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
 // PruneToolResults drops tool-results in dropSet, strips matching tool calls from preceding

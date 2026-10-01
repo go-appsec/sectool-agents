@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/history"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/history"
 )
 
 // scriptedFireFn returns a Fire callback that records invocations and returns a join that yields the given turns.

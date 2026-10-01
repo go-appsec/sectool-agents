@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/orchestrator/prompts"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/orchestrator/prompts"
 )
 
 // decideAction* are the valid action enum values for decide_worker.

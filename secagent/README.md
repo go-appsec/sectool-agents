@@ -36,7 +36,13 @@ Splitting verification and direction into separate clients with separate system 
 
 ## Installation
 
-From the repo root:
+Install directly with `go install` (Go 1.25+):
+
+```bash
+go install github.com/go-appsec/sectool-agents/secagent@latest
+```
+
+Or build from a checkout. From the repo root:
 
 ```bash
 make build         # builds bin/secagent

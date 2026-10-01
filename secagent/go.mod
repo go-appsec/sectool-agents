@@ -1,4 +1,4 @@
-module github.com/go-appsec/secagent
+module github.com/go-appsec/sectool-agents/secagent
 
 go 1.25.5
 

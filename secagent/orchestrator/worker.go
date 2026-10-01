@@ -3,9 +3,9 @@ package orchestrator
 import (
 	"sync"
 
-	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/history"
-	"github.com/go-appsec/secagent/mcp"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/history"
+	"github.com/go-appsec/sectool-agents/secagent/mcp"
 )
 
 // IterationOutcome classifies a worker's result for a single iteration.

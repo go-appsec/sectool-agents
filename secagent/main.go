@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/go-appsec/secagent/cli"
-	"github.com/go-appsec/secagent/config"
-	"github.com/go-appsec/secagent/orchestrator"
-	"github.com/go-appsec/secagent/sectoolcheck"
+	"github.com/go-appsec/sectool-agents/secagent/cli"
+	"github.com/go-appsec/sectool-agents/secagent/config"
+	"github.com/go-appsec/sectool-agents/secagent/orchestrator"
+	"github.com/go-appsec/sectool-agents/secagent/sectoolcheck"
 )
 
 func main() {

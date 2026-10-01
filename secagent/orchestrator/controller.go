@@ -13,12 +13,12 @@ import (
 	"github.com/go-analyze/bulk"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/config"
-	"github.com/go-appsec/secagent/history"
-	"github.com/go-appsec/secagent/mcp"
-	"github.com/go-appsec/secagent/orchestrator/prompts"
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/config"
+	"github.com/go-appsec/sectool-agents/secagent/history"
+	"github.com/go-appsec/sectool-agents/secagent/mcp"
+	"github.com/go-appsec/sectool-agents/secagent/orchestrator/prompts"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // AgentFactory builds Agent instances per role. NewReconWorker omits

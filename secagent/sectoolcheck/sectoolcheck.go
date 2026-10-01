@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-appsec/secagent/state"
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/state"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // ToolboxModule is the Go module path used for the staleness lookup.

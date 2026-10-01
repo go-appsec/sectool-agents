@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-appsec/secagent/agent"
-	"github.com/go-appsec/secagent/orchestrator/prompts"
+	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/orchestrator/prompts"
 )
 
 func findTool(defs []agent.ToolDef, name string) *agent.ToolDef {

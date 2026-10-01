@@ -7,7 +7,7 @@ import (
 
 	"github.com/go-analyze/bulk"
 
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // outputMarkers are common patterns reasoning models use to demarcate their intended response from

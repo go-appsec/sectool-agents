@@ -6,7 +6,7 @@ import (
 
 	"github.com/sashabaranov/go-openai"
 
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // ChatMessage mirrors the subset of OpenAI chat-completion fields we need.

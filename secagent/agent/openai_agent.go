@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-appsec/secagent/util"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // OpenAIAgentConfig configures a single agent instance.

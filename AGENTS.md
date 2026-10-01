@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repo houses multiple agent implementations that drive the external [`sectool`](https://github.com/go-appsec/toolbox) MCP server for autonomous security exploration. Each subdirectory is an independent agent with its own runtime/build:
 
-- `secagent/` — Go agent targeting any OpenAI-compatible chat-completions endpoint (most active). Module path `github.com/go-appsec/secagent`, Go 1.25+.
+- `secagent/` — Go agent targeting any OpenAI-compatible chat-completions endpoint (most active). Module path `github.com/go-appsec/sectool-agents/secagent`, Go 1.25+.
 - `claude-controller/` — Python agent built on the Claude Agent SDK; uses an existing `claude` CLI session for auth (no API key).
 
 The root `Makefile` is a pass-through to `secagent/Makefile` only — it does not build, test, or lint `claude-controller/`. `sectool` itself lives in a different repo and must be installed separately (`go install github.com/go-appsec/toolbox/sectool@latest`).
