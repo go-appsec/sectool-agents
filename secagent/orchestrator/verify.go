@@ -14,6 +14,7 @@ const VerificationMaxSubsteps = 6
 
 // RunVerificationPhase drives the verifier and returns the summary for the
 // director prompt. dedupReviewer may be nil to disable agent-mediated dedup.
+// Findings recorded before a failed substep drain are still written.
 func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 	decisions *DecisionQueue, candidates *CandidatePool, writer *FindingWriter,
 	dedupReviewer DedupReviewer, log *Logger) string {
@@ -38,7 +39,7 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 			)
 			verifier.Query(prompt)
 		}
-		_, err := RunPhaseAttempt(ctx,
+		_, drainErr := RunPhaseAttempt(ctx,
 			func(c context.Context) (agent.TurnSummary, error) { return verifier.Drain(c) },
 			PhaseRecover{
 				Compact: func() {
@@ -57,10 +58,7 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 					// pending candidates carry to next iter for a fresh-compose retry
 				},
 			}, log, "verify")
-		if err != nil {
-			break
-		}
-		// dedup pipeline: skip exact same-title/same-endpoint repeats this substep
+		// apply decisions even after a failed drain so recorded work isn't dropped
 		seenFindings := map[string]bool{}
 		for _, filed := range decisions.Findings[appliedFindings:] {
 			titleKey := util.Slugify(filed.Title)
@@ -125,6 +123,9 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 		}
 		appliedDismissals = len(decisions.Dismissals)
 
+		if drainErr != nil {
+			break
+		}
 		if decisions.HasVerificationDone {
 			break
 		}

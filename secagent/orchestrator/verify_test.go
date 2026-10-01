@@ -244,6 +244,50 @@ func TestRunVerificationPhase(t *testing.T) {
 		assert.Equal(t, 1, count)
 	})
 
+	t.Run("errored_substep_still_writes_findings", func(t *testing.T) {
+		// A drain that files a finding and then fails must not lose the filed work
+		dir := t.TempDir()
+		writer := NewFindingWriter(dir)
+		candidates := NewCandidatePool()
+		c1 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Late drain finding",
+			Severity: "high", Endpoint: "GET /late",
+		})
+
+		decisions := NewDecisionQueue()
+		boom := errors.New("simulated drain error")
+		verifier := &agent.FakeAgent{
+			Turns:  []agent.TurnSummary{{}, {}},
+			Errors: []error{boom, boom},
+		}
+		var drained int
+		verifier.OnDrain = func(_ int) {
+			drained++
+			if drained == 1 {
+				decisions.AddFinding(FindingFiled{
+					Title: "Late drain finding", Severity: "high",
+					Endpoint:               "GET /late",
+					VerificationNotes:      "ok",
+					SupersedesCandidateIDs: []string{c1},
+				})
+			}
+		}
+
+		summary := RunVerificationPhase(
+			t.Context(), verifier, decisions, candidates, writer, nil, nil,
+		)
+
+		assert.Contains(t, summary, "1 filed")
+		assert.Equal(t, "verified", candidates.ByID(c1).Status)
+		assert.Empty(t, candidates.Pending())
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		body, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+		require.NoError(t, err)
+		assert.Contains(t, string(body), "Late drain finding")
+	})
+
 	t.Run("llm_wedge_leaves_candidate_pending", func(t *testing.T) {
 		// Pure LLM-side wedge (drain errors twice). The next iteration's fresh-compose gives it a clean shot.
 		writer := NewFindingWriter(t.TempDir())
