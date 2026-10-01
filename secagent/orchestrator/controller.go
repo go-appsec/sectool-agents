@@ -372,14 +372,9 @@ func newWorkerSpawner(mcpURL string, toolResultMaxBytes int,
 	candidateDedup CandidateDedupReviewer, merger MergeSubmitter, autonomousBudget int,
 	maxWorkers int, allowBash bool) workerSpawnFunc {
 	return func(ctx context.Context, id int, assignment string) (*WorkerState, error) {
-		m, err := mcp.Connect(ctx, mcpURL)
+		m, defs, err := mcp.Establish(ctx, mcpURL, "mcp__sectool__", toolResultMaxBytes)
 		if err != nil {
-			return nil, fmt.Errorf("mcp connect (worker %d): %w", id, err)
-		}
-		defs, err := m.BuildToolDefs(ctx, "mcp__sectool__", toolResultMaxBytes)
-		if err != nil {
-			_ = m.Close()
-			return nil, fmt.Errorf("list sectool tools (worker %d): %w", id, err)
+			return nil, fmt.Errorf("mcp handshake (worker %d): %w", id, err)
 		}
 		a, err := factory.NewWorker(id, maxWorkers)
 		if err != nil {
@@ -507,37 +502,24 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	}
 	defer func() { _ = synthesisDirector.Close() }()
 
-	verifierMCP, err := mcp.Connect(ctx, mcpURL)
+	verifierMCP, verifierSectoolDefs, err := mcp.Establish(ctx, mcpURL, "mcp__sectool__", cfg.ToolResultMaxBytes)
 	if err != nil {
-		return fmt.Errorf("mcp connect (verifier): %w", err)
+		return fmt.Errorf("mcp handshake (verifier): %w", err)
 	}
 	defer func() { _ = verifierMCP.Close() }()
 
-	verifierSectoolDefs, err := verifierMCP.BuildToolDefs(ctx, "mcp__sectool__", cfg.ToolResultMaxBytes)
-	if err != nil {
-		return fmt.Errorf("list verifier sectool tools: %w", err)
-	}
-
 	// Directors get full sectool access to spot-check worker claims rather than hallucinate tool calls
 	// Each director gets its own MCP client to keep tool dispatch state scoped per agent
-	decisionDirectorMCP, err := mcp.Connect(ctx, mcpURL)
+	decisionDirectorMCP, decisionDirectorSectoolDefs, err := mcp.Establish(ctx, mcpURL, "mcp__sectool__", cfg.ToolResultMaxBytes)
 	if err != nil {
-		return fmt.Errorf("mcp connect (decision director): %w", err)
+		return fmt.Errorf("mcp handshake (decision director): %w", err)
 	}
 	defer func() { _ = decisionDirectorMCP.Close() }()
-	decisionDirectorSectoolDefs, err := decisionDirectorMCP.BuildToolDefs(ctx, "mcp__sectool__", cfg.ToolResultMaxBytes)
+	synthesisDirectorMCP, synthesisDirectorSectoolDefs, err := mcp.Establish(ctx, mcpURL, "mcp__sectool__", cfg.ToolResultMaxBytes)
 	if err != nil {
-		return fmt.Errorf("list decision director sectool tools: %w", err)
-	}
-	synthesisDirectorMCP, err := mcp.Connect(ctx, mcpURL)
-	if err != nil {
-		return fmt.Errorf("mcp connect (synthesis director): %w", err)
+		return fmt.Errorf("mcp handshake (synthesis director): %w", err)
 	}
 	defer func() { _ = synthesisDirectorMCP.Close() }()
-	synthesisDirectorSectoolDefs, err := synthesisDirectorMCP.BuildToolDefs(ctx, "mcp__sectool__", cfg.ToolResultMaxBytes)
-	if err != nil {
-		return fmt.Errorf("list synthesis director sectool tools: %w", err)
-	}
 
 	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions, candidates)...)
 	verifier.SetTools(verifierTools)
@@ -573,14 +555,9 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			"mission_chars":   len(reconMission),
 			"mission_preview": util.Truncate(reconMission, 240),
 		})
-		m, err := mcp.Connect(ctx, mcpURL)
+		m, defs, err := mcp.Establish(ctx, mcpURL, "mcp__sectool__", cfg.ToolResultMaxBytes)
 		if err != nil {
-			return fmt.Errorf("mcp connect (recon worker): %w", err)
-		}
-		defs, err := m.BuildToolDefs(ctx, "mcp__sectool__", cfg.ToolResultMaxBytes)
-		if err != nil {
-			_ = m.Close()
-			return fmt.Errorf("list sectool tools (recon worker): %w", err)
+			return fmt.Errorf("mcp handshake (recon worker): %w", err)
 		}
 		a, err := factory.NewReconWorker(reconMission)
 		if err != nil {

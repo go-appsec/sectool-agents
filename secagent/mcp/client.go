@@ -3,8 +3,10 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -13,6 +15,14 @@ import (
 	"github.com/go-appsec/sectool-agents/secagent/agent"
 	"github.com/go-appsec/sectool-agents/secagent/util"
 )
+
+// handshakeTimeout bounds one MCP handshake (connect, initialize, list tools)
+// so a non-responsive server fails startup instead of hanging forever.
+var handshakeTimeout = 10 * time.Second
+
+// ErrHandshakeTimeout reports a handshake that exceeded its deadline. Callers
+// can tell "server not responding" apart from "server rejected us" via errors.Is.
+var ErrHandshakeTimeout = errors.New("mcp handshake timeout (server not responding)")
 
 // Client wraps a mcp-go streamable-HTTP client.
 type Client struct {
@@ -34,6 +44,39 @@ func Connect(ctx context.Context, url string) (*Client, error) {
 		return nil, fmt.Errorf("mcp: initialize: %w", err)
 	}
 	return &Client{c: cl}, nil
+}
+
+// Establish performs the bounded MCP handshake against url: connect,
+// initialize, and list tools, converted to prefixed agent.ToolDefs. The whole
+// handshake shares one deadline, so a non-responsive server fails with an
+// error wrapping ErrHandshakeTimeout instead of blocking indefinitely.
+func Establish(ctx context.Context, url, prefix string, maxResultBytes int) (*Client, []agent.ToolDef, error) {
+	hsCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	cl, err := Connect(hsCtx, url)
+	if err != nil {
+		return nil, nil, handshakeFailure(hsCtx, err)
+	}
+	tools, err := cl.ListTools(hsCtx)
+	if err != nil {
+		_ = cl.Close()
+		return nil, nil, handshakeFailure(hsCtx, err)
+	}
+	defs, err := cl.ToolDefs(tools, prefix, maxResultBytes)
+	if err != nil {
+		_ = cl.Close()
+		return nil, nil, err
+	}
+	return cl, defs, nil
+}
+
+// handshakeFailure tags deadline expiry with ErrHandshakeTimeout; parent
+// cancellation and genuine rejections pass through untagged.
+func handshakeFailure(hsCtx context.Context, err error) error {
+	if hsCtx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%w after %s: %w", ErrHandshakeTimeout, handshakeTimeout, err)
+	}
+	return err
 }
 
 func (c *Client) Close() error {
@@ -71,13 +114,9 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 	return sb.String(), res.IsError, nil
 }
 
-// BuildToolDefs returns one agent.ToolDef per sectool tool. Names are
+// ToolDefs returns one agent.ToolDef per sectool tool. Names are
 // prefixed with prefix; results are truncated to maxResultBytes.
-func (c *Client) BuildToolDefs(ctx context.Context, prefix string, maxResultBytes int) ([]agent.ToolDef, error) {
-	tools, err := c.ListTools(ctx)
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) ToolDefs(tools []mcp.Tool, prefix string, maxResultBytes int) ([]agent.ToolDef, error) {
 	defs := make([]agent.ToolDef, 0, len(tools))
 	for _, t := range tools {
 		raw, err := json.Marshal(t.InputSchema)

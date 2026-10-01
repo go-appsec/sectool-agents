@@ -155,6 +155,8 @@ The resolved or configured sectool is used for both the version check and the MC
 
 secagent probes `--mcp-port` at startup. If a sectool MCP server is already serving on that port, secagent attaches to it (no child process started, no teardown on exit). Otherwise it launches `sectool mcp` from `$PATH` and tears it down at exit.
 
+Each agent (worker, verifier, director) opens its own MCP session. Every session handshake — connect, initialize, tool listing — is bounded by a 10s deadline, so a wedged server fails startup with a distinct handshake-timeout error instead of hanging forever.
+
 ```bash
 # Start the MCP server separately
 sectool mcp --proxy-port 8181

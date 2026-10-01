@@ -1,11 +1,51 @@
 package mcp
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestEstablishTimeout(t *testing.T) {
+	t.Parallel()
+
+	prev := handshakeTimeout
+	handshakeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { handshakeTimeout = prev })
+
+	t.Run("unresponsive_server", func(t *testing.T) {
+		// accepts connections but never answers the handshake
+		srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+			select {
+			case <-t.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		cl, defs, err := Establish(t.Context(), srv.URL, "mcp__sectool__", 1024)
+		assert.Nil(t, cl)
+		assert.Empty(t, defs)
+		assert.ErrorIs(t, err, ErrHandshakeTimeout)
+	})
+
+	t.Run("connection_refused", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		url := srv.URL
+		srv.Close()
+
+		cl, defs, err := Establish(t.Context(), url, "mcp__sectool__", 1024)
+		assert.Nil(t, cl)
+		assert.Empty(t, defs)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrHandshakeTimeout)
+	})
+}
 
 func TestTruncateResult(t *testing.T) {
 	t.Parallel()
