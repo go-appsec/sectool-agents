@@ -100,6 +100,152 @@ func waitForLog(t *testing.T, l *Logger, buf *bytes.Buffer, want string) {
 	}, 2*time.Second, time.Millisecond)
 }
 
+func TestNarratorLifecycle(t *testing.T) {
+	t.Parallel()
+
+	t.Run("requeues_events_after_failure", func(t *testing.T) {
+		client := &flakyClient{failures: 1, response: "recovered narration"}
+		l, _, buf := newCapturedLogger(t)
+		n := NewNarrator(NarratorConfig{
+			Interval: time.Hour, Model: "m", Pool: poolOf(client), CallBudget: time.Second,
+		}, l)
+		require.NotNil(t, n)
+
+		n.Record("worker", "turn", map[string]any{"worker_id": 1, "detail": "probe /admin"})
+		recordSubstantiveEvents(n, narratorMinEvents)
+		n.TriggerNow(t.Context())
+		waitForLog(t, l, buf, "orchestrator: error")
+
+		// Failed batch must survive in the buffer, not be discarded.
+		require.Eventually(t, func() bool {
+			n.mu.Lock()
+			defer n.mu.Unlock()
+			return !n.inFlight
+		}, 2*time.Second, time.Millisecond)
+		n.mu.Lock()
+		buffered := len(n.buf)
+		n.mu.Unlock()
+		assert.GreaterOrEqual(t, buffered, narratorMinEvents)
+
+		recordSubstantiveEvents(n, narratorMinEvents)
+		n.TriggerNow(t.Context())
+		waitForLog(t, l, buf, "recovered narration")
+		n.Close()
+		_ = l.Close()
+
+		assert.Equal(t, int32(2), atomic.LoadInt32(&client.calls))
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		require.Len(t, client.requests, 2)
+		assert.Contains(t, client.requests[1].Messages[1].Content, "probe /admin")
+	})
+
+	t.Run("requeue_is_bounded", func(t *testing.T) {
+		client := &flakyClient{failures: 1, response: "unused"}
+		l, _, buf := newCapturedLogger(t)
+		n := NewNarrator(NarratorConfig{
+			Interval: time.Hour, Model: "m", Pool: poolOf(client), CallBudget: time.Second,
+		}, l)
+		require.NotNil(t, n)
+
+		for i := 0; i < narratorMaxBufferedEvents+8; i++ {
+			n.Record("worker", "turn", map[string]any{"worker_id": 1, "turn": i})
+		}
+		n.TriggerNow(t.Context())
+		waitForLog(t, l, buf, "orchestrator: error")
+		n.Close()
+		_ = l.Close()
+
+		n.mu.Lock()
+		buffered := len(n.buf)
+		n.mu.Unlock()
+		assert.Equal(t, narratorMaxBufferedEvents, buffered)
+	})
+
+	t.Run("concurrent_triggers_single_flight", func(t *testing.T) {
+		gate := make(chan struct{})
+		client := &scriptedClient{response: "narrated", gate: gate}
+		l, _, _ := newCapturedLogger(t)
+		n := NewNarrator(NarratorConfig{
+			Interval: time.Hour, Model: "m", Pool: poolOf(client), CallBudget: time.Second,
+		}, l)
+		require.NotNil(t, n)
+
+		recordSubstantiveEvents(n, narratorMinEvents)
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				n.TriggerNow(t.Context())
+			}()
+		}
+		wg.Wait()
+		require.Eventually(t, func() bool {
+			return atomic.LoadInt32(&client.calls) == 1
+		}, time.Second, time.Millisecond)
+
+		recordSubstantiveEvents(n, narratorMinEvents)
+		close(gate)
+		waitForCalls(t, &client.calls, 2) // drain loop narrates the second batch
+		n.Close()
+		_ = l.Close()
+
+		// Eight concurrent triggers produce one firing plus one drain, all serialized.
+		assert.Equal(t, int32(2), atomic.LoadInt32(&client.calls))
+		assert.Equal(t, int32(1), atomic.LoadInt32(&client.peak))
+	})
+
+	t.Run("close_races_triggers_safely", func(t *testing.T) {
+		client := &scriptedClient{response: "narrated"}
+		l, _, _ := newCapturedLogger(t)
+		n := NewNarrator(NarratorConfig{
+			Interval: time.Millisecond, Model: "m", Pool: poolOf(client), CallBudget: time.Second,
+		}, l)
+		require.NotNil(t, n)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				recordSubstantiveEvents(n, 1)
+				n.TriggerNow(t.Context())
+				n.Tick(t.Context())
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			n.Close()
+		}()
+		wg.Wait()
+		_ = l.Close()
+
+		// Close must not return while a summary goroutine is still running.
+		assert.Equal(t, int32(0), atomic.LoadInt32(&client.inFlight))
+	})
+}
+
+// flakyClient fails the first failures calls, then returns response.
+type flakyClient struct {
+	mu       sync.Mutex
+	calls    int32
+	failures int32
+	response string
+	requests []agent.ChatRequest
+}
+
+func (c *flakyClient) CreateChatCompletion(_ context.Context, req agent.ChatRequest) (agent.ChatResponse, error) {
+	call := atomic.AddInt32(&c.calls, 1)
+	c.mu.Lock()
+	c.requests = append(c.requests, req)
+	c.mu.Unlock()
+	if call <= c.failures {
+		return agent.ChatResponse{}, errors.New("outage")
+	}
+	return agent.ChatResponse{Content: c.response}, nil
+}
+
 func TestIsUsableNarration(t *testing.T) {
 	t.Parallel()
 
@@ -223,11 +369,10 @@ func TestNarrator(t *testing.T) {
 		n.Close()
 		_ = l.Close()
 
-		// Firings 2/3/4 coalesce, buffered events are drained by one of the
-		// waiting goroutines, so total ends up at 2 (sometimes 3 under race)
-		calls := atomic.LoadInt32(&client.calls)
-		assert.GreaterOrEqual(t, calls, int32(2))
-		assert.LessOrEqual(t, calls, int32(3))
+		// Firings 2/3/4 coalesce into firing #1's drain loop, so the buffered
+		// events are narrated by exactly one follow-up call, never concurrent.
+		assert.Equal(t, int32(2), atomic.LoadInt32(&client.calls))
+		assert.Equal(t, int32(1), atomic.LoadInt32(&client.peak))
 	})
 
 	t.Run("failure_does_not_panic", func(t *testing.T) {

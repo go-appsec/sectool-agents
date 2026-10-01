@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-appsec/sectool-agents/secagent/agent"
@@ -30,6 +31,9 @@ const agentSummaryHistoryCap = 2
 // narratorMinEvents is the minimum buffered events required to fire.
 // Below the threshold the buffer is preserved so events combine with later activity on the next firing.
 const narratorMinEvents = 4
+
+// narratorMaxBufferedEvents bounds the buffer after a failed summary re-queues its events.
+const narratorMaxBufferedEvents = 512
 
 // narratorTranscriptBudget caps the rendered transcript window sent to
 // the per-agent narrator. Tail-truncated when exceeded.
@@ -73,6 +77,9 @@ type Narrator struct {
 	wg sync.WaitGroup
 	// armed gates firing until a substantive event arrives (sticky).
 	armed bool
+	// inFlight reports whether a firing goroutine is running; concurrent
+	// triggers coalesce into its drain loop instead of spawning duplicates.
+	inFlight bool
 
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -202,13 +209,7 @@ func (n *Narrator) Tick(ctx context.Context) {
 	if n == nil {
 		return
 	}
-	n.mu.Lock()
-	now := time.Now()
-	shouldFire := n.armed && len(n.buf) >= narratorMinEvents && now.Sub(n.lastFireAt) >= n.cfg.Interval
-	n.mu.Unlock()
-	if shouldFire {
-		n.fireAsync(ctx)
-	}
+	n.fire(ctx, false)
 }
 
 // TriggerNow forces a firing regardless of cadence. No-op when not yet
@@ -217,54 +218,72 @@ func (n *Narrator) TriggerNow(ctx context.Context) {
 	if n == nil {
 		return
 	}
-	n.mu.Lock()
-	skip := !n.armed || len(n.buf) < narratorMinEvents
-	n.mu.Unlock()
-	if skip {
-		return
-	}
-	n.fireAsync(ctx)
+	n.fire(ctx, true)
 }
 
-// fireAsync spawns a firing goroutine. Concurrent callers either win the n.mu-guarded buffer snapshot (and proceed)
-// or see an empty buffer (and return); the log pool is the only cap on concurrent in-flight calls.
-func (n *Narrator) fireAsync(ctx context.Context) {
+// fire snapshots the buffer and spawns a firing goroutine when the armed and
+// min-event gates pass, bypassing the cadence gate when force. The gates,
+// snapshot, wait-group add, and closed check are atomic under n.mu so no Add
+// can race Close's Wait. At most one firing runs at a time; concurrent
+// callers coalesce, and events buffered during a firing drain when it ends.
+func (n *Narrator) fire(ctx context.Context, force bool) {
+	n.mu.Lock()
+	if n.closed || n.inFlight || !n.armed || len(n.buf) < narratorMinEvents ||
+		(!force && time.Since(n.lastFireAt) < n.cfg.Interval) {
+		n.mu.Unlock()
+		return
+	}
+	snapshot := n.buf
+	n.buf = nil
+	n.lastFireAt = time.Now()
+	n.inFlight = true
 	n.wg.Add(1)
+	n.mu.Unlock()
+
 	go func() {
 		defer n.wg.Done()
-		n.mu.Lock()
-		if len(n.buf) == 0 {
+		for n.runSummary(ctx, snapshot) {
+			n.mu.Lock()
+			if n.closed || len(n.buf) < narratorMinEvents {
+				n.mu.Unlock()
+				break
+			}
+			snapshot = n.buf
+			n.buf = nil
+			n.lastFireAt = time.Now()
 			n.mu.Unlock()
-			return
 		}
-		snapshot := n.buf
-		n.buf = nil
-		n.lastFireAt = time.Now()
+		n.mu.Lock()
+		n.inFlight = false
 		n.mu.Unlock()
-
-		n.runSummary(ctx, snapshot)
 	}()
 }
 
 // runSummary concurrently dispatches one orchestrator-level summary and one per-active-agent summary
 // under a shared timeout. Pool capacity gates real concurrency; surplus calls queue at Acquire.
-func (n *Narrator) runSummary(ctx context.Context, events []narratorEvent) {
+// Reports whether the orchestrator summary succeeded; on failure its events are re-queued for a later retry.
+func (n *Narrator) runSummary(ctx context.Context, events []narratorEvent) bool {
 	sctx, cancel := context.WithTimeout(ctx, n.cfg.CallBudget)
 	defer cancel()
 
 	if sctx.Err() != nil {
-		return
+		n.requeueEvents(events)
+		return false
 	}
 
 	n.mu.Lock()
 	agents := slices.Clone(n.activeAgents)
 	n.mu.Unlock()
 
+	var ok atomic.Bool
+	ok.Store(true)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		n.runOrchestratorSummary(sctx, events)
+		if !n.runOrchestratorSummary(sctx, events) {
+			ok.Store(false)
+		}
 	}()
 	for _, na := range agents {
 		if na.Agent == nil || na.Name == "" {
@@ -277,9 +296,27 @@ func (n *Narrator) runSummary(ctx context.Context, events []narratorEvent) {
 		}(na)
 	}
 	wg.Wait()
+	return ok.Load()
 }
 
-func (n *Narrator) runOrchestratorSummary(ctx context.Context, events []narratorEvent) {
+// requeueEvents prepends events to the buffer so a later firing can retry
+// them, bounded to narratorMaxBufferedEvents by dropping the oldest.
+func (n *Narrator) requeueEvents(events []narratorEvent) {
+	if len(events) == 0 {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	combined := append(slices.Clone(events), n.buf...)
+	if overflow := len(combined) - narratorMaxBufferedEvents; overflow > 0 {
+		combined = combined[overflow:]
+	}
+	n.buf = combined
+}
+
+// runOrchestratorSummary dispatches one orchestrator-level narration call.
+// Reports success; on failure the events are re-queued for a later retry.
+func (n *Narrator) runOrchestratorSummary(ctx context.Context, events []narratorEvent) bool {
 	body := buildNarratorPrompt(events)
 	var resp agent.ChatResponse
 	err := n.runSummaryCall(ctx, func(client agent.ChatClient) error {
@@ -299,25 +336,27 @@ func (n *Narrator) runOrchestratorSummary(ctx context.Context, events []narrator
 		n.log.Log("narrate", "orchestrator: error", map[string]any{
 			"err": err.Error(),
 		})
-		return
+		n.requeueEvents(events)
+		return false
 	}
 	if line := n.cfg.Summarizer.Extract(resp); isUsableNarration(line) {
 		n.log.Log("narrate", "orchestrator: "+line, map[string]any{
 			"events": len(events),
 		})
-		return
+		return true
 	}
 	if tail := n.cfg.Summarizer.Tail(resp); tail != "" {
 		n.log.Log("narrate", "orchestrator: …thinking: "+tail, map[string]any{
 			"events":          len(events),
 			"truncated_think": true,
 		})
-		return
+		return true
 	}
 	n.log.Log("narrate", "orchestrator: empty", map[string]any{
 		"events":     len(events),
 		"tokens_out": resp.Usage.CompletionTokens,
 	})
+	return true
 }
 
 // runAgentSummary dispatches one per-agent narration call and advances the per-agent cursor on success.
