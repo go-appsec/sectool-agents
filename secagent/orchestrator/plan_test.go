@@ -12,7 +12,7 @@ import (
 
 // stubSpawn returns a workerSpawnFunc that produces a FakeAgent-backed worker and counts how many times it was invoked.
 func stubSpawn(counter *int) workerSpawnFunc {
-	return func(_ context.Context, id, _ int, assignment string) (*WorkerState, error) {
+	return func(_ context.Context, id int, assignment string) (*WorkerState, error) {
 		*counter++
 		return &WorkerState{
 			ID:              id,

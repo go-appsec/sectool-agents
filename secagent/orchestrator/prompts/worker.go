@@ -32,7 +32,7 @@ const workerMultiAddendum = `
 
 ## Multi-worker mode
 
-You are **Worker %d** of **%d** parallel workers. All workers share the same sectool server.
+You are **Worker %d** of up to **%d** concurrent workers (this run's parallelism cap). All workers share the same sectool server.
 
 - Proxy history is shared across workers. When polling proxy history, use explicit offset+limit windowing — do not rely on a global "since last poll" cursor.
 - Crawl and OAST sessions are per-session and safe to use independently. Sent requests return unique flow IDs so each worker's evidence is independently traceable.
@@ -46,12 +46,14 @@ const workerBashAddendum = `
 You also have a ` + "`bash`" + ` tool with unrestricted command execution on the host running secagent. Use it when the sectool tools cannot accomplish a step or when your instruction calls for it. Prefer sectool primitives for target traffic so evidence stays flow-traceable — commands run outside the proxy and produce no flow IDs.
 `
 
-// BuildWorkerSystemPrompt renders the worker system prompt. allowBash appends the
-// shell-access addendum granted by --allow-bash.
-func BuildWorkerSystemPrompt(workerID, numWorkers int, allowBash bool) string {
+// BuildWorkerSystemPrompt renders the worker system prompt. maxWorkers is the
+// run's stable parallelism cap; the multi-worker addendum is included whenever
+// the cap allows more than one worker. allowBash appends the shell-access
+// addendum granted by --allow-bash.
+func BuildWorkerSystemPrompt(workerID, maxWorkers int, allowBash bool) string {
 	out := workerBase
-	if numWorkers > 1 {
-		out += fmt.Sprintf(workerMultiAddendum, workerID, numWorkers)
+	if maxWorkers > 1 {
+		out += fmt.Sprintf(workerMultiAddendum, workerID, maxWorkers)
 	}
 	if allowBash {
 		out += workerBashAddendum
