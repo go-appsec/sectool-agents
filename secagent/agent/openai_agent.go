@@ -405,6 +405,7 @@ func (a *OpenAIAgent) dispatchToolCalls(
 					ToolCallID:    tc.ID,
 					ToolName:      tc.Function.Name,
 					Summary120:    Summarize120(errText),
+					IsError:       true,
 					IsRepairError: true,
 				},
 			}
@@ -534,6 +535,7 @@ func (a *OpenAIAgent) runSingleTool(inner context.Context, tc ToolCall,
 			ToolCallID: tc.ID,
 			ToolName:   tc.Function.Name,
 			Summary120: Summarize120(result.Text),
+			IsError:    result.IsError,
 		},
 		flowIDs: flowIDs,
 	}

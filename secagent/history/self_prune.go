@@ -145,7 +145,7 @@ func buildToolEvents(msgs []agent.Message) []toolEvent {
 					continue
 				}
 				ev.ResultPrev = util.Truncate(r.Content, 200)
-				ev.IsError = strings.HasPrefix(r.Content, "ERROR:")
+				ev.IsError = r.IsErrorResult()
 			}
 			events = append(events, ev)
 		}

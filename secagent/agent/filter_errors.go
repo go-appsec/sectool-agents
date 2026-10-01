@@ -8,16 +8,16 @@ import (
 )
 
 // FilterErrorMessages returns a copy of msgs with tool-error noise stripped:
-// "ERROR:"-prefixed tool results and IsRepairError messages are dropped
-// along with their matching ToolCall entries on preceding assistant
-// messages, and assistants left empty are dropped too.
+// error-flagged tool results (repair errors included) are dropped along with
+// their matching ToolCall entries on preceding assistant messages, and
+// assistants left empty are dropped too.
 func FilterErrorMessages(msgs []Message) []Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
 	dropIDs := make(map[string]bool)
 	for _, m := range msgs {
-		if isErrorToolResult(m) && m.ToolCallID != "" {
+		if m.IsErrorResult() && m.ToolCallID != "" {
 			dropIDs[m.ToolCallID] = true
 		}
 	}
@@ -25,7 +25,7 @@ func FilterErrorMessages(msgs []Message) []Message {
 	for _, m := range msgs {
 		switch m.Role {
 		case RoleTool:
-			if isErrorToolResult(m) {
+			if m.IsErrorResult() {
 				continue
 			}
 			out = append(out, m)
@@ -63,33 +63,26 @@ func HasSubstantiveMessages(msgs []Message) bool {
 	})
 }
 
-func isErrorToolResult(m Message) bool {
-	if m.Role != RoleTool {
-		return false
-	} else if m.IsRepairError {
-		return true
-	}
-	return strings.HasPrefix(m.Content, "ERROR:")
-}
-
 func filterToolCalls(tcs []ToolCall, drop map[string]bool) []ToolCall {
 	return bulk.SliceFilter(func(tc ToolCall) bool { return !drop[tc.ID] }, tcs)
 }
 
 // collapseSameToolErrorStreaks drops earlier tool-error messages whose next tool-result is also
 // an error from the same tool name. Strips matching ToolCall entries from preceding assistants
-// and drops assistants left empty. Returns the modified slice and the count of error messages dropped.
+// and drops assistants left empty. Repair errors are never dropped so the malformed-call record
+// stays visible and the model does not repeat the call. Returns the modified slice and the count
+// of error messages dropped.
 func collapseSameToolErrorStreaks(msgs []Message) ([]Message, int) {
 	drop := make(map[string]bool)
 	for i, m := range msgs {
-		if !isErrorToolResult(m) || m.ToolCallID == "" {
+		if !m.IsErrorResult() || m.IsRepairError || m.ToolCallID == "" {
 			continue
 		}
 		for j := i + 1; j < len(msgs); j++ {
 			if msgs[j].Role != RoleTool {
 				continue
 			}
-			if isErrorToolResult(msgs[j]) && msgs[j].ToolName == m.ToolName {
+			if msgs[j].IsErrorResult() && msgs[j].ToolName == m.ToolName {
 				drop[m.ToolCallID] = true
 			}
 			break

@@ -234,7 +234,7 @@ func TestBuildToolEvents(t *testing.T) {
 			},
 		},
 		{Role: "tool", ToolCallID: "a", ToolName: "tool_one", Content: "ok one"},
-		{Role: "tool", ToolCallID: "b", ToolName: "tool_two", Content: "ERROR: bad"},
+		{Role: "tool", ToolCallID: "b", ToolName: "tool_two", IsError: true, Content: "ERROR: bad"},
 	}
 	events := buildToolEvents(snap)
 	require.Len(t, events, 2)
@@ -242,7 +242,7 @@ func TestBuildToolEvents(t *testing.T) {
 	assert.Equal(t, "a", events[0].ToolCallID)
 	assert.False(t, events[0].IsError)
 	assert.Equal(t, "tool_two", events[1].ToolName)
-	assert.True(t, events[1].IsError, "ERROR: prefix marks the event as an error")
+	assert.True(t, events[1].IsError, "dispatch error flag marks the event as an error")
 }
 
 func TestBuildToolEventsExcludesRepairErrors(t *testing.T) {

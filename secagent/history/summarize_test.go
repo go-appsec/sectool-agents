@@ -140,7 +140,7 @@ func TestSummarizeCompletedWorker(t *testing.T) {
 				{Role: "assistant", ToolCalls: []agent.ToolCall{
 					{ID: "t1", Function: agent.ToolFunction{Name: "x"}},
 				}},
-				{Role: "tool", ToolCallID: "t1", Content: "ERROR: nope"},
+				{Role: "tool", ToolCallID: "t1", Content: "ERROR: nope", IsError: true},
 			},
 			"mission", "reason", 1,
 		)

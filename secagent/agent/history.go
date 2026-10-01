@@ -21,9 +21,21 @@ type Message struct {
 	ToolCallID       string     // tool only, pairs with assistant.tool_calls[i].ID
 	ToolName         string     // tool only, populated at append for compaction stubs
 	Summary120       string     // tool only, first 120 chars of raw content at append
+	// IsError marks a tool result whose dispatch recorded an error. Set at
+	// dispatch time; the single source of truth for error classification.
+	IsError bool
 	// IsRepairError marks a tool-result from RepairToolArgs failure. Compaction pass 2 skips these
 	// so the model doesn't repeat the malformed call after the error context is removed.
 	IsRepairError bool
+}
+
+// IsErrorResult reports whether m is a tool result flagged as an error.
+// Repair errors always classify as errors.
+func (m Message) IsErrorResult() bool {
+	if m.Role != RoleTool {
+		return false
+	}
+	return m.IsError || m.IsRepairError
 }
 
 // History is a goroutine-safe message log for one agent.

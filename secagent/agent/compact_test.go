@@ -150,6 +150,7 @@ func buildErrorStreakHistory(maxCtx int, n int) *History {
 			ToolName:   "flaky",
 			Content:    "ERROR: same failure mode " + strconv.Itoa(i) + " " + strings.Repeat("x", 1000),
 			Summary120: "ERROR: same failure mode",
+			IsError:    true,
 		})
 	}
 	h.Append(Message{Role: RoleUser, Content: "continue"})

@@ -34,6 +34,7 @@ func buildBigHistory(maxCtx int, withErrorStreak bool) *agent.History {
 				ToolCallID: id,
 				ToolName:   "flaky",
 				Content:    "ERROR: same failure " + strings.Repeat("z", 600),
+				IsError:    true,
 			})
 		}
 	}

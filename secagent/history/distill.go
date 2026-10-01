@@ -124,7 +124,7 @@ func buildDistillBatches(snapshot []agent.Message) []distillBatch {
 			Name:    tc.Function.Name,
 			Args:    util.Truncate(tc.Function.Arguments, 240),
 			Content: m.Content,
-			IsError: m.IsRepairError || strings.HasPrefix(m.Content, "ERROR:"),
+			IsError: m.IsErrorResult(),
 		})
 		if len(current.indices) >= distillMaxBatchEvents {
 			flush()
