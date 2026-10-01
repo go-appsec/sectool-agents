@@ -212,8 +212,8 @@ Findings filed by the verifier go through a similar dedup pass before being writ
 
 | Tool | Purpose |
 |------|---------|
-| `file_finding(...)` | Record a *verified* finding; `verification_notes` must describe how the issue was reproduced. Optional `supersedes_candidate_ids` explicitly links the finding to the candidate(s) it covers. Optional `follow_up_hint` advises the director on adjacent angles to probe. |
-| `dismiss_candidate(candidate_id, reason)` | Mark a worker candidate as not-a-finding. Optional `follow_up_hint` advises the director. |
+| `file_finding(...)` | Record a *verified* finding; `verification_notes` must describe how the issue was reproduced, and all other required fields must be non-empty. Optional `supersedes_candidate_ids` explicitly links the finding to the candidate(s) it covers — unknown or already-resolved IDs are rejected. Optional `follow_up_hint` advises the director on adjacent angles to probe. |
+| `dismiss_candidate(candidate_id, reason)` | Mark a worker candidate as not-a-finding; unknown or already-resolved candidate IDs are rejected. Optional `follow_up_hint` advises the director. |
 | `verification_done(summary)` | Signal verification complete; transitions to direction. |
 
 Plus the **full sectool tool surface** (same as workers): `flow_get`, `proxy_poll`, `replay_send`, `request_send`, `diff_flow`, `find_reflected`, `cookie_jar`, `jwt_decode`, `encode`, `decode`, `hash`, `crawl_*`, `oast_*`, `proxy_rule_*`, `proxy_respond_*`, `notes_save`, `notes_list`. The verifier prompt directs it to prefer non-destructive reproduction and clean up any rules/responders/sessions it introduces.
@@ -226,7 +226,7 @@ Per-worker decision tool:
 
 | Tool | Purpose |
 |------|---------|
-| `decide_worker(worker_id, action, instruction?, reason?, autonomous_budget?, fork?)` | The unified per-worker decision. `action="continue"` keeps the worker on its current angle (`instruction` is the next-iter directive). `action="expand"` pivots to a new angle (`instruction` is the new directive). `action="stop"` retires the worker (`reason` explains why). Optional `autonomous_budget` (1–20) sets the next iteration's turn cap. Optional `fork={new_worker_id, instruction}` spawns a child worker that inherits this worker's chronicle. |
+| `decide_worker(worker_id, action, instruction?, reason?, autonomous_budget?, fork?)` | The unified per-worker decision. `action="continue"` keeps the worker on its current angle (`instruction` is the next-iter directive). `action="expand"` pivots to a new angle (`instruction` is the new directive). `action="stop"` retires the worker (`reason` explains why; `fork` is rejected in combination). Optional `autonomous_budget` (1–20) sets the next iteration's turn cap. Optional `fork={new_worker_id, instruction}` spawns a child worker that inherits this worker's chronicle; a second `decide_worker` for the same worker in one phase is rejected, and `new_worker_id` must not collide with the alive/completed set or a fork claimed earlier in the same drain. |
 
 Synthesis tools (one call after all per-worker decisions):
 

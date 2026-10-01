@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync"
 
-	"github.com/go-analyze/bulk"
-
 	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
@@ -118,17 +116,20 @@ func (c *LayeredCompactor) runSelfPrune(ctx context.Context, h *agent.History, o
 	if len(dropSet) == 0 {
 		return report
 	}
-	pruned, _, dropped := PruneToolResults(snap, dropSet, nil)
-	if dropped == 0 {
+	// hook reports only IDs actually present; requests can reference
+	// results already pruned by an earlier pass
+	dropped := DroppedToolResultIDs(snap, dropSet)
+	if len(dropped) == 0 {
 		return report
 	}
+	pruned, _, _ := PruneToolResults(snap, dropSet, nil)
 	h.ReplaceAll(pruned)
-	report.SelfPrunedCalls = dropped
+	report.SelfPrunedCalls = len(dropped)
 	report.PassesApplied = append(report.PassesApplied, "self-prune")
 	report.After = h.EstimateTokens()
 	// re-read under lock to capture dynamic SetOnSelfPruneApplied updates
 	if hook := c.currentOpts().OnSelfPruneApplied; hook != nil {
-		hook(bulk.MapKeysSlice(dropSet))
+		hook(dropped)
 	}
 	return report
 }

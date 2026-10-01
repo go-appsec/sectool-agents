@@ -80,3 +80,16 @@ func TestCandidatePoolMark(t *testing.T) {
 		assert.Empty(t, p.Pending())
 	})
 }
+
+func TestCandidatePoolMarkable(t *testing.T) {
+	t.Parallel()
+
+	p := NewCandidatePool()
+	assert.False(t, p.Markable("c001"), "unknown id")
+
+	id := p.Add(AddInput{WorkerID: 1, Title: "x"})
+	assert.True(t, p.Markable(id))
+
+	p.Mark(id, CandidateStatusDismissed)
+	assert.False(t, p.Markable(id), "terminal status")
+}

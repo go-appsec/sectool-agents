@@ -59,7 +59,7 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent
 		s.Log.Log("compact", "self-prune apply", map[string]any{
 			"events_total": len(events),
 			"selected":     len(selected),
-			"dropped":      len(ids),
+			"requested":    len(ids),
 		})
 		return ids, nil
 	}
@@ -118,6 +118,8 @@ type toolEvent struct {
 }
 
 // buildToolEvents returns one toolEvent per tool_call paired with its result.
+// Repair-error results are excluded — every mechanical pass protects them, so
+// self-prune must never select (and drop) them either.
 func buildToolEvents(msgs []agent.Message) []toolEvent {
 	resultByID := map[string]agent.Message{}
 	for _, m := range msgs {
@@ -139,8 +141,11 @@ func buildToolEvents(msgs []agent.Message) []toolEvent {
 				ArgsPrev:   util.Truncate(tc.Function.Arguments, 200),
 			}
 			if r, ok := resultByID[tc.ID]; ok {
+				if r.IsRepairError {
+					continue
+				}
 				ev.ResultPrev = util.Truncate(r.Content, 200)
-				ev.IsError = r.IsRepairError || strings.HasPrefix(r.Content, "ERROR:")
+				ev.IsError = strings.HasPrefix(r.Content, "ERROR:")
 			}
 			events = append(events, ev)
 		}

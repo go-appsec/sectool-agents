@@ -67,4 +67,18 @@ func TestDecisionQueue(t *testing.T) {
 		q.BeginPerWorkerDecision(0)
 		assert.Equal(t, 0, q.AskedWorkerID())
 	})
+
+	t.Run("decision_and_fork_lookups", func(t *testing.T) {
+		q := NewDecisionQueue()
+		q.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1})
+		q.AddDecision(WorkerDecision{Kind: "expand", WorkerID: 2, Fork: &ForkSubAction{NewWorkerID: 9}})
+		assert.True(t, q.HasDecisionFor(1))
+		assert.True(t, q.HasDecisionFor(2))
+		assert.False(t, q.HasDecisionFor(3))
+		assert.Equal(t, map[int]bool{9: true}, q.ForkedIDs())
+
+		q.Reset()
+		assert.False(t, q.HasDecisionFor(1))
+		assert.Empty(t, q.ForkedIDs())
+	})
 }

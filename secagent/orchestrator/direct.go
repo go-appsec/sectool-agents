@@ -188,8 +188,7 @@ func applyDecisionAndFire(ctx context.Context,
 			"worker_id": w.ID, "autonomous_budget": budget,
 		})
 	}
-	// stop+fork is meaningless (child of a retired worker), so skip
-	if d.Fork != nil && d.Kind != "stop" && in.SpawnChild != nil {
+	if d.Fork != nil && in.SpawnChild != nil {
 		nw, err := in.SpawnChild(ctx, d.Fork.NewWorkerID, d.Fork.Instruction)
 		if err != nil {
 			log.Log("fork", "spawn failed", map[string]any{

@@ -539,7 +539,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		return fmt.Errorf("list synthesis director sectool tools: %w", err)
 	}
 
-	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions)...)
+	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions, candidates)...)
 	verifier.SetTools(verifierTools)
 
 	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, dedupReviewer, asyncMerger, cfg.AutonomousBudget, cfg.MaxWorkers, cfg.AllowBash)

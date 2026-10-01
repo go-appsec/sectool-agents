@@ -90,6 +90,15 @@ func (p *CandidatePool) Mark(id, status string) {
 	c.Status = status
 }
 
+// Markable reports whether id refers to a candidate still awaiting a verdict.
+func (p *CandidatePool) Markable(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	c := p.byID[id]
+	return c != nil && c.Status == CandidateStatusPending
+}
+
 // ByID returns a copy of the candidate with the given id, or nil if not found.
 func (p *CandidatePool) ByID(id string) *FindingCandidate {
 	p.mu.Lock()

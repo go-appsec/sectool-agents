@@ -202,6 +202,27 @@ func TestCompactor_TieredFlow(t *testing.T) {
 		_ = c.MaybeCompact(t.Context(), h)
 		assert.Zero(t, appliedCalls)
 	})
+
+	t.Run("on_self_prune_applied_reports_only_dropped", func(t *testing.T) {
+		var appliedIDs []string
+		h := buildBigHistory(4096, false)
+		c := history.NewLayeredCompactor(history.CompactorOptions{
+			Compaction: agent.CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				RecoveryThreshold:      0.99,
+				HardTruncateOnOverflow: true,
+			},
+			OnSelfPruneCandidates: func(_ context.Context, _ []agent.Message) ([]string, error) {
+				// "not-present" was already pruned by an earlier pass
+				return []string{"t0", "not-present", "t2"}, nil
+			},
+			OnSelfPruneApplied: func(ids []string) {
+				appliedIDs = ids
+			},
+		})
+		_ = c.MaybeCompact(t.Context(), h)
+		assert.ElementsMatch(t, []string{"t0", "t2"}, appliedIDs)
+	})
 }
 
 func TestCompactor_RetireOnPressureReturnsSentinel(t *testing.T) {

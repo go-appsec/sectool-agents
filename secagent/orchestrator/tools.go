@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/go-analyze/bulk"
 
 	"github.com/go-appsec/sectool-agents/secagent/agent"
 	"github.com/go-appsec/sectool-agents/secagent/orchestrator/prompts"
@@ -90,15 +94,27 @@ Returns a candidate_id confirmation.`,
 						IsError: true,
 					}
 				}
+				if msg := requiredFieldsErr(map[string]string{
+					"title": in.Title, "endpoint": in.Endpoint, "summary": in.Summary,
+					"evidence_notes": in.EvidenceNotes, "reproduction_hint": in.ReproductionHint,
+				}); msg != "" {
+					return agent.ToolResult{Text: msg, IsError: true}
+				}
 				if len(in.FlowIDs) == 0 {
 					return agent.ToolResult{
 						Text:    "Rejected: flow_ids must be a non-empty array.",
 						IsError: true,
 					}
 				}
+				if slices.ContainsFunc(in.FlowIDs, func(id string) bool { return strings.TrimSpace(id) == "" }) {
+					return agent.ToolResult{
+						Text:    "Rejected: flow_ids entries must be non-empty strings.",
+						IsError: true,
+					}
+				}
 				addIn := AddInput{
 					WorkerID:         workerID,
-					Title:            orDefault(strings.TrimSpace(in.Title), "untitled"),
+					Title:            strings.TrimSpace(in.Title),
 					Severity:         sev,
 					Endpoint:         strings.TrimSpace(in.Endpoint),
 					FlowIDs:          in.FlowIDs,
@@ -253,7 +269,8 @@ func BashToolDef(maxResultBytes int) agent.ToolDef {
 }
 
 // VerifierToolDefs returns the in-process verifier tool set (file_finding, dismiss_candidate, verification_done).
-func VerifierToolDefs(decisions *DecisionQueue) []agent.ToolDef {
+// candidates (required) validates candidate references at the tool boundary.
+func VerifierToolDefs(decisions *DecisionQueue, candidates *CandidatePool) []agent.ToolDef {
 	reject := func(name string) agent.ToolResult {
 		cur := decisions.Phase()
 		return agent.ToolResult{
@@ -331,6 +348,12 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 						IsError: true,
 					}
 				}
+				if msg := requiredFieldsErr(map[string]string{
+					"title": in.Title, "endpoint": in.Endpoint, "description": in.Description,
+					"reproduction_steps": in.ReproductionSteps, "evidence": in.Evidence, "impact": in.Impact,
+				}); msg != "" {
+					return agent.ToolResult{Text: msg, IsError: true}
+				}
 				notes := strings.TrimSpace(in.VerificationNotes)
 				if notes == "" {
 					return agent.ToolResult{
@@ -338,8 +361,21 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 						IsError: true,
 					}
 				}
+				supersedes := make([]string, len(in.SupersedesCandidateIDs))
+				for i, id := range in.SupersedesCandidateIDs {
+					supersedes[i] = strings.TrimSpace(id)
+				}
+				if bad := bulk.SliceFilter(func(id string) bool { return !candidates.Markable(id) }, supersedes); len(bad) > 0 {
+					return agent.ToolResult{
+						Text: fmt.Sprintf(
+							"Rejected: supersedes_candidate_ids references unknown or already-resolved candidate(s): %s. Pending candidates: %s.",
+							strings.Join(bad, ", "), pendingCandidateIDs(candidates),
+						),
+						IsError: true,
+					}
+				}
 				f := FindingFiled{
-					Title:                  orDefault(strings.TrimSpace(in.Title), "untitled"),
+					Title:                  strings.TrimSpace(in.Title),
 					Severity:               sev,
 					Endpoint:               strings.TrimSpace(in.Endpoint),
 					Description:            strings.TrimSpace(in.Description),
@@ -347,7 +383,7 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 					Evidence:               strings.TrimSpace(in.Evidence),
 					Impact:                 strings.TrimSpace(in.Impact),
 					VerificationNotes:      notes,
-					SupersedesCandidateIDs: in.SupersedesCandidateIDs,
+					SupersedesCandidateIDs: supersedes,
 					FollowUpHint:           strings.TrimSpace(in.FollowUpHint),
 				}
 				decisions.AddFinding(f)
@@ -386,6 +422,15 @@ headers, and observed behavior — never cite flow IDs, OAST session IDs, or oth
 				if cid == "" || reason == "" {
 					return agent.ToolResult{
 						Text:    "Rejected: candidate_id and reason required.",
+						IsError: true,
+					}
+				}
+				if !candidates.Markable(cid) {
+					return agent.ToolResult{
+						Text: fmt.Sprintf(
+							"Rejected: candidate %s is unknown or already resolved. Pending candidates: %s.",
+							cid, pendingCandidateIDs(candidates),
+						),
 						IsError: true,
 					}
 				}
@@ -508,6 +553,15 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logg
 						IsError: true,
 					}
 				}
+				if decisions.HasDecisionFor(in.WorkerID) {
+					return agent.ToolResult{
+						Text: fmt.Sprintf(
+							"Rejected: worker %d already has a decision recorded this phase — decide_worker must be called exactly once per worker. No change was made; move on to the next worker's prompt.",
+							in.WorkerID,
+						),
+						IsError: true,
+					}
+				}
 				action := strings.ToLower(strings.TrimSpace(in.Action))
 				switch action {
 				case decideActionContinue:
@@ -526,6 +580,12 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logg
 					if strings.TrimSpace(in.Reason) == "" {
 						return agent.ToolResult{
 							Text:    "Rejected: reason is required for action=stop.",
+							IsError: true,
+						}
+					}
+					if in.Fork != nil {
+						return agent.ToolResult{
+							Text:    "Rejected: fork cannot be combined with action=stop — a retired worker has no lineage to inherit. Re-issue without fork, or use action=expand to keep this worker alive alongside the fork.",
 							IsError: true,
 						}
 					}
@@ -557,11 +617,17 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logg
 					}
 					if takenIDs != nil {
 						taken := takenIDs()
-						if taken[in.Fork.NewWorkerID] {
+						merged := maps.Clone(taken)
+						if merged == nil {
+							merged = map[int]bool{}
+						}
+						// fork IDs claimed earlier in this drain aren't in controller state yet
+						maps.Copy(merged, decisions.ForkedIDs())
+						if merged[in.Fork.NewWorkerID] {
 							return agent.ToolResult{
 								Text: fmt.Sprintf(
-									"Rejected: fork.new_worker_id=%d collides with an existing or retired worker. Taken IDs: %s. Pick a fresh integer.",
-									in.Fork.NewWorkerID, formatTakenIDs(taken),
+									"Rejected: fork.new_worker_id=%d collides with an existing, retired, or already-claimed worker. Taken IDs: %s. Pick a fresh integer.",
+									in.Fork.NewWorkerID, formatTakenIDs(merged),
 								),
 								IsError: true,
 							}
@@ -791,6 +857,35 @@ func SynthesisToolDefs(decisions *DecisionQueue, guardState func() (iter, runFin
 			},
 		},
 	}
+}
+
+// requiredFieldsErr returns a rejection message naming every empty required
+// field, or "" when all are present.
+func requiredFieldsErr(fields map[string]string) string {
+	var missing []string
+	for name, val := range fields {
+		if strings.TrimSpace(val) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	sort.Strings(missing)
+	return "Rejected: missing required field(s): " + strings.Join(missing, ", ") + "."
+}
+
+// pendingCandidateIDs renders the pool's pending candidate IDs for rejection messages.
+func pendingCandidateIDs(candidates *CandidatePool) string {
+	pending := candidates.Pending()
+	ids := make([]string, len(pending))
+	for i, c := range pending {
+		ids[i] = c.CandidateID
+	}
+	if len(ids) == 0 {
+		return "(none)"
+	}
+	return strings.Join(ids, ", ")
 }
 
 // checkAliveWorkersStopped returns a rejection message naming alive workers whose

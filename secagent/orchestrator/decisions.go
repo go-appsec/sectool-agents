@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"slices"
 	"sync"
 
 	"github.com/go-appsec/sectool-agents/secagent/agent"
@@ -164,6 +165,30 @@ func (q *DecisionQueue) DecisionsByWorker() map[int]string {
 	out := make(map[int]string, len(q.WorkerDecisions))
 	for _, d := range q.WorkerDecisions {
 		out[d.WorkerID] = d.Kind
+	}
+	return out
+}
+
+// HasDecisionFor reports whether a decision was already recorded for workerID.
+func (q *DecisionQueue) HasDecisionFor(workerID int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return slices.ContainsFunc(q.WorkerDecisions, func(d WorkerDecision) bool {
+		return d.WorkerID == workerID
+	})
+}
+
+// ForkedIDs returns child IDs claimed by fork decisions recorded so far.
+func (q *DecisionQueue) ForkedIDs() map[int]bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	out := make(map[int]bool, len(q.WorkerDecisions))
+	for _, d := range q.WorkerDecisions {
+		if d.Fork != nil {
+			out[d.Fork.NewWorkerID] = true
+		}
 	}
 	return out
 }

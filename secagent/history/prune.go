@@ -8,6 +8,21 @@ import (
 	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
+// DroppedToolResultIDs returns the dropSet IDs actually present as tool results
+// in msgs. Requested IDs can reference results already pruned by an earlier pass.
+func DroppedToolResultIDs(msgs []agent.Message, dropSet map[string]struct{}) []string {
+	var out []string
+	for _, m := range msgs {
+		if m.Role != agent.RoleTool {
+			continue
+		}
+		if _, drop := dropSet[m.ToolCallID]; drop {
+			out = append(out, m.ToolCallID)
+		}
+	}
+	return out
+}
+
 // PruneToolResults drops tool-results in dropSet, strips matching tool calls from preceding
 // assistants, and removes assistants left empty.
 // inScope decides per-index eligibility (nil = all eligible). keptIndices reports surviving

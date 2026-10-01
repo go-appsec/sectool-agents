@@ -244,3 +244,40 @@ func TestBuildToolEvents(t *testing.T) {
 	assert.Equal(t, "tool_two", events[1].ToolName)
 	assert.True(t, events[1].IsError, "ERROR: prefix marks the event as an error")
 }
+
+func TestBuildToolEventsExcludesRepairErrors(t *testing.T) {
+	t.Parallel()
+
+	snap := []agent.Message{
+		{Role: "assistant", ToolCalls: []agent.ToolCall{
+			{ID: "a", Function: agent.ToolFunction{Name: "tool_one", Arguments: `{}`}},
+			{ID: "b", Function: agent.ToolFunction{Name: "tool_two", Arguments: `{}`}},
+		}},
+		{Role: "tool", ToolCallID: "a", Content: "your arguments did not parse", IsRepairError: true},
+		{Role: "tool", ToolCallID: "b", Content: "ok"},
+	}
+	events := buildToolEvents(snap)
+	require.Len(t, events, 1)
+	assert.Equal(t, "b", events[0].ToolCallID)
+}
+
+func TestSelfPruneCallbackSkipsRepairErrors(t *testing.T) {
+	t.Parallel()
+
+	snap := buildSelfPruneSnapshot(8)
+	for i, m := range snap {
+		if m.Role == "tool" && m.ToolCallID == "cC" {
+			snap[i].IsRepairError = true
+		}
+	}
+	// with cC excluded the listing reindexes; #3 now maps to cD
+	client := &sequenceClient{
+		responses: []agent.ChatResponse{{Content: `{"remove":[3]}`}},
+	}
+	s := &Summarizer{Pool: poolOf(client), Model: "m", Log: NopLogger{}}
+	cb := SelfPruneCallback(s)
+
+	dropIDs, err := cb(t.Context(), snap)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"cD"}, dropIDs)
+}

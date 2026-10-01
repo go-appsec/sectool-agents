@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -81,6 +82,30 @@ func TestWorkerToolDefs(t *testing.T) {
 		args["flow_ids"] = []string{}
 		res := rc.Handler(t.Context(), mustMarshal(t, args))
 		assert.True(t, res.IsError)
+	})
+
+	t.Run("rejects_blank_flow_id_entry", func(t *testing.T) {
+		pool := NewCandidatePool()
+		rc := findTool(WorkerToolDefs(pool, nil, 1, nil, nil), "report_finding_candidate")
+		require.NotNil(t, rc)
+		args := baseArgs()
+		args["flow_ids"] = []string{"abc123", "   "}
+		res := rc.Handler(t.Context(), mustMarshal(t, args))
+		assert.True(t, res.IsError)
+		assert.Empty(t, pool.Pending())
+	})
+
+	t.Run("rejects_missing_required_fields", func(t *testing.T) {
+		pool := NewCandidatePool()
+		rc := findTool(WorkerToolDefs(pool, nil, 1, nil, nil), "report_finding_candidate")
+		require.NotNil(t, rc)
+		args := baseArgs()
+		args["endpoint"] = ""
+		delete(args, "summary")
+		res := rc.Handler(t.Context(), mustMarshal(t, args))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "endpoint, summary")
+		assert.Empty(t, pool.Pending())
 	})
 
 	t.Run("rejects_filed_duplicate_exact_slug", func(t *testing.T) {
@@ -304,9 +329,16 @@ func TestVerifierToolDefs(t *testing.T) {
 		"evidence": "e", "impact": "i", "verification_notes": "v",
 	}
 
+	// seededPool returns a pool with one pending candidate and its ID.
+	seededPool := func() (*CandidatePool, string) {
+		pool := NewCandidatePool()
+		id := pool.Add(AddInput{Title: "t"})
+		return pool, id
+	}
+
 	t.Run("rejects_before_phase_begin", func(t *testing.T) {
 		dq := NewDecisionQueue()
-		ff := findTool(VerifierToolDefs(dq), "file_finding")
+		ff := findTool(VerifierToolDefs(dq, NewCandidatePool()), "file_finding")
 		require.NotNil(t, ff)
 		res := ff.Handler(t.Context(), mustMarshal(t, fileFindingArgs))
 		assert.True(t, res.IsError)
@@ -316,19 +348,59 @@ func TestVerifierToolDefs(t *testing.T) {
 	t.Run("accepts_in_verification_phase", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseVerification)
-		ff := findTool(VerifierToolDefs(dq), "file_finding")
+		ff := findTool(VerifierToolDefs(dq, NewCandidatePool()), "file_finding")
 		require.NotNil(t, ff)
 		res := ff.Handler(t.Context(), mustMarshal(t, fileFindingArgs))
 		assert.False(t, res.IsError, res.Text)
 		assert.Len(t, dq.Findings, 1)
 	})
 
+	t.Run("file_finding_rejects_missing_required", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseVerification)
+		ff := findTool(VerifierToolDefs(dq, NewCandidatePool()), "file_finding")
+		args := maps.Clone(fileFindingArgs)
+		args["title"] = "  "
+		delete(args, "impact")
+		res := ff.Handler(t.Context(), mustMarshal(t, args))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "impact, title")
+		assert.Empty(t, dq.Findings)
+	})
+
+	t.Run("file_finding_rejects_unknown_supersedes", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseVerification)
+		pool, id := seededPool()
+		ff := findTool(VerifierToolDefs(dq, pool), "file_finding")
+		args := maps.Clone(fileFindingArgs)
+		args["supersedes_candidate_ids"] = []string{id, "c999", ""}
+		res := ff.Handler(t.Context(), mustMarshal(t, args))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "c999")
+		assert.Empty(t, dq.Findings)
+	})
+
+	t.Run("file_finding_accepts_pending_supersedes", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseVerification)
+		pool, id := seededPool()
+		ff := findTool(VerifierToolDefs(dq, pool), "file_finding")
+		args := maps.Clone(fileFindingArgs)
+		args["supersedes_candidate_ids"] = []string{id}
+		res := ff.Handler(t.Context(), mustMarshal(t, args))
+		require.False(t, res.IsError, res.Text)
+		require.Len(t, dq.Findings, 1)
+		assert.Equal(t, []string{id}, dq.Findings[0].SupersedesCandidateIDs)
+	})
+
 	t.Run("dismiss_candidate", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseVerification)
-		dc := findTool(VerifierToolDefs(dq), "dismiss_candidate")
+		pool, id := seededPool()
+		dc := findTool(VerifierToolDefs(dq, pool), "dismiss_candidate")
 		require.NotNil(t, dc)
-		res := dc.Handler(t.Context(), mustMarshal(t, map[string]any{"candidate_id": "c1", "reason": "noise"}))
+		res := dc.Handler(t.Context(), mustMarshal(t, map[string]any{"candidate_id": id, "reason": "noise"}))
 		assert.False(t, res.IsError)
 		require.Len(t, dq.Dismissals, 1)
 	})
@@ -336,16 +408,28 @@ func TestVerifierToolDefs(t *testing.T) {
 	t.Run("dismiss_rejects_empty_id", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseVerification)
-		dc := findTool(VerifierToolDefs(dq), "dismiss_candidate")
+		dc := findTool(VerifierToolDefs(dq, NewCandidatePool()), "dismiss_candidate")
 		require.NotNil(t, dc)
 		res := dc.Handler(t.Context(), mustMarshal(t, map[string]any{"candidate_id": "", "reason": "x"}))
 		assert.True(t, res.IsError)
 	})
 
+	t.Run("dismiss_rejects_unknown_or_resolved_candidate", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseVerification)
+		pool, id := seededPool()
+		pool.Mark(id, CandidateStatusVerified)
+		dc := findTool(VerifierToolDefs(dq, pool), "dismiss_candidate")
+		res := dc.Handler(t.Context(), mustMarshal(t, map[string]any{"candidate_id": id, "reason": "x"}))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "already resolved")
+		assert.Empty(t, dq.Dismissals)
+	})
+
 	t.Run("verification_done", func(t *testing.T) {
 		dq := NewDecisionQueue()
 		dq.BeginPhase(agent.PhaseVerification)
-		vd := findTool(VerifierToolDefs(dq), "verification_done")
+		vd := findTool(VerifierToolDefs(dq, NewCandidatePool()), "verification_done")
 		require.NotNil(t, vd)
 		res := vd.Handler(t.Context(), mustMarshal(t, map[string]any{"summary": "done verifying"}))
 		assert.False(t, res.IsError)
@@ -453,7 +537,53 @@ func TestDecisionToolDefs(t *testing.T) {
 			"fork": map[string]any{"new_worker_id": 9, "instruction": "child"},
 		}))
 		assert.True(t, res.IsError)
-		assert.Contains(t, res.Text, "collides with an existing or retired worker")
+		assert.Contains(t, res.Text, "already-claimed worker")
+	})
+
+	t.Run("fork_rejects_same_drain_collision", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		// controller state doesn't know about the earlier fork yet
+		taken := func() map[int]bool { return map[int]bool{1: true} }
+		dq.AddDecision(WorkerDecision{
+			Kind: "expand", WorkerID: 1, Instruction: "pivot",
+			Fork: &ForkSubAction{NewWorkerID: 9, Instruction: "first child"},
+		})
+		dw := findTool(DecisionToolDefs(dq, taken, nil), "decide_worker")
+		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
+			"worker_id": 2, "action": "expand", "instruction": "pivot again",
+			"fork": map[string]any{"new_worker_id": 9, "instruction": "second child"},
+		}))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "already-claimed worker")
+		assert.Contains(t, res.Text, "9")
+	})
+
+	t.Run("rejects_duplicate_decision", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		dq.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1, Instruction: "first"})
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
+		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
+			"worker_id": 1, "action": "expand", "instruction": "second",
+		}))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "already has a decision")
+		require.Len(t, dq.WorkerDecisions, 1)
+		assert.Equal(t, "first", dq.WorkerDecisions[0].Instruction)
+	})
+
+	t.Run("rejects_stop_with_fork", func(t *testing.T) {
+		dq := NewDecisionQueue()
+		dq.BeginPhase(agent.PhaseDirection)
+		dw := findTool(DecisionToolDefs(dq, noTaken, nil), "decide_worker")
+		res := dw.Handler(t.Context(), mustMarshal(t, map[string]any{
+			"worker_id": 1, "action": "stop", "reason": "done",
+			"fork": map[string]any{"new_worker_id": 5, "instruction": "child"},
+		}))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "fork cannot be combined with action=stop")
+		assert.Empty(t, dq.WorkerDecisions)
 	})
 
 	t.Run("fork_records_fresh_id", func(t *testing.T) {
