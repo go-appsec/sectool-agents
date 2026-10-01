@@ -66,6 +66,16 @@ func TestParse(t *testing.T) {
 		assert.Equal(t, "main", c.LogModel)
 	})
 
+	t.Run("allow_bash_default_off", func(t *testing.T) {
+		c := parse(t, "-prompt", "x")
+		assert.False(t, c.AllowBash)
+	})
+
+	t.Run("allow_bash_enabled", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-allow-bash")
+		assert.True(t, c.AllowBash)
+	})
+
 	t.Run("log_model_explicit", func(t *testing.T) {
 		c := parse(t, "-prompt", "x", "-model", "main", "-log-model", "small")
 		assert.Equal(t, "main", c.Model)

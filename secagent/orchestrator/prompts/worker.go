@@ -39,11 +39,24 @@ You are **Worker %d** of **%d** parallel workers. All workers share the same sec
 - Work exclusively on your assigned slice; include flow IDs in every candidate so the orchestrator can locate your evidence.
 `
 
-func BuildWorkerSystemPrompt(workerID, numWorkers int) string {
-	if numWorkers <= 1 {
-		return workerBase
+const workerBashAddendum = `
+
+## Shell access
+
+You also have a ` + "`bash`" + ` tool with unrestricted command execution on the host running secagent. Use it when the sectool tools cannot accomplish a step or when your instruction calls for it. Prefer sectool primitives for target traffic so evidence stays flow-traceable — commands run outside the proxy and produce no flow IDs.
+`
+
+// BuildWorkerSystemPrompt renders the worker system prompt. allowBash appends the
+// shell-access addendum granted by --allow-bash.
+func BuildWorkerSystemPrompt(workerID, numWorkers int, allowBash bool) string {
+	out := workerBase
+	if numWorkers > 1 {
+		out += fmt.Sprintf(workerMultiAddendum, workerID, numWorkers)
 	}
-	return workerBase + fmt.Sprintf(workerMultiAddendum, workerID, numWorkers)
+	if allowBash {
+		out += workerBashAddendum
+	}
+	return out
 }
 
 const reconWorkerBase = `You are the **recon worker**. Your single job is to map the target's surface for downstream testing workers — endpoints, authentication boundaries, technologies, data flows, observable configuration. You are NOT a tester: you do not probe for bugs and you do not file findings.

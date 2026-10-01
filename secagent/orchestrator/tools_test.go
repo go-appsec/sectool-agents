@@ -648,3 +648,58 @@ func TestSynthesisToolDefs(t *testing.T) {
 		assert.True(t, dq.HasEndRun)
 	})
 }
+
+func TestBashToolDef(t *testing.T) {
+	t.Parallel()
+
+	t.Run("runs_command", func(t *testing.T) {
+		bt := BashToolDef(0)
+		res := bt.Handler(t.Context(), mustMarshal(t, map[string]any{"command": "echo hello-bash"}))
+		assert.False(t, res.IsError, res.Text)
+		assert.Contains(t, res.Text, "hello-bash")
+	})
+
+	t.Run("combines_stderr", func(t *testing.T) {
+		bt := BashToolDef(0)
+		res := bt.Handler(t.Context(), mustMarshal(t, map[string]any{"command": "echo out; echo err 1>&2"}))
+		assert.False(t, res.IsError, res.Text)
+		assert.Contains(t, res.Text, "out")
+		assert.Contains(t, res.Text, "err")
+	})
+
+	t.Run("nonzero_exit_is_error", func(t *testing.T) {
+		bt := BashToolDef(0)
+		res := bt.Handler(t.Context(), mustMarshal(t, map[string]any{"command": "echo before; exit 3"}))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "status 3")
+		assert.Contains(t, res.Text, "before")
+	})
+
+	t.Run("no_output_placeholder", func(t *testing.T) {
+		bt := BashToolDef(0)
+		res := bt.Handler(t.Context(), mustMarshal(t, map[string]any{"command": "true"}))
+		assert.False(t, res.IsError, res.Text)
+		assert.Equal(t, "(no output)", res.Text)
+	})
+
+	t.Run("empty_command_rejected", func(t *testing.T) {
+		bt := BashToolDef(0)
+		res := bt.Handler(t.Context(), mustMarshal(t, map[string]any{"command": "   "}))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "non-empty")
+	})
+
+	t.Run("output_truncated", func(t *testing.T) {
+		bt := BashToolDef(16)
+		res := bt.Handler(t.Context(), mustMarshal(t, map[string]any{"command": "seq 1 100"}))
+		assert.False(t, res.IsError, res.Text)
+		assert.Contains(t, res.Text, "truncated: 16 of")
+	})
+
+	t.Run("invalid_json_rejected", func(t *testing.T) {
+		bt := BashToolDef(0)
+		res := bt.Handler(t.Context(), json.RawMessage(`{`))
+		assert.True(t, res.IsError)
+		assert.Contains(t, res.Text, "invalid arguments")
+	})
+}

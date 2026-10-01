@@ -73,12 +73,30 @@ Embed cross-worker context verbatim. Workers do NOT see each other's tool calls 
 Up to %d concurrent workers. Each worker owns a narrow, mutually-exclusive slice of the surface. Under-parallelizing is the more common failure — a lone worker scatters coverage.
 `
 
-// BuildDirectorDecisionSystemPrompt returns the director prompt for the per-worker decision phase.
-func BuildDirectorDecisionSystemPrompt(maxWorkers int) string {
-	return fmt.Sprintf(directorDecisionBase, maxWorkers)
+// workerBashNote is appended to both director prompts when --allow-bash grants
+// workers the bash tool, so directives can lean on it.
+const workerBashNote = `
+
+## Worker shell access
+
+Workers have a ` + "`bash`" + ` tool with unrestricted shell execution on the host (enabled via ` + "`--allow-bash`" + `). When an angle benefits from local tooling — parsing captured data, scripting requests the sectool tools cannot shape, inspecting files — say so explicitly in the directive; workers default to sectool primitives for target traffic.
+`
+
+// BuildDirectorDecisionSystemPrompt returns the director prompt for the per-worker
+// decision phase. allowBash appends the worker shell-access note.
+func BuildDirectorDecisionSystemPrompt(maxWorkers int, allowBash bool) string {
+	return fmt.Sprintf(directorDecisionBase, maxWorkers) + bashNote(allowBash)
 }
 
-// BuildDirectorSynthesisSystemPrompt returns the director prompt for the synthesis phase.
-func BuildDirectorSynthesisSystemPrompt(maxWorkers int) string {
-	return fmt.Sprintf(directorSynthesisBase, maxWorkers)
+// BuildDirectorSynthesisSystemPrompt returns the director prompt for the synthesis
+// phase. allowBash appends the worker shell-access note.
+func BuildDirectorSynthesisSystemPrompt(maxWorkers int, allowBash bool) string {
+	return fmt.Sprintf(directorSynthesisBase, maxWorkers) + bashNote(allowBash)
+}
+
+func bashNote(allowBash bool) string {
+	if !allowBash {
+		return ""
+	}
+	return workerBashNote
 }

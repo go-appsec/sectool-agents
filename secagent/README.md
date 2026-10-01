@@ -127,6 +127,7 @@ bin/secagent \
 | `--max-turns-per-agent` | `100` | Hard cap per Drain chain |
 | `--findings-dir` | `./findings` | Directory for finding report files |
 | `--skip-recon` | `false` | Skip the initial recon pass; the run starts with a normal testing worker against `--prompt`. See "How It Works" step 3 |
+| `--allow-bash` | `false` | Give testing workers an unrestricted `bash` tool for arbitrary shell command execution on the host. Off by default. See "Worker Tools" |
 
 **Stall detection**
 
@@ -185,13 +186,15 @@ bin/secagent \
 
 Each loop around the cycle is one **iteration**. The controller keeps iterating until the director calls `end_run` or `--max-iterations` is hit. The `recon problem` step is the initial recon worker (iter 1); with `--skip-recon` the run jumps straight into the workers/director loop against `--prompt`.
 
-## Worker Tool
+## Worker Tools
 
 | Tool | Purpose |
 |------|---------|
 | `report_finding_candidate(...)` | Flag a potential vulnerability with proof flow IDs. The verifier will reproduce and, if confirmed, file the formal finding. |
 
 Workers do not write finding documents themselves — that's the verifier's job (after reproduction).
+
+**Optional `bash` tool.** With `--allow-bash`, testing workers additionally get a `bash(command)` tool that executes arbitrary shell commands on the host running secagent via `bash -c`. There are no command restrictions — the worker can run anything, including state-changing or destructive commands — so only enable it on hosts where that risk is acceptable. Workers are prompted to use it when the sectool tools can't accomplish a step or the director's instruction calls for it, and the director's prompts note the capability so it can plan around it. Commands run outside the sectool proxy and produce no flow IDs. The recon worker never gets the tool.
 
 ### Candidate dedup pipeline
 
@@ -284,6 +287,7 @@ Each file has Title, Severity, Affected Endpoint, Description, Reproduction Step
 - **Stall detection**: configurable via `--stall-warn-after` / `--stall-stop-after`.
 - **Per-turn timeout**: `--turn-timeout` (default 10m) bounds each model call. `--per-tool-timeout` (default 5m) bounds each tool dispatch.
 - **Max workers**: capped at 5 by `config.Parse`.
+- **Bash execution is opt-in**: workers have no shell access unless `--allow-bash` is set; when set, command execution is unrestricted.
 - **Verification required**: findings are only filed after the verifier calls `file_finding` with non-empty `verification_notes`.
 - **Premature end_run guard**: rejected before iteration 5 when zero findings have been filed; also rejected when alive workers haven't been stopped.
 

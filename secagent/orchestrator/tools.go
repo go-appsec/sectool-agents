@@ -1,9 +1,12 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/go-appsec/sectool-agents/secagent/agent"
 	"github.com/go-appsec/sectool-agents/secagent/orchestrator/prompts"
+	"github.com/go-appsec/sectool-agents/secagent/util"
 )
 
 // decideAction* are the valid action enum values for decide_worker.
@@ -174,6 +178,78 @@ func dedupRejectOrMerge(ctx context.Context, dedupReviewer CandidateDedupReviewe
 		}, true
 	}
 	return agent.ToolResult{}, false
+}
+
+// BashToolDef returns an unrestricted shell-execution tool. maxResultBytes caps
+// the output returned to the model (<= 0 disables the cap). Command filtering is
+// deliberately absent — access is gated by --allow-bash at the controller level.
+func BashToolDef(maxResultBytes int) agent.ToolDef {
+	return agent.ToolDef{
+		Name: "bash",
+		Description: `Execute an arbitrary shell command on the host running secagent via ` +
+			`bash -c. There are no command restrictions. Stdout and stderr are returned ` +
+			`combined; the result flags non-zero exit codes as errors. ` +
+			`Use when the sectool tools cannot accomplish the task or the instruction calls for it.`,
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"command": map[string]any{
+					"type":        "string",
+					"description": "Shell command line to execute (interpreted by bash)",
+				},
+			},
+			"required": []string{"command"},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) agent.ToolResult {
+			var in struct {
+				Command string `json:"command"`
+			}
+			if err := unmarshalToolArgs(args, &in); err != nil {
+				return agent.ToolResult{
+					Text:    "Rejected: invalid arguments: " + err.Error(),
+					IsError: true,
+				}
+			}
+			if strings.TrimSpace(in.Command) == "" {
+				return agent.ToolResult{
+					Text:    "Rejected: 'command' must be a non-empty shell command line.",
+					IsError: true,
+				}
+			}
+			cmd := exec.CommandContext(ctx, "bash", "-c", in.Command)
+			var combined bytes.Buffer
+			cmd.Stdout = &combined
+			cmd.Stderr = &combined
+			runErr := cmd.Run()
+			out := strings.TrimSpace(combined.String())
+			if out == "" {
+				out = "(no output)"
+			}
+			var exitErr *exec.ExitError
+			if errors.As(runErr, &exitErr) {
+				status := -1
+				if code := exitErr.ExitCode(); code >= 0 {
+					status = code
+				}
+				return agent.ToolResult{
+					Text:    fmt.Sprintf("Command exited with status %d:\n%s", status, out),
+					IsError: true,
+				}
+			}
+			if runErr != nil {
+				// ctx cancel, bash missing, etc.
+				return agent.ToolResult{
+					Text:    "Command failed to run: " + runErr.Error(),
+					IsError: true,
+				}
+			}
+			if maxResultBytes > 0 && len(out) > maxResultBytes {
+				out = util.TruncateBytes(out, maxResultBytes) +
+					fmt.Sprintf("\n…(truncated: %d of %d bytes shown. Narrow the command output — e.g. pipe through head/tail/grep — then call again.)", maxResultBytes, len(out))
+			}
+			return agent.ToolResult{Text: out}
+		},
+	}
 }
 
 // VerifierToolDefs returns the in-process verifier tool set (file_finding, dismiss_candidate, verification_done).

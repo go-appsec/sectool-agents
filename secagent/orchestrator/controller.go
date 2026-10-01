@@ -239,7 +239,7 @@ func (f *OpenAIFactory) NewWorker(id, numWorkers int) (agent.Agent, error) {
 	return f.buildAgent(
 		fmt.Sprintf("worker-%d", id),
 		f.Cfg.Model,
-		f.withMission(prompts.BuildWorkerSystemPrompt(id, numWorkers)),
+		f.withMission(prompts.BuildWorkerSystemPrompt(id, numWorkers, f.Cfg.AllowBash)),
 		f.Pool,
 		f.Cfg.MaxContext,
 		f.Reasoning,
@@ -288,7 +288,7 @@ func (f *OpenAIFactory) NewDecisionDirector() (agent.Agent, error) {
 	return f.buildAgent(
 		"director-review",
 		f.Cfg.Model,
-		f.withMission(prompts.BuildDirectorDecisionSystemPrompt(f.Cfg.MaxWorkers)),
+		f.withMission(prompts.BuildDirectorDecisionSystemPrompt(f.Cfg.MaxWorkers, f.Cfg.AllowBash)),
 		f.Pool,
 		f.Cfg.MaxContext,
 		f.Reasoning,
@@ -304,7 +304,7 @@ func (f *OpenAIFactory) NewSynthesisDirector() (agent.Agent, error) {
 	return f.buildAgent(
 		"director-plan",
 		f.Cfg.Model,
-		f.withMission(prompts.BuildDirectorSynthesisSystemPrompt(f.Cfg.MaxWorkers)),
+		f.withMission(prompts.BuildDirectorSynthesisSystemPrompt(f.Cfg.MaxWorkers, f.Cfg.AllowBash)),
 		f.Pool,
 		f.Cfg.MaxContext,
 		f.Reasoning,
@@ -363,9 +363,11 @@ func resolveFormat(ctx context.Context, cache *agent.ReasoningFormatCache, pool 
 type workerSpawnFunc func(ctx context.Context, id, numWorkers int, assignment string) (*WorkerState, error)
 
 // newWorkerSpawner returns a workerSpawnFunc that provisions workers against the MCP endpoint at mcpURL.
+// allowBash grants testing workers the unrestricted bash tool (--allow-bash).
 func newWorkerSpawner(mcpURL string, toolResultMaxBytes int,
 	factory AgentFactory, candidates *CandidatePool, writer *FindingWriter,
-	candidateDedup CandidateDedupReviewer, merger MergeSubmitter, autonomousBudget int) workerSpawnFunc {
+	candidateDedup CandidateDedupReviewer, merger MergeSubmitter, autonomousBudget int,
+	allowBash bool) workerSpawnFunc {
 	return func(ctx context.Context, id, numWorkers int, assignment string) (*WorkerState, error) {
 		m, err := mcp.Connect(ctx, mcpURL)
 		if err != nil {
@@ -382,6 +384,9 @@ func newWorkerSpawner(mcpURL string, toolResultMaxBytes int,
 			return nil, fmt.Errorf("new worker %d: %w", id, err)
 		}
 		tools := append(slices.Clone(defs), WorkerToolDefs(candidates, writer, id, candidateDedup, merger)...)
+		if allowBash {
+			tools = append(tools, BashToolDef(toolResultMaxBytes))
+		}
 		a.SetTools(tools)
 		ws := &WorkerState{
 			ID:               id,
@@ -421,6 +426,12 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		"model":     cfg.Model,
 		"log_model": cfg.LogModel,
 	})
+	if cfg.AllowBash {
+		log.Log("server", "bash enabled (--allow-bash)", map[string]any{
+			"scope": "testing workers",
+			"note":  "workers may execute arbitrary shell commands when needed or instructed",
+		})
+	}
 
 	// 2m headroom keeps context cancellation as the normal termination path
 	httpTimeout := cfg.TurnTimeout + 2*time.Minute
@@ -521,7 +532,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions)...)
 	verifier.SetTools(verifierTools)
 
-	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, dedupReviewer, asyncMerger, cfg.AutonomousBudget)
+	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, dedupReviewer, asyncMerger, cfg.AutonomousBudget, cfg.AllowBash)
 
 	workers := make([]*WorkerState, 0, cfg.MaxWorkers)
 	defer func() {
