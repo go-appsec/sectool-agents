@@ -471,7 +471,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	factory.Summarizer = summarizer
 	// cap=4 so a candidate flurry can't saturate the shared pool. Wait before
 	// the shutdown dump so failed merges have landed in the pool first, and
-	// again via defer so early returns never lose work mid-merge.
+	// again via defer so early returns never lose work mid-merge; Wait also
+	// quiesces, so stragglers still unwinding recover via the candidate pool.
 	asyncMerger := newAsyncMerger(ctx, dedupReviewer, writer, candidates, log, 4)
 	defer asyncMerger.Wait()
 
@@ -947,7 +948,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 
 	// all worker submissions are joined; settle pending merges before final
 	// verification, the unvalidated dump, and the summary below so none of
-	// them race in-flight merge goroutines rewriting writer state
+	// them race in-flight merge goroutines rewriting writer state; also
+	// quiesces so any straggler submit is recovered into the candidate pool
 	asyncMerger.Wait()
 
 	// graceful-shutdown finalization: stage 1 verify pending, stage 2 dump unvalidated

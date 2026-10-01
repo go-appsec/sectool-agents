@@ -232,4 +232,56 @@ func TestAsyncMerger(t *testing.T) {
 		m.Submit("x", AddInput{}) // must not panic
 		m.Wait()                  // must not panic
 	})
+
+	t.Run("wait_quiesces_late_submits", func(t *testing.T) {
+		writer := newTestFindingWriter(t, t.TempDir())
+		path, err := writer.Write(FindingFiled{
+			Title: "T", Severity: "low", Endpoint: "GET /",
+		})
+		require.NoError(t, err)
+		rev := &fakeReviewer{}
+		candidates := NewCandidatePool()
+		m := newAsyncMerger(t.Context(), rev, writer, candidates, nil, 1)
+		m.Wait()
+
+		m.Submit(filepath.Base(path), AddInput{Title: "late", Severity: "low", Endpoint: "GET /"})
+
+		rev.mu.Lock()
+		assert.Empty(t, rev.merges)
+		rev.mu.Unlock()
+		pending := candidates.Pending()
+		require.Len(t, pending, 1)
+		assert.Equal(t, "late", pending[0].Title)
+	})
+
+	t.Run("concurrent_wait_and_submit", func(t *testing.T) {
+		writer := newTestFindingWriter(t, t.TempDir())
+		path, err := writer.Write(FindingFiled{
+			Title: "T", Severity: "low", Endpoint: "GET /",
+		})
+		require.NoError(t, err)
+		rev := &fakeReviewer{}
+		candidates := NewCandidatePool()
+		m := newAsyncMerger(t.Context(), rev, writer, candidates, nil, 1)
+
+		// mimic a straggler tool-handler goroutine racing Wait during shutdown
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				m.Submit(filepath.Base(path), AddInput{Title: "x", Severity: "low", Endpoint: "GET /"})
+			}
+		}()
+		m.Wait()
+		wg.Wait()
+		m.Wait() // idempotent, must not panic
+
+		rev.mu.Lock()
+		merges := len(rev.merges)
+		rev.mu.Unlock()
+		// every submit either merged or was recovered into the pool
+		pending := len(candidates.Pending())
+		assert.Equal(t, 50, merges+pending)
+	})
 }

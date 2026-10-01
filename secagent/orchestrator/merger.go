@@ -15,7 +15,12 @@ type asyncMerger struct {
 	candidates *CandidatePool
 	log        *Logger
 	sem        chan struct{}
-	wg         sync.WaitGroup
+	// mu guards pending/quiesced so late submissions from unwinding tool-handler
+	// goroutines can never race Wait (sync.WaitGroup Add/Wait misuse)
+	mu       sync.Mutex
+	idle     *sync.Cond
+	pending  int
+	quiesced bool
 }
 
 // newAsyncMerger returns an asyncMerger; capacity caps simultaneous merges.
@@ -24,7 +29,7 @@ func newAsyncMerger(ctx context.Context, reviewer DedupReviewer, writer *Finding
 	if capacity < 1 {
 		capacity = 1
 	}
-	return &asyncMerger{
+	m := &asyncMerger{
 		ctx:        ctx,
 		reviewer:   reviewer,
 		writer:     writer,
@@ -32,18 +37,28 @@ func newAsyncMerger(ctx context.Context, reviewer DedupReviewer, writer *Finding
 		log:        log,
 		sem:        make(chan struct{}, capacity),
 	}
+	m.idle = sync.NewCond(&m.mu)
+	return m
 }
 
 // Submit queues a merge of incoming into matchedFilename and returns
 // immediately. Cancellation of the run-level ctx aborts in-flight merges;
 // any merge that cannot complete preserves its evidence in the candidate pool.
+// Submissions after Wait are rejected and recovered the same way.
 func (m *asyncMerger) Submit(matchedFilename string, incoming AddInput) {
 	if m == nil {
 		return
 	}
-	m.wg.Add(1)
+	m.mu.Lock()
+	if m.quiesced {
+		m.mu.Unlock()
+		m.rescue(incoming, matchedFilename, "merger quiesced")
+		return
+	}
+	m.pending++
+	m.mu.Unlock()
 	go func() {
-		defer m.wg.Done()
+		defer m.mergeDone()
 		// pre-cancel bail: select races a canceled ctx against semaphore send
 		if err := m.ctx.Err(); err != nil {
 			m.rescue(incoming, matchedFilename, "canceled before merge")
@@ -60,12 +75,29 @@ func (m *asyncMerger) Submit(matchedFilename string, incoming AddInput) {
 	}()
 }
 
-// Wait blocks until every submitted merge completes.
+// Wait rejects further submissions and blocks until every previously accepted
+// merge completes. Rejected submissions preserve their evidence in the
+// candidate pool. Safe to call more than once.
 func (m *asyncMerger) Wait() {
 	if m == nil {
 		return
 	}
-	m.wg.Wait()
+	m.mu.Lock()
+	m.quiesced = true
+	for m.pending > 0 {
+		m.idle.Wait()
+	}
+	m.mu.Unlock()
+}
+
+// mergeDone records a merge goroutine finishing and wakes a waiting Wait.
+func (m *asyncMerger) mergeDone() {
+	m.mu.Lock()
+	m.pending--
+	if m.pending == 0 {
+		m.idle.Broadcast()
+	}
+	m.mu.Unlock()
 }
 
 func (m *asyncMerger) runOne(matchedFilename string, incoming AddInput) {
