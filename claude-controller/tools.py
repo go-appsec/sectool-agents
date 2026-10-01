@@ -452,16 +452,30 @@ class DecisionQueue:
 
 
 # Flow IDs (sectool/service/ids/ids.go): base62, default length 6, entity IDs 4.
-# Only match prefixed forms — a bare `flow` keyword mis-matches prose like
-# "flow chart" → "chart". Structured sources are handled by the dict walker.
+# The key requires word boundaries on both sides and an explicit [:=] separator
+# so suffix-embedded names (workflow_id) and bare prose never match.
 _FLOW_ID_RE = re.compile(
-    r"""(?:flow[_ ]?id|flow_a|flow_b|source_flow_id)\b   # keyword
-        \s*[:=]?\s*                                      # optional sep
-        ["']?                                            # optional quote
+    r"""\b(?:flow[_ ]?id|flow_a|flow_b|source_flow_id)\b  # keyword
+        ["']?\s*[:=]\s*["']?                             # required [:=] separator
         ([0-9A-Za-z]{4,16})                              # base62 token
     """,
     re.VERBOSE | re.IGNORECASE,
 )
+
+# Same shape constraint as _FLOW_ID_RE, applied to dict-key values.
+_FLOW_ID_VALUE_RE = re.compile(r"^[0-9A-Za-z]{4,16}$")
+
+
+def _flow_id_value(val: Any) -> str | None:
+    """Return val as a flow ID string, or None if not a string/number
+    or if it fails the flow ID shape check."""
+    if isinstance(val, str):
+        s = val
+    elif isinstance(val, bool) or not isinstance(val, (int, float)):
+        return None
+    else:
+        s = str(int(val)) if isinstance(val, float) and val.is_integer() else str(val)
+    return s if _FLOW_ID_VALUE_RE.match(s) else None
 
 
 def extract_flow_ids(*sources: Any) -> list[str]:
@@ -487,9 +501,10 @@ def extract_flow_ids(*sources: Any) -> list[str]:
                     "flow_a",
                     "flow_b",
                     "source_flow_id",
-                ) and isinstance(v, str) and v:
-                    if v not in seen:
-                        seen[v] = None
+                ):
+                    fid = _flow_id_value(v)
+                    if fid and fid not in seen:
+                        seen[fid] = None
                 walk(v)
             return
         if isinstance(val, (list, tuple)):

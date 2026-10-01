@@ -27,10 +27,15 @@ func TestExtractFlowIDs(t *testing.T) {
 		{
 			name: "nested_slice",
 			inputs: []any{[]any{
-				map[string]any{"flow_a": "ID_AAA1"},
-				map[string]any{"flow_b": "ID_BBB2"},
+				map[string]any{"flow_a": "IDAaA11"},
+				map[string]any{"flow_b": "IDBbB22"},
 			}},
-			want: []string{"ID_AAA1", "ID_BBB2"},
+			want: []string{"IDAaA11", "IDBbB22"},
+		},
+		{
+			name:   "quoted_json_style",
+			inputs: []any{"\"flow_id\": \"abc123\""},
+			want:   []string{"abc123"},
 		},
 		{
 			name:   "dedup",
@@ -40,6 +45,31 @@ func TestExtractFlowIDs(t *testing.T) {
 		{
 			name:   "rejects_bare_flow_word",
 			inputs: []any{"the flow chart shows details"},
+			want:   nil,
+		},
+		{
+			name:   "rejects_suffix_embedded_key",
+			inputs: []any{"workflow_id=abc123 and dataflow_id=def456"},
+			want:   nil,
+		},
+		{
+			name:   "rejects_prose_without_separator",
+			inputs: []any{"flow_a returned nothing", "flow a was dismissed", "flow_id abc123"},
+			want:   nil,
+		},
+		{
+			name:   "rejects_invalid_map_value",
+			inputs: []any{map[string]any{"flow_id": "ab1", "flow_a": "abc-123!"}},
+			want:   nil,
+		},
+		{
+			name:   "numeric_map_value",
+			inputs: []any{map[string]any{"flow_id": 123456, "flow_b": int64(123457)}},
+			want:   []string{"123456", "123457"},
+		},
+		{
+			name:   "rejects_non_string_map_value",
+			inputs: []any{map[string]any{"flow_id": true}},
 			want:   nil,
 		},
 	}

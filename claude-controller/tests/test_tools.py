@@ -225,9 +225,9 @@ class TestExtractFlowIds(unittest.TestCase):
 
     def test_dedup_and_order_preserved(self):
         ids = extract_flow_ids(
-            "flow_id AAAA11",
+            "flow_id=AAAA11",
             {"flow_id": "BBBB22"},
-            "flow_id AAAA11 seen again",
+            "flow_id: AAAA11 seen again",
             {"flow_id": "CCCC33"},
         )
         self.assertEqual(ids, ["AAAA11", "BBBB22", "CCCC33"])
@@ -237,13 +237,25 @@ class TestExtractFlowIds(unittest.TestCase):
         self.assertEqual(ids, [])
 
     def test_ignores_none_values(self):
-        ids = extract_flow_ids(None, "flow_id zz11aa")
+        ids = extract_flow_ids(None, "flow_id: zz11aa")
         self.assertEqual(ids, ["zz11aa"])
 
     def test_bare_flow_in_prose_does_not_match(self):
         self.assertEqual(extract_flow_ids("data flow analysis found an issue"), [])
         self.assertEqual(extract_flow_ids("the flow chart shows"), [])
         self.assertEqual(extract_flow_ids("request flow through the system"), [])
+
+    def test_suffix_embedded_key_does_not_match(self):
+        self.assertEqual(extract_flow_ids("workflow_id=abc123 and dataflow_id=def456"), [])
+
+    def test_prose_without_separator_does_not_match(self):
+        self.assertEqual(extract_flow_ids("flow_a returned nothing"), [])
+        self.assertEqual(extract_flow_ids("flow a was dismissed"), [])
+        self.assertEqual(extract_flow_ids("flow_id abc123"), [])
+
+    def test_dict_value_shape_validation(self):
+        self.assertEqual(extract_flow_ids({"flow_id": "ab1", "flow_a": "abc-123!"}), [])
+        self.assertEqual(extract_flow_ids({"flow_id": 123456, "flow_b": True}), ["123456"])
 
 
 class TestCandidatePoolMark(unittest.TestCase):
