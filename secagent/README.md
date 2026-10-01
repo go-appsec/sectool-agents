@@ -299,7 +299,7 @@ secagent installs a triple-Ctrl-C / SIGTERM handler so an in-flight run can be w
 2. **Second signal** — dumps every still-pending candidate to disk as an unverified record so the worker's evidence isn't lost.
 3. **Third signal** — force-exits with code 130. No further teardown.
 
-The sectool MCP server is only torn down if secagent launched it; an attached pre-existing server is left running. Outstanding async finding-merge goroutines are awaited at exit.
+The sectool MCP server is only torn down if secagent launched it; an attached pre-existing server is left running. Outstanding async finding-merge goroutines are awaited before the final verification and dump steps, so a merge that fails (LLM error, stale target, cancellation) preserves its evidence as a pending candidate that later verification or the shutdown dump recovers. Merge targets are re-resolved by sequence number at execution time, so a rename between submission and execution cannot orphan a queued merge.
 
 ## Running the tests
 

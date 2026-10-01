@@ -465,9 +465,10 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		Log:   log,
 	}
 	factory.Summarizer = summarizer
-	// cap=4 so a candidate flurry can't saturate the shared pool; Wait at
-	// shutdown so the user doesn't lose work mid-merge
-	asyncMerger := newAsyncMerger(ctx, dedupReviewer, writer, log, 4)
+	// cap=4 so a candidate flurry can't saturate the shared pool. Wait before
+	// the shutdown dump so failed merges have landed in the pool first, and
+	// again via defer so early returns never lose work mid-merge.
+	asyncMerger := newAsyncMerger(ctx, dedupReviewer, writer, candidates, log, 4)
 	defer asyncMerger.Wait()
 
 	// retired-worker registry; mutated on the main goroutine
@@ -934,6 +935,10 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	for _, j := range inflight {
 		_ = j()
 	}
+
+	// all worker submissions are joined; settle pending merges so failed ones
+	// are visible to final verification and the unvalidated dump below
+	asyncMerger.Wait()
 
 	// graceful-shutdown finalization: stage 1 verify pending, stage 2 dump unvalidated
 	if sd.Phase() >= ShutdownPhaseVerifyOnly {

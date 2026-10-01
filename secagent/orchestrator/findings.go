@@ -553,14 +553,15 @@ func indexEntry(filed FindingFiled, path string) findingIndexEntry {
 	}
 }
 
-// LookupByFilename returns the FindingFiled and full path for the finding
-// whose file basename matches name, or (zero, "", false).
-func (w *FindingWriter) LookupByFilename(name string) (FindingFiled, string, bool) {
+// LookupBySequence returns the FindingFiled and full path for the finding
+// with the given sequence number, or (zero, "", false). Sequence numbers
+// survive renames, making this the stable handle for queued merges.
+func (w *FindingWriter) LookupBySequence(seq int) (FindingFiled, string, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	for _, e := range w.index {
-		if filepath.Base(e.path) == name {
+		if findingSeqFromPath(e.path) == seq {
 			return e.filed, e.path, true
 		}
 	}

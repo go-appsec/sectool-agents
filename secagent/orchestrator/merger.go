@@ -10,27 +10,33 @@ type asyncMerger struct {
 	ctx      context.Context
 	reviewer DedupReviewer
 	writer   *FindingWriter
-	log      *Logger
-	sem      chan struct{}
-	wg       sync.WaitGroup
+	// candidates receives the evidence of any merge that fails so the
+	// verifier and the shutdown dump can recover it; nil disables the fallback.
+	candidates *CandidatePool
+	log        *Logger
+	sem        chan struct{}
+	wg         sync.WaitGroup
 }
 
 // newAsyncMerger returns an asyncMerger; capacity caps simultaneous merges.
-func newAsyncMerger(ctx context.Context, reviewer DedupReviewer, writer *FindingWriter, log *Logger, capacity int) *asyncMerger {
+func newAsyncMerger(ctx context.Context, reviewer DedupReviewer, writer *FindingWriter,
+	candidates *CandidatePool, log *Logger, capacity int) *asyncMerger {
 	if capacity < 1 {
 		capacity = 1
 	}
 	return &asyncMerger{
-		ctx:      ctx,
-		reviewer: reviewer,
-		writer:   writer,
-		log:      log,
-		sem:      make(chan struct{}, capacity),
+		ctx:        ctx,
+		reviewer:   reviewer,
+		writer:     writer,
+		candidates: candidates,
+		log:        log,
+		sem:        make(chan struct{}, capacity),
 	}
 }
 
 // Submit queues a merge of incoming into matchedFilename and returns
-// immediately. Cancellation of the run-level ctx aborts in-flight merges.
+// immediately. Cancellation of the run-level ctx aborts in-flight merges;
+// any merge that cannot complete preserves its evidence in the candidate pool.
 func (m *asyncMerger) Submit(matchedFilename string, incoming AddInput) {
 	if m == nil {
 		return
@@ -40,11 +46,13 @@ func (m *asyncMerger) Submit(matchedFilename string, incoming AddInput) {
 		defer m.wg.Done()
 		// pre-cancel bail: select races a canceled ctx against semaphore send
 		if err := m.ctx.Err(); err != nil {
+			m.rescue(incoming, matchedFilename, "canceled before merge")
 			return
 		}
 		select {
 		case m.sem <- struct{}{}:
 		case <-m.ctx.Done():
+			m.rescue(incoming, matchedFilename, "canceled before merge")
 			return
 		}
 		defer func() { <-m.sem }()
@@ -61,11 +69,14 @@ func (m *asyncMerger) Wait() {
 }
 
 func (m *asyncMerger) runOne(matchedFilename string, incoming AddInput) {
-	_, path, ok := m.writer.LookupByFilename(matchedFilename)
+	// resolve by sequence number at execution time: renames keep the sequence
+	// but change the slug, so a filename captured earlier may be stale
+	_, path, ok := m.writer.LookupBySequence(findingSeqFromPath(matchedFilename))
 	if !ok {
 		m.log.Log("finding", "async-merge target missing", map[string]any{
 			"matched_filename": matchedFilename,
 		})
+		m.rescue(incoming, matchedFilename, "target missing")
 		return
 	}
 	secondary := candidateAsFindingFiled(incoming)
@@ -77,11 +88,26 @@ func (m *asyncMerger) runOne(matchedFilename string, incoming AddInput) {
 			"matched_filename": matchedFilename,
 			"err":              err.Error(),
 		})
+		m.rescue(incoming, matchedFilename, err.Error())
 		return
 	}
 	m.log.Log("finding", "async-merge applied", map[string]any{
 		"matched_filename": matchedFilename,
 		"path":             newPath,
+	})
+}
+
+// rescue preserves the evidence of a failed merge as a pending candidate so
+// the verifier and the shutdown dump can recover it.
+func (m *asyncMerger) rescue(in AddInput, matchedFilename, cause string) {
+	if m.candidates == nil {
+		return
+	}
+	cid := m.candidates.Add(in)
+	m.log.Log("finding", "async-merge evidence preserved", map[string]any{
+		"candidate_id":     cid,
+		"matched_filename": matchedFilename,
+		"cause":            cause,
 	})
 }
 

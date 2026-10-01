@@ -62,7 +62,7 @@ func TestAsyncMerger(t *testing.T) {
 		filename := filepath.Base(path)
 
 		rev := &fakeReviewer{}
-		m := newAsyncMerger(t.Context(), rev, writer, nil, 2)
+		m := newAsyncMerger(t.Context(), rev, writer, nil, nil, 2)
 
 		m.Submit(filename, AddInput{
 			Title: "OAuth client enum (more)", Severity: "medium", Endpoint: "GET /oauth2/authorize",
@@ -82,12 +82,13 @@ func TestAsyncMerger(t *testing.T) {
 		assert.Contains(t, string(body), "tested 5 IDs")
 	})
 
-	t.Run("logs_target_missing", func(t *testing.T) {
+	t.Run("target_missing_preserves_evidence", func(t *testing.T) {
 		writer := NewFindingWriter(t.TempDir())
 		rev := &fakeReviewer{}
 		log, path, _ := newCapturedLogger(t)
+		candidates := NewCandidatePool()
 
-		m := newAsyncMerger(t.Context(), rev, writer, log, 1)
+		m := newAsyncMerger(t.Context(), rev, writer, candidates, log, 1)
 		m.Submit("does-not-exist.md", AddInput{Title: "x", Severity: "low", Endpoint: "GET /"})
 		m.Wait()
 		require.NoError(t, log.Close())
@@ -95,6 +96,36 @@ func TestAsyncMerger(t *testing.T) {
 		assert.Empty(t, rev.merges)
 		logged := mustReadFile(t, path)
 		assert.Contains(t, logged, "async-merge target missing")
+		assert.Contains(t, logged, "async-merge evidence preserved")
+		pending := candidates.Pending()
+		require.Len(t, pending, 1)
+		assert.Equal(t, "x", pending[0].Title)
+	})
+
+	t.Run("stale_filename_resolves_by_seq", func(t *testing.T) {
+		writer := NewFindingWriter(t.TempDir())
+		path, err := writer.Write(FindingFiled{
+			Title: "OAuth client enum", Severity: "medium", Endpoint: "GET /oauth2/authorize",
+		})
+		require.NoError(t, err)
+		stale := filepath.Base(path)
+
+		// rename via merge so the snapshot filename no longer resolves
+		_, err = writer.MergeExisting(path, func(existing FindingFiled) (FindingFiled, error) {
+			existing.Title = "OAuth client enumeration"
+			return existing, nil
+		})
+		require.NoError(t, err)
+
+		rev := &fakeReviewer{}
+		m := newAsyncMerger(t.Context(), rev, writer, nil, nil, 1)
+		m.Submit(stale, AddInput{Title: "more", Severity: "medium", Endpoint: "GET /oauth2/authorize"})
+		m.Wait()
+
+		rev.mu.Lock()
+		require.Len(t, rev.merges, 1)
+		assert.Equal(t, "OAuth client enumeration", rev.merges[0].primary.Title)
+		rev.mu.Unlock()
 	})
 
 	t.Run("logs_classify_error", func(t *testing.T) {
@@ -105,14 +136,18 @@ func TestAsyncMerger(t *testing.T) {
 		require.NoError(t, err)
 		rev := &fakeReviewer{mergeErr: errors.New("boom")}
 		log, lpath, _ := newCapturedLogger(t)
+		candidates := NewCandidatePool()
 
-		m := newAsyncMerger(t.Context(), rev, writer, log, 1)
+		m := newAsyncMerger(t.Context(), rev, writer, candidates, log, 1)
 		m.Submit(filepath.Base(p), AddInput{Title: "y", Severity: "low", Endpoint: "GET /"})
 		m.Wait()
 		require.NoError(t, log.Close())
 
 		logged := mustReadFile(t, lpath)
 		assert.Contains(t, logged, "async-merge error")
+		pending := candidates.Pending()
+		require.Len(t, pending, 1)
+		assert.Equal(t, "y", pending[0].Title)
 	})
 
 	t.Run("concurrent_merges_preserve_all", func(t *testing.T) {
@@ -153,7 +188,7 @@ func TestAsyncMerger(t *testing.T) {
 			require.NoError(t, err)
 		}
 		rev := &fakeReviewer{}
-		m := newAsyncMerger(t.Context(), rev, writer, nil, 1)
+		m := newAsyncMerger(t.Context(), rev, writer, nil, nil, 1)
 
 		digests := writer.Digests()
 		for _, d := range digests {
@@ -176,7 +211,8 @@ func TestAsyncMerger(t *testing.T) {
 		cancel() // pre-cancel
 
 		rev := &fakeReviewer{}
-		m := newAsyncMerger(ctx, rev, writer, nil, 1)
+		candidates := NewCandidatePool()
+		m := newAsyncMerger(ctx, rev, writer, candidates, nil, 1)
 		m.Submit(filepath.Base(p), AddInput{Title: "y"})
 		m.Wait()
 
@@ -185,6 +221,10 @@ func TestAsyncMerger(t *testing.T) {
 		// Goroutine hits ctx.Done in the semaphore acquire and returns without touching the reviewer
 		// May or may not have entered runOne, assert that it did NOT issue a merge
 		assert.Empty(t, rev.merges)
+		// but the evidence still landed in the pool
+		pending := candidates.Pending()
+		require.Len(t, pending, 1)
+		assert.Equal(t, "y", pending[0].Title)
 	})
 
 	t.Run("nil_receiver_safe", func(t *testing.T) {
