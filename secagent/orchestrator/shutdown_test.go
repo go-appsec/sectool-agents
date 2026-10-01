@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,6 +45,44 @@ func TestShutdownPhaseTransitions(t *testing.T) {
 		assert.Equal(t, ShutdownPhaseDumpUnvalidated, sd.Phase())
 		require.ErrorIs(t, sd.WorkersCtx.Err(), context.Canceled)
 		require.ErrorIs(t, sd.VerifierCtx.Err(), context.Canceled)
+	})
+
+	t.Run("late_bind_worker_cancel", func(t *testing.T) {
+		// Cancel bound after stage 1 fires immediately, closing the bind race
+		sd := NewShutdown(t.Context(), nil)
+		sd.RequestVerifyOnly()
+		wctx, wcancel := context.WithCancel(t.Context())
+		sd.BindWorkerCancel(wcancel)
+		require.ErrorIs(t, wctx.Err(), context.Canceled)
+	})
+
+	t.Run("late_bind_verifier_cancel", func(t *testing.T) {
+		// Cancel bound after stage 2 fires immediately, closing the bind race
+		sd := NewShutdown(t.Context(), nil)
+		sd.RequestDumpUnvalidated()
+		vctx, vcancel := context.WithCancel(t.Context())
+		sd.BindVerifierCancel(vcancel)
+		require.ErrorIs(t, vctx.Err(), context.Canceled)
+	})
+
+	t.Run("late_bind_after_kill", func(t *testing.T) {
+		sd := NewShutdown(t.Context(), nil)
+		sd.RequestKill()
+		wctx, wcancel := context.WithCancel(t.Context())
+		sd.BindWorkerCancel(wcancel)
+		require.ErrorIs(t, wctx.Err(), context.Canceled)
+		vctx, vcancel := context.WithCancel(t.Context())
+		sd.BindVerifierCancel(vcancel)
+		require.ErrorIs(t, vctx.Err(), context.Canceled)
+	})
+
+	t.Run("kill_func_runs_once", func(t *testing.T) {
+		sd := NewShutdown(t.Context(), nil)
+		var calls atomic.Int32
+		sd.SetKillFunc(func() { calls.Add(1) })
+		sd.RequestKill()
+		sd.RequestKill()
+		assert.Equal(t, int32(1), calls.Load())
 	})
 
 	t.Run("kill_is_terminal", func(t *testing.T) {

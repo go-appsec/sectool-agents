@@ -65,7 +65,9 @@ func main() {
 			default:
 				_, _ = fmt.Fprintln(os.Stderr, "Ctrl+C (3/3) — killing.")
 				sd.RequestKill()
-				_ = log.Close()
+				// cancel the root ctx (kills the sectool child via CommandContext); the
+				// deferred log.Close is skipped by os.Exit and the OS reclaims the fd
+				cancel()
 				os.Exit(130)
 			}
 		}

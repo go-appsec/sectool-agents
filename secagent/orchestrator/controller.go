@@ -420,6 +420,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		return fmt.Errorf("sectool start: %w", err)
 	}
 	defer srv.Terminate()
+	// reap the child on the stage-3 kill path, which exits without running defers
+	sd.SetKillFunc(srv.Terminate)
 
 	mcpURL := srv.URL
 

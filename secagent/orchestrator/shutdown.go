@@ -32,10 +32,11 @@ type Shutdown struct {
 	// RootCtx is the parent context for teardown work outliving both worker- and verifier-level cancellations.
 	RootCtx context.Context
 
-	// mu guards the bound cancels; signal handling may race with Run binding them.
+	// mu guards the bound cancels and killFunc; signal handling may race with Run binding them.
 	mu           sync.Mutex
 	workerStop   []context.CancelFunc // extra cancels for contexts Run derives from its own ctx
 	verifierStop []context.CancelFunc
+	killFunc     func() // synchronous teardown (sectool child) run at the kill stage
 
 	log *Logger
 }
@@ -55,25 +56,35 @@ func NewShutdown(parent context.Context, log *Logger) *Shutdown {
 }
 
 // BindWorkerCancel registers cancel so stage transitions also stop a worker
-// context Run derives from its own ctx (rather than WorkersCtx).
+// context Run derives from its own ctx (rather than WorkersCtx). A cancel
+// bound after stage 1 has already fired is cancelled immediately.
 func (s *Shutdown) BindWorkerCancel(cancel context.CancelFunc) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	s.workerStop = append(s.workerStop, cancel)
+	phase := s.phase.Load()
 	s.mu.Unlock()
+	if phase >= ShutdownPhaseVerifyOnly {
+		cancel()
+	}
 }
 
 // BindVerifierCancel registers cancel so stage transitions also stop a verifier
-// context Run derives from its own ctx (rather than VerifierCtx).
+// context Run derives from its own ctx (rather than VerifierCtx). A cancel
+// bound after stage 2 has already fired is cancelled immediately.
 func (s *Shutdown) BindVerifierCancel(cancel context.CancelFunc) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	s.verifierStop = append(s.verifierStop, cancel)
+	phase := s.phase.Load()
 	s.mu.Unlock()
+	if phase >= ShutdownPhaseDumpUnvalidated {
+		cancel()
+	}
 }
 
 func (s *Shutdown) stopWorkers() {
@@ -93,6 +104,27 @@ func (s *Shutdown) stopVerifiers() {
 	s.mu.Unlock()
 	for _, cancel := range stops {
 		cancel()
+	}
+}
+
+// SetKillFunc registers kill as the synchronous teardown run at the kill
+// stage; used to reap the spawned sectool child before forced exit. Pass nil
+// to clear.
+func (s *Shutdown) SetKillFunc(kill func()) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.killFunc = kill
+	s.mu.Unlock()
+}
+
+func (s *Shutdown) runKillFunc() {
+	s.mu.Lock()
+	kill := s.killFunc
+	s.mu.Unlock()
+	if kill != nil {
+		kill()
 	}
 }
 
@@ -158,8 +190,9 @@ func DumpUnvalidatedCandidates(pending []FindingCandidate, writer *FindingWriter
 	return written
 }
 
-// RequestKill transitions to phase 3 and cancels both child contexts.
-// The caller is responsible for terminating the process.
+// RequestKill transitions to phase 3, cancels both child contexts, and runs
+// the registered kill teardown. The caller is responsible for terminating the
+// process.
 func (s *Shutdown) RequestKill() {
 	if s == nil {
 		return
@@ -172,6 +205,7 @@ func (s *Shutdown) RequestKill() {
 		if s.phase.CompareAndSwap(cur, ShutdownPhaseKill) {
 			s.stopWorkers()
 			s.stopVerifiers()
+			s.runKillFunc()
 			s.log.Log("shutdown", "kill requested", map[string]any{"phase": ShutdownPhaseKill})
 			return
 		}
