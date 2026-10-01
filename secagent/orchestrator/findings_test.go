@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -383,13 +384,13 @@ func TestNewFindingWriter(t *testing.T) {
 		}
 		w := newTestFindingWriter(t, dir)
 		assert.Equal(t, 7, w.Count)
-		assert.Equal(t, 0, w.RunCount, "RunCount must not be seeded from disk")
+		assert.Equal(t, 0, w.RunCount(), "RunCount must not be seeded from disk")
 
 		path, err := w.Write(FindingFiled{Title: "New Finding", Severity: "low", Endpoint: "GET /"})
 		require.NoError(t, err)
 		assert.Equal(t, "finding-08-new-finding.md", filepath.Base(path))
 		assert.Equal(t, 8, w.Count)
-		assert.Equal(t, 1, w.RunCount, "RunCount increments only on in-process Write")
+		assert.Equal(t, 1, w.RunCount(), "RunCount increments only on in-process Write")
 	})
 
 	t.Run("missing_dir_starts_at_zero", func(t *testing.T) {
@@ -453,6 +454,45 @@ func TestFindingWriterWriteCollision(t *testing.T) {
 		assert.Equal(t, "unvalidated-02-loose-sso-cookie.md", filepath.Base(path))
 		assert.Equal(t, 2, w.UnvalidatedCount)
 	})
+}
+
+func TestFindingWriterConcurrentAccessors(t *testing.T) {
+	t.Parallel()
+
+	w := newTestFindingWriter(t, t.TempDir())
+
+	var writeErr, renameErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			path, err := w.Write(FindingFiled{Title: "Race Probe", Severity: "low", Endpoint: "GET /"})
+			if err != nil {
+				writeErr = err
+				return
+			}
+			if i%2 == 0 {
+				if _, err = w.Replace(path, FindingFiled{Title: "Race Probe Renamed", Severity: "low", Endpoint: "GET /"}); err != nil {
+					renameErr = err
+					return
+				}
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			_ = w.RunCount()
+			_ = w.RunPaths()
+		}
+	}()
+	wg.Wait()
+
+	require.NoError(t, writeErr)
+	require.NoError(t, renameErr)
+	assert.Equal(t, 50, w.RunCount())
+	assert.Len(t, w.RunPaths(), 50)
 }
 
 func TestMatchPendingCandidates(t *testing.T) {
@@ -588,7 +628,7 @@ func TestFindingWriterWriteUnvalidated(t *testing.T) {
 		assert.Equal(t, "unvalidated-01-reflected-xss-in-search.md", filepath.Base(path))
 		assert.Equal(t, 1, w.UnvalidatedCount)
 		assert.Equal(t, 0, w.Count, "writing an unvalidated must not bump the verified count")
-		assert.Equal(t, 0, w.RunCount, "writing an unvalidated must not bump RunCount")
+		assert.Equal(t, 0, w.RunCount(), "writing an unvalidated must not bump RunCount")
 
 		raw, err := os.ReadFile(path)
 		require.NoError(t, err)

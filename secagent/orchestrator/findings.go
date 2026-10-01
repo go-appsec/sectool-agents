@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -168,9 +169,10 @@ type FindingWriter struct {
 	Count int
 	// UnvalidatedCount is the highest unvalidated-NN-*.md sequence on disk.
 	UnvalidatedCount int
-	// RunCount counts findings filed in this process only.
-	RunCount int
-	Paths    []string
+	// runCount counts findings filed in this process only; paths tracks the
+	// files written this run. Guarded by mu — read via RunCount / RunPaths.
+	runCount int
+	paths    []string
 	index    []findingIndexEntry
 }
 
@@ -180,6 +182,21 @@ type findingIndexEntry struct {
 	titleSlug string
 	endpoint  string
 	path      string
+}
+
+// RunCount returns the number of findings filed in this process only.
+func (w *FindingWriter) RunCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.runCount
+}
+
+// RunPaths returns the paths of all files written this run. The returned
+// slice is a copy and safe to range without holding the lock.
+func (w *FindingWriter) RunPaths() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.paths)
 }
 
 // SimilarFinding is a previously written finding whose title is similar
@@ -421,8 +438,8 @@ func (w *FindingWriter) Write(filed FindingFiled) (string, error) {
 		return "", err
 	}
 	w.Count = nextCount
-	w.RunCount++
-	w.Paths = append(w.Paths, path)
+	w.runCount++
+	w.paths = append(w.paths, path)
 	w.index = append(w.index, indexEntry(filed, path))
 	return path, nil
 }
@@ -488,9 +505,9 @@ func (w *FindingWriter) replaceLocked(oldPath string, filed FindingFiled) (strin
 		}
 	}
 	w.index[idx] = indexEntry(filed, newPath)
-	for i := range w.Paths {
-		if w.Paths[i] == oldPath {
-			w.Paths[i] = newPath
+	for i := range w.paths {
+		if w.paths[i] == oldPath {
+			w.paths[i] = newPath
 			break
 		}
 	}
@@ -749,6 +766,6 @@ func (w *FindingWriter) WriteUnvalidated(c FindingCandidate) (string, error) {
 		return "", err
 	}
 	w.UnvalidatedCount = next
-	w.Paths = append(w.Paths, path)
+	w.paths = append(w.paths, path)
 	return path, nil
 }

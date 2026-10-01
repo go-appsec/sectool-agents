@@ -600,7 +600,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 
 	// captured by closures so end_run / takenIDs see live state
 	var guardIteration int
-	guardStateFn := func() (int, int) { return guardIteration, writer.RunCount }
+	guardStateFn := func() (int, int) { return guardIteration, writer.RunCount() }
 	takenIDsFn := func() map[int]bool {
 		out := map[int]bool{}
 		for _, w := range workers {
@@ -816,7 +816,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		verifierDirective := BuildVerifierPrompt(
 			workers, workerRuns, candidates.Pending(),
 			writer.SummaryForOrchestrator(), factory.ReconSummary,
-			iteration, cfg.MaxIterations, writer.RunCount,
+			iteration, cfg.MaxIterations, writer.RunCount(),
 		)
 		verifier.ReplaceHistory([]agent.Message{{Role: "user", Content: verifierDirective}})
 		log.Log("compose", "installed", map[string]any{"role": "verifier", "iter": iteration})
@@ -833,7 +833,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		phaseTransition("verification", "direction")
 		stallWarnings := FormatStallWarnings(workers, cfg.StallWarnAfter)
 		followUpHints := FormatFollowUpHints(decisions.Findings, decisions.Dismissals)
-		iterStatus := statusLine(iteration, cfg.MaxIterations, writer.RunCount)
+		iterStatus := statusLine(iteration, cfg.MaxIterations, writer.RunCount())
 
 		if iteration == 1 && !cfg.SkipRecon {
 			// iter-1 recon: retire w1, review, plan; fallback to single-worker
@@ -942,8 +942,9 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	// join runs the loop fired but never harvested (end_run / max-iterations exits)
 	_ = harvestInflight(inflight)
 
-	// all worker submissions are joined; settle pending merges so failed ones
-	// are visible to final verification and the unvalidated dump below
+	// all worker submissions are joined; settle pending merges before final
+	// verification, the unvalidated dump, and the summary below so none of
+	// them race in-flight merge goroutines rewriting writer state
 	asyncMerger.Wait()
 
 	// graceful-shutdown finalization: stage 1 verify pending, stage 2 dump unvalidated
@@ -955,7 +956,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			finalDirective := BuildVerifierPrompt(
 				workers, map[int][]agent.TurnSummary{}, candidates.Pending(),
 				writer.SummaryForOrchestrator(), factory.ReconSummary,
-				iteration, cfg.MaxIterations, writer.RunCount,
+				iteration, cfg.MaxIterations, writer.RunCount(),
 			)
 			verifier.ReplaceHistory([]agent.Message{{Role: "user", Content: finalDirective}})
 			log.Log("shutdown", "final-verification start", map[string]any{
@@ -978,10 +979,10 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 
 	log.Log("summary", "run complete", map[string]any{
 		"iterations":     iteration,
-		"findings_count": writer.RunCount,
+		"findings_count": writer.RunCount(),
 		"workers":        len(workers),
 	})
-	for _, p := range writer.Paths {
+	for _, p := range writer.RunPaths() {
 		log.Log("summary", "finding", map[string]any{"path": filepath.Clean(p)})
 	}
 	return nil
