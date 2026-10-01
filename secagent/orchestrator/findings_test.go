@@ -21,6 +21,11 @@ func TestCanonicalEndpoint(t *testing.T) {
 		{"method_and_numeric_id", "GET /users/123", "/users/:id"},
 		{"trailing_slash_and_query", "POST /api/v1/items/?x=1", "/api/v1/items"},
 		{"uppercase_path", "/Users/42", "/users/:id"},
+		{"root", "/", "/"},
+		{"root_multiple_slashes", "///", "/"},
+		{"root_with_query", "/?q=1", "/"},
+		{"method_root", "GET /", "/"},
+		{"trailing_slash_trimmed", "/users/123/", "/users/:id"},
 		{"empty", "", ""},
 	}
 	for _, c := range cases {
@@ -158,6 +163,34 @@ func TestFindingWriterIsDuplicate(t *testing.T) {
 		other := finding
 		other.Endpoint = ""
 		assert.False(t, w.IsDuplicate(other))
+	})
+
+	t.Run("root_endpoint_not_missing_endpoint_duplicate", func(t *testing.T) {
+		// Root path is a real endpoint, never equivalent to a missing one
+		root := finding
+		root.Endpoint = "GET /"
+		w := newTestFindingWriter(t, t.TempDir())
+		_, err := w.Write(root)
+		require.NoError(t, err)
+		other := root
+		other.Endpoint = ""
+		assert.False(t, w.IsDuplicate(other))
+
+		w2 := newTestFindingWriter(t, t.TempDir())
+		_, err = w2.Write(other)
+		require.NoError(t, err)
+		assert.False(t, w2.IsDuplicate(root))
+	})
+
+	t.Run("root_endpoint_duplicate_of_root", func(t *testing.T) {
+		root := finding
+		root.Endpoint = "/"
+		w := newTestFindingWriter(t, t.TempDir())
+		_, err := w.Write(root)
+		require.NoError(t, err)
+		other := root
+		other.Endpoint = "GET ///"
+		assert.True(t, w.IsDuplicate(other))
 	})
 
 	t.Run("same_title_different_endpoint_not_duplicate", func(t *testing.T) {
@@ -550,6 +583,12 @@ func TestMatchPendingCandidates(t *testing.T) {
 			[]string{"c001"},
 		},
 		{
+			"root_endpoint_never_matches_missing",
+			FindingFiled{Title: "Reflected XSS", Endpoint: ""},
+			[]FindingCandidate{{CandidateID: "c001", Title: "SQL Injection", Endpoint: "/"}},
+			nil,
+		},
+		{
 			"both_empty_returns_nil",
 			FindingFiled{Title: "", Endpoint: ""},
 			[]FindingCandidate{{CandidateID: "c001", Title: "x", Endpoint: "GET /x"}},
@@ -595,6 +634,25 @@ func TestMatchPendingCandidatesTiered(t *testing.T) {
 		}, pending)
 		assert.Equal(t, []string{"c001"}, ids)
 		assert.Equal(t, MatchTitleOnly, tier)
+	})
+
+	t.Run("root_endpoint_eligible_for_endpoint_tiers", func(t *testing.T) {
+		rootPending := []FindingCandidate{
+			{CandidateID: "c001", Title: "Standard User Session Cookie Reuse on Admin API", Endpoint: "///"},
+		}
+		ids, tier := MatchPendingCandidatesTiered(FindingFiled{
+			Title:    "Standard User Session Cookie Reuse on Admin API",
+			Endpoint: "/",
+		}, rootPending)
+		assert.Equal(t, []string{"c001"}, ids)
+		assert.Equal(t, MatchTitleAndEndpoint, tier)
+
+		ids, tier = MatchPendingCandidatesTiered(FindingFiled{
+			Title:    "Admin API Endpoints Require JWT Bearer Auth",
+			Endpoint: "GET /",
+		}, rootPending)
+		assert.Equal(t, []string{"c001"}, ids)
+		assert.Equal(t, MatchEndpointOnly, tier)
 	})
 
 	t.Run("no_match_returns_none_tier", func(t *testing.T) {

@@ -37,6 +37,12 @@ class TestCanonicalEndpoint(unittest.TestCase):
         self.assertEqual(_canonical_endpoint("/api/Users"), "/api/users")
         self.assertEqual(_canonical_endpoint(""), "")
 
+    def test_root_path_distinct_from_missing(self):
+        self.assertEqual(_canonical_endpoint("/"), "/")
+        self.assertEqual(_canonical_endpoint("///"), "/")
+        self.assertEqual(_canonical_endpoint("GET /"), "/")
+        self.assertEqual(_canonical_endpoint("GET /?q=1"), "/")
+
 
 class TestFindingWriter(unittest.TestCase):
     def test_write_structured_produces_markdown(self):
@@ -204,6 +210,16 @@ class TestMatchPendingCandidates(unittest.TestCase):
     def test_empty_endpoint_returns_empty(self):
         filed = _make("Reflected XSS", endpoint="")
         pending = [_candidate("c001", "Reflected XSS", "GET /search")]
+        self.assertEqual(match_pending_candidates(filed, pending), [])
+
+    def test_root_endpoint_matches_root(self):
+        filed = _make("Reflected XSS", endpoint="GET /")
+        pending = [_candidate("c001", "Reflected XSS in root", "///")]
+        self.assertEqual(match_pending_candidates(filed, pending), ["c001"])
+
+    def test_root_endpoint_never_matches_missing(self):
+        filed = _make("Reflected XSS", endpoint="")
+        pending = [_candidate("c001", "SQL Injection", "/")]
         self.assertEqual(match_pending_candidates(filed, pending), [])
 
 

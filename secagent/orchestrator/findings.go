@@ -27,6 +27,8 @@ var httpMethods = map[string]bool{
 
 // CanonicalEndpoint returns endpoint lowercased with method prefix and
 // query string stripped, and numeric path segments rewritten to :id.
+// Slash-only paths canonicalize to "/", keeping the root endpoint distinct
+// from the missing-endpoint case.
 func CanonicalEndpoint(endpoint string) string {
 	if endpoint == "" {
 		return ""
@@ -39,6 +41,10 @@ func CanonicalEndpoint(endpoint string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if i := strings.IndexByte(s, '?'); i >= 0 {
 		s = s[:i]
+	}
+	// Slash-only paths are the root endpoint, not a missing one.
+	if s != "" && strings.Trim(s, "/") == "" {
+		return "/"
 	}
 	s = strings.TrimRight(s, "/")
 

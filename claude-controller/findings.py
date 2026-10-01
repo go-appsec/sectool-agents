@@ -31,8 +31,11 @@ def _canonical_endpoint(endpoint: str) -> str:
     } else endpoint
     path = path.strip().lower()
     # Drop query string and trailing slash
-    path = path.split("?", 1)[0].rstrip("/")
-    return path
+    path = path.split("?", 1)[0]
+    # Slash-only paths are the root endpoint, not a missing one
+    if path and not path.strip("/"):
+        return "/"
+    return path.rstrip("/")
 
 
 def _titles_similar(a: str, b: str) -> bool:
