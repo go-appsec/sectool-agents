@@ -52,7 +52,8 @@ type WorkerState struct {
 	Chronicle history.Chronicle
 	// RecentToolErrors is a rolling window of recent tool-error signatures.
 	RecentToolErrors []string
-	// CoachedErrorSig is the last error signature for which coaching was injected; prevents repeating the same nudge.
+	// CoachedErrorSig is the last error signature for which coaching was
+	// injected; latches until the signature decays out of RecentToolErrors.
 	CoachedErrorSig string
 	// History is a ring buffer of per-iteration outcomes surfaced to the director.
 	History     [WorkerHistoryRing]IterationEntry

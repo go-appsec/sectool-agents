@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -73,6 +74,61 @@ func TestRunWorkerUntilEscalation(t *testing.T) {
 		assert.Len(t, runs, 2)
 		assert.Equal(t, "candidate", w.EscalationReason)
 	})
+
+	t.Run("context_exhausted_survives_candidate", func(t *testing.T) {
+		pool := NewCandidatePool()
+		fake := &agent.FakeAgent{
+			Turns: []agent.TurnSummary{
+				{
+					EscalationReason: "context_exhausted",
+					ToolCalls:        []agent.ToolCallRecord{{Name: "report_finding_candidate"}},
+				},
+			},
+		}
+		fake.OnDrain = func(int) {
+			pool.Add(AddInput{WorkerID: 1, Title: "x", Severity: "low", FlowIDs: []string{"abc123"}})
+		}
+		w := &WorkerState{ID: 1, Agent: fake, Alive: true, AutonomousBudget: 5}
+		log, _ := newTestLogger(t)
+		rs := newWorkerRunResult(w)
+		_, err := RunWorkerUntilEscalation(t.Context(), w, &rs, pool, log)
+		require.NoError(t, err)
+		w.ApplyRunResult(rs)
+		assert.Equal(t, "context_exhausted", w.EscalationReason)
+	})
+}
+
+func TestRunOneWorkerRecovery(t *testing.T) {
+	t.Parallel()
+
+	t.Run("recovered_error_not_error", func(t *testing.T) {
+		fake := &agent.FakeAgent{
+			Turns: []agent.TurnSummary{
+				{ToolCalls: []agent.ToolCallRecord{{Name: "t"}}},
+				{ToolCalls: []agent.ToolCallRecord{{Name: "t"}}},
+			},
+			Errors: []error{errors.New("drain failed")},
+		}
+		w := &WorkerState{ID: 1, Agent: fake, Alive: true, AutonomousBudget: 5, LastInstruction: "continue"}
+		log, _ := newTestLogger(t)
+		rs := newWorkerRunResult(w)
+		res := runOneWorker(t.Context(), w, rs, NewCandidatePool(), log)
+		assert.Empty(t, res.EscalationReason)
+	})
+
+	t.Run("unrecovered_error_stays_error", func(t *testing.T) {
+		fake := &agent.FakeAgent{
+			Turns: []agent.TurnSummary{
+				{ToolCalls: []agent.ToolCallRecord{{Name: "t"}}},
+			},
+			Errors: []error{errors.New("drain failed"), errors.New("still failing")},
+		}
+		w := &WorkerState{ID: 1, Agent: fake, Alive: true, AutonomousBudget: 5, LastInstruction: "continue"}
+		log, _ := newTestLogger(t)
+		rs := newWorkerRunResult(w)
+		res := runOneWorker(t.Context(), w, rs, NewCandidatePool(), log)
+		assert.Equal(t, EscalationError, res.EscalationReason)
+	})
 }
 
 func TestUpdateToolErrorSignatures(t *testing.T) {
@@ -89,13 +145,38 @@ func TestUpdateToolErrorSignatures(t *testing.T) {
 		assert.Equal(t, []string{"e1", "e2"}, rs.RecentToolErrors)
 	})
 
-	t.Run("success_clears_coached_sig", func(t *testing.T) {
-		rs := &workerRunResult{CoachedErrorSig: "prev"}
+	t.Run("success_keeps_coached_sig", func(t *testing.T) {
+		rs := &workerRunResult{CoachedErrorSig: "e1", RecentToolErrors: []string{"e1", "e1"}}
 		updateToolErrorSignatures(rs, agent.TurnSummary{
 			ToolCalls: []agent.ToolCallRecord{
 				{Name: "ok", IsError: false, ResultSummary: "done"},
 			},
 		})
+		assert.Equal(t, "e1", rs.CoachedErrorSig)
+	})
+
+	t.Run("clean_turn_decays_window", func(t *testing.T) {
+		rs := &workerRunResult{RecentToolErrors: []string{"a", "b", "c"}}
+		updateToolErrorSignatures(rs, agent.TurnSummary{
+			ToolCalls: []agent.ToolCallRecord{{Name: "ok", IsError: false}},
+		})
+		assert.Equal(t, []string{"b", "c"}, rs.RecentToolErrors)
+	})
+
+	t.Run("error_turn_no_decay", func(t *testing.T) {
+		rs := &workerRunResult{RecentToolErrors: []string{"a", "b"}}
+		updateToolErrorSignatures(rs, agent.TurnSummary{
+			ToolCalls: []agent.ToolCallRecord{{Name: "x", IsError: true, ResultSummary: "c"}},
+		})
+		assert.Equal(t, []string{"a", "b", "c"}, rs.RecentToolErrors)
+	})
+
+	t.Run("coached_sig_clears_when_decayed_out", func(t *testing.T) {
+		rs := &workerRunResult{CoachedErrorSig: "a", RecentToolErrors: []string{"a"}}
+		updateToolErrorSignatures(rs, agent.TurnSummary{
+			ToolCalls: []agent.ToolCallRecord{{Name: "ok", IsError: false}},
+		})
+		assert.Empty(t, rs.RecentToolErrors)
 		assert.Empty(t, rs.CoachedErrorSig)
 	})
 

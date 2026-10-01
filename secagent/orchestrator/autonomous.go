@@ -42,8 +42,9 @@ func drainOne(ctx context.Context,
 		})
 		return summary, err
 	}
-	if newIDs := candidates.IDsSinceForWorker(before, w.ID); len(newIDs) > 0 {
-		summary.EscalationReason = "candidate"
+	if newIDs := candidates.IDsSinceForWorker(before, w.ID); len(newIDs) > 0 &&
+		summary.EscalationReason != EscalationContextExhausted {
+		summary.EscalationReason = EscalationCandidate
 	} else {
 		summary.EscalationReason = agent.ClassifyEscalation(summary, false)
 	}
@@ -62,12 +63,12 @@ func drainOne(ctx context.Context,
 }
 
 // updateToolErrorSignatures records summary's error-tool signatures into
-// rs.RecentToolErrors. Any successful call clears rs.CoachedErrorSig.
+// rs.RecentToolErrors. Error-free turns decay the window by one entry;
+// rs.CoachedErrorSig latches until its signature decays out.
 func updateToolErrorSignatures(rs *workerRunResult, summary agent.TurnSummary) {
-	var sawSuccess bool
+	var sawError bool
 	for _, tc := range summary.ToolCalls {
 		if !tc.IsError {
-			sawSuccess = true
 			continue
 		}
 
@@ -78,12 +79,16 @@ func updateToolErrorSignatures(rs *workerRunResult, summary agent.TurnSummary) {
 		if sig == "" {
 			continue
 		}
+		sawError = true
 		rs.RecentToolErrors = append(rs.RecentToolErrors, sig)
 		if len(rs.RecentToolErrors) > MaxRecentToolErrors {
 			rs.RecentToolErrors = rs.RecentToolErrors[len(rs.RecentToolErrors)-MaxRecentToolErrors:]
 		}
 	}
-	if sawSuccess {
+	if !sawError && len(rs.RecentToolErrors) > 0 {
+		rs.RecentToolErrors = rs.RecentToolErrors[1:]
+	}
+	if rs.CoachedErrorSig != "" && !slices.Contains(rs.RecentToolErrors, rs.CoachedErrorSig) {
 		rs.CoachedErrorSig = ""
 	}
 }
@@ -129,7 +134,8 @@ func runOneWorker(ctx context.Context,
 		summary, err2 := drainOne(ctx, w, &rs, candidates, log)
 		if err2 != nil {
 			rs.EscalationReason = EscalationError
-		} else if summary.EscalationReason != "" {
+		} else {
+			// Outcome of the final turn; a productive recovery is not an error.
 			rs.EscalationReason = summary.EscalationReason
 		}
 	}

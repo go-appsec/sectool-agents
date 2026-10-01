@@ -14,11 +14,14 @@ const (
 	EscalationError     = "error"
 	EscalationBudget    = "budget"
 	EscalationCandidate = "candidate"
+	// EscalationContextExhausted mirrors agent drain's context-overflow escalation.
+	EscalationContextExhausted = "context_exhausted"
 )
 
 // UpdateStallStreaks adjusts each alive worker's ProgressNoneStreak from
-// its last run outcome. Silent/error/repeated-error increment; candidate
-// or new flows reset. Repeated-error workers also get a coaching nudge.
+// its last run outcome. Silent/error/budget/context-exhausted/repeated-
+// error increment; candidate or new flows reset; a recovered run ("")
+// leaves it unchanged. Repeated-error workers also get a coaching nudge.
 func UpdateStallStreaks(workers []*WorkerState) {
 	for _, w := range workers {
 		if !w.Alive {
@@ -41,7 +44,9 @@ func UpdateStallStreaks(workers []*WorkerState) {
 		case w.EscalationReason == EscalationCandidate || producedFlows:
 			w.ProgressNoneStreak = 0
 			w.StallWarned = false
-		case repeated:
+		case w.EscalationReason == EscalationBudget || w.EscalationReason == EscalationContextExhausted || repeated:
+			// No verifiable progress; every escalation reason must move the
+			// streak so quiet-but-productive workers can reach warn/stop.
 			w.ProgressNoneStreak++
 		}
 		if repeated && w.CoachedErrorSig != repeatedSig && w.Agent != nil {

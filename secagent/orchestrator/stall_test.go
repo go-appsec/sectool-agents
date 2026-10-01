@@ -54,6 +54,27 @@ func TestUpdateStallStreaks(t *testing.T) {
 				wantStreak: 0,
 			},
 			{
+				name:       "budget_without_flows_increments",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "budget", ProgressNoneStreak: 2},
+				wantStreak: 3,
+			},
+			{
+				name:       "context_exhausted_increments",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "context_exhausted", ProgressNoneStreak: 1},
+				wantStreak: 2,
+			},
+			{
+				name:       "context_exhausted_with_flows_resets",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "context_exhausted", AutonomousTurns: flowsTurn, ProgressNoneStreak: 2},
+				wantStreak: 0,
+			},
+			{
+				// Recovered run ("") neither stalls nor resets
+				name:       "recovered_run_noop",
+				initial:    &WorkerState{ID: 1, Alive: true, EscalationReason: "", ProgressNoneStreak: 2},
+				wantStreak: 2,
+			},
+			{
 				name:          "dead_worker_untouched",
 				initial:       &WorkerState{ID: 1, Alive: false, EscalationReason: "silent", ProgressNoneStreak: 4, StallWarned: true},
 				wantStreak:    4,
@@ -78,8 +99,9 @@ func TestUpdateStallStreaks(t *testing.T) {
 			wantStreak    int
 		}{
 			{"threshold_increments_streak", 0, "budget", []string{"e", "e", "e"}, 1},
-			{"below_threshold_noop", 0, "budget", []string{"e", "e"}, 0},
+			{"below_threshold_noop", 0, "", []string{"e", "e"}, 0},
 			{"candidate_wins_over_errors", 2, "candidate", []string{"e", "e", "e"}, 0},
+			{"recovered_repeated_increments", 1, "", []string{"e", "e", "e"}, 2},
 		}
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
