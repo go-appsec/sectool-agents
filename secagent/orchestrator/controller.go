@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -901,6 +902,10 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			SpawnChild: spawnChild,
 			Retire:     retire,
 		}, log)
+		// publish joins immediately so every exit path (end_run included)
+		// sees the fired runs; plan retargets below cancel/replace in-flight
+		// runs instead of double-Draining
+		publishJoins(inflight, decRes)
 		LatchStallWarnings(workers, cfg.StallWarnAfter)
 		applyRetiredSummaries()
 
@@ -917,14 +922,12 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		if decisions.HasEndRun {
 			log.Log("controller", "end_run", map[string]any{"summary": decisions.EndRunSummary})
 			appendIterationHistory(workers, aliveAtStart, angleAt, workerRuns, decisions, candidates, candidatesBefore, iteration)
+			// cancel decision-phase runs so none executes into shutdown
+			// finalization; the post-loop harvest joins them once wound down
+			workerStop()
 			break
 		}
 
-		// publish per-worker decision joins BEFORE plan apply so retargets
-		// cancel/replace the in-flight run instead of double-Draining
-		for id, j := range decRes.joins {
-			inflight[id] = j
-		}
 		if decisions.HasPlan {
 			applyPlanAndFire(workerRunCtx, decisions.Plan, &workers, spawn, cfg.MaxWorkers, fire, inflight, log)
 		}
@@ -933,10 +936,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		narrator.TriggerNow(narrCtx)
 	}
 
-	// drain in-flight runs the loop fired but never harvested (end_run break)
-	for _, j := range inflight {
-		_ = j()
-	}
+	// join runs the loop fired but never harvested (end_run / max-iterations exits)
+	_ = harvestInflight(inflight)
 
 	// all worker submissions are joined; settle pending merges so failed ones
 	// are visible to final verification and the unvalidated dump below
@@ -1083,6 +1084,17 @@ func refireAlive(ctx context.Context, workers []*WorkerState,
 		inflight[w.ID] = fire(ctx, w)
 		log.Log("refire", "alive worker", map[string]any{"worker_id": w.ID})
 	}
+}
+
+// publishJoins copies res's decision-phase join handles into inflight so
+// every controller exit path can join or interrupt the fired runs.
+func publishJoins(inflight map[int]func() []agent.TurnSummary, res *DecisionPhaseResult) {
+	if res == nil {
+		return
+	}
+	res.mu.Lock()
+	defer res.mu.Unlock()
+	maps.Copy(inflight, res.joins)
 }
 
 // harvestInflight blocks on every join in inflight and returns the per-worker turn-summary map.

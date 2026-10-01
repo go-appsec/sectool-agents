@@ -55,6 +55,37 @@ func TestIsDeadIteration(t *testing.T) {
 	}
 }
 
+func TestPublishJoins(t *testing.T) {
+	t.Parallel()
+
+	t.Run("publishes_decision_phase_joins", func(t *testing.T) {
+		decisions := NewDecisionQueue()
+		director := &agent.FakeAgent{Turns: []agent.TurnSummary{{AssistantText: "decide"}}}
+		director.OnDrain = func(_ int) {
+			decisions.AddDecision(WorkerDecision{Kind: "continue", WorkerID: 1, Instruction: "next"})
+		}
+		w1 := &WorkerState{ID: 1, Alive: true, Agent: &agent.FakeAgent{}, LastInstruction: "old"}
+		fire, _ := scriptedFireFn(t, map[int][]agent.TurnSummary{
+			1: {{AssistantText: "w1 iter+1"}},
+		})
+		res := RunDecisionPhase(t.Context(), DecisionPhaseInput{
+			Director: director, DirChat: NewDirectorChat(), Decisions: decisions,
+			Workers: []*WorkerState{w1}, Fire: fire,
+		}, nil)
+
+		inflight := map[int]func() []agent.TurnSummary{}
+		publishJoins(inflight, res)
+		require.Len(t, inflight, 1)
+		assert.Equal(t, []agent.TurnSummary{{AssistantText: "w1 iter+1"}}, harvestInflight(inflight)[1])
+	})
+
+	t.Run("nil_result_noop", func(t *testing.T) {
+		inflight := map[int]func() []agent.TurnSummary{}
+		publishJoins(inflight, nil)
+		assert.Empty(t, inflight)
+	})
+}
+
 func TestWorkerStateClose(t *testing.T) {
 	t.Parallel()
 
