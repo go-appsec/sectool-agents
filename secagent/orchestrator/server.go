@@ -19,10 +19,20 @@ type SectoolServer struct {
 	Cmd     *exec.Cmd
 	LogFile *os.File
 	URL     string
+	// waitCh is closed once Cmd has been reaped; non-nil for spawned children.
+	waitCh chan struct{}
 }
 
-// readinessProbeTimeout caps each MCP readiness probe.
-const readinessProbeTimeout = 500 * time.Millisecond
+var (
+	// readinessProbeTimeout caps each MCP readiness probe.
+	readinessProbeTimeout = 500 * time.Millisecond
+	// readinessTimeout bounds the total MCP startup wait.
+	readinessTimeout = 10 * time.Second
+	// readinessInterval spaces out readiness probes.
+	readinessInterval = 500 * time.Millisecond
+	// terminateGrace bounds the SIGTERM wait before killing the child.
+	terminateGrace = 5 * time.Second
+)
 
 // StartSectool returns a SectoolServer at mcpPort. When attached is true the
 // caller has already verified that an MCP server is reachable and no child
@@ -62,36 +72,47 @@ func StartSectool(ctx context.Context, proxyPort, mcpPort int, binary string, at
 		"log": logPath, "binary": binary,
 	})
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+	// Reap the child as soon as it exits so an early crash is observed
+	// promptly and no zombie survives a startup failure.
+	waitCh := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(waitCh)
+	}()
+
+	deadline := time.NewTimer(readinessTimeout)
+	defer deadline.Stop()
+	for {
+		if mcpReady(ctx, url) {
+			log.Log("server", "ready", map[string]any{"url": url})
+			return &SectoolServer{Cmd: cmd, LogFile: f, URL: url, waitCh: waitCh}, nil
+		}
+		select {
+		case <-waitCh:
 			_ = f.Close()
 			return nil, fmt.Errorf("sectool exited early (code %d)", cmd.ProcessState.ExitCode())
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, fmt.Errorf("sectool startup: %w", ctx.Err())
+		case <-deadline.C:
+			_ = cmd.Process.Kill()
+			<-waitCh
+			_ = f.Close()
+			return nil, errors.New("sectool MCP server did not become ready within " + readinessTimeout.String())
+		case <-time.After(readinessInterval):
 		}
-		if cmd.Process != nil {
-			if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-				_ = f.Close()
-				return nil, fmt.Errorf("sectool died during startup: %w", err)
-			}
-		}
-		if mcpReachable(ctx, url) {
-			log.Log("server", "ready", map[string]any{"url": url})
-			return &SectoolServer{Cmd: cmd, LogFile: f, URL: url}, nil
-		}
-		time.Sleep(500 * time.Millisecond)
 	}
-	_ = cmd.Process.Kill()
-	_ = f.Close()
-	return nil, errors.New("sectool MCP server did not become ready within 10s")
 }
 
 // MCPReachable reports whether the sectool MCP at mcpPort responds to an HTTP GET within readinessProbeTimeout.
 func MCPReachable(ctx context.Context, mcpPort int) bool {
-	return mcpReachable(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort))
+	return mcpReady(ctx, fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort))
 }
 
-// mcpReachable reports whether url responds to an HTTP GET within readinessProbeTimeout.
-func mcpReachable(ctx context.Context, url string) bool {
+// mcpReady reports whether url is serving the sectool MCP endpoint within readinessProbeTimeout.
+// The streamable endpoint answers a GET with 200 (SSE stream) or 405 (no GET
+// stream); any other status means something else owns the port.
+func mcpReady(ctx context.Context, url string) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, readinessProbeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, url, nil)
@@ -102,8 +123,8 @@ func mcpReachable(ctx context.Context, url string) bool {
 	if err != nil {
 		return false
 	}
-	_ = resp.Body.Close()
-	return true
+	defer func() { _ = resp.Body.Close() }()
+	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusMethodNotAllowed
 }
 
 // Terminate tears down the child sectool process. No-op when attached to a server secagent didn't start.
@@ -111,17 +132,19 @@ func (s *SectoolServer) Terminate() {
 	if s == nil || s.Cmd == nil || s.Cmd.Process == nil {
 		return
 	}
+	if s.waitCh == nil {
+		s.waitCh = make(chan struct{})
+		go func() {
+			_, _ = s.Cmd.Process.Wait()
+			close(s.waitCh)
+		}()
+	}
 	_ = s.Cmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() {
-		_, _ = s.Cmd.Process.Wait()
-		close(done)
-	}()
 	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-s.waitCh:
+	case <-time.After(terminateGrace):
 		_ = s.Cmd.Process.Kill()
-		<-done
+		<-s.waitCh
 	}
 	if s.LogFile != nil {
 		_ = s.LogFile.Close()
