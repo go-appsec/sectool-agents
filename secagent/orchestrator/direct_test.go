@@ -20,12 +20,12 @@ func scriptedFireFn(t *testing.T, turns map[int][]agent.TurnSummary) (FireWorker
 
 	var mu sync.Mutex
 	var fired []int
-	return func(_ context.Context, w *WorkerState) func() []agent.TurnSummary {
+	return func(_ context.Context, w *WorkerState) func() workerRunResult {
 			mu.Lock()
 			fired = append(fired, w.ID)
 			mu.Unlock()
 			result := turns[w.ID]
-			return func() []agent.TurnSummary { return result }
+			return func() workerRunResult { return workerRunResult{AutonomousTurns: result} }
 		}, func() []int {
 			mu.Lock()
 			defer mu.Unlock()

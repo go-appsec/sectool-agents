@@ -703,13 +703,16 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		narrator.TriggerNow(narrCtx)
 	}
 
-	// fires one worker's iter run as a goroutine; the returned func blocks for the result
-	fire := func(fctx context.Context, w *WorkerState) func() []agent.TurnSummary {
-		resultCh := make(chan []agent.TurnSummary, 1)
+	// fires one worker's iter run as a goroutine; the returned func blocks
+	// for the run result. Run state is seeded here (and applied at join
+	// time) so run goroutines never mutate shared WorkerState.
+	fire := func(fctx context.Context, w *WorkerState) func() workerRunResult {
+		rs := newWorkerRunResult(w)
+		resultCh := make(chan workerRunResult, 1)
 		go func() {
-			resultCh <- runOneWorker(fctx, w, candidates, log)
+			resultCh <- runOneWorker(fctx, w, rs, candidates, log)
 		}()
-		return func() []agent.TurnSummary { return <-resultCh }
+		return func() workerRunResult { return <-resultCh }
 	}
 
 	// provisions a forked child; chronicle inheritance happens in direct.go
@@ -754,10 +757,10 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	}
 
 	w1.Chronicle.Install(w1.Agent, w1.LastInstruction)
-	inflight := map[int]func() []agent.TurnSummary{}
+	inflight := map[int]workerRun{}
 	// seed the first worker run on ctx so inherited cancellation and staged
 	// shutdown both apply to this pre-loop fire
-	inflight[1] = fire(workerRunCtx, w1)
+	inflight[1] = workerRun{w: w1, join: fire(workerRunCtx, w1)}
 
 	var iteration int
 	for iteration = 1; iteration <= cfg.MaxIterations; iteration++ {
@@ -766,7 +769,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		phaseTransition("idle", "autonomous")
 		narrator.Tick(narrCtx)
 		workerRuns := harvestInflight(inflight)
-		inflight = map[int]func() []agent.TurnSummary{}
+		inflight = map[int]workerRun{}
 
 		// cancel-check AFTER harvest so prior-iter in-flight workers are reaped first
 		if err := ctx.Err(); err != nil {
@@ -1007,8 +1010,8 @@ func isDeadIteration(workerRuns map[int][]agent.TurnSummary, candidatesBefore, c
 // affected worker's iter+1 run via fire, recording the join in inflight.
 // Entries that exceed maxWorkers or collide with retired IDs are skipped with a log entry.
 func applyPlanAndFire(ctx context.Context, plan []PlanEntry, workers *[]*WorkerState, spawn workerSpawnFunc,
-	maxWorkers int, fire func(context.Context, *WorkerState) func() []agent.TurnSummary,
-	inflight map[int]func() []agent.TurnSummary, log *Logger) {
+	maxWorkers int, fire func(context.Context, *WorkerState) func() workerRunResult,
+	inflight map[int]workerRun, log *Logger) {
 	byID := map[int]*WorkerState{}
 	var existing int
 	planned := map[int]bool{}
@@ -1033,7 +1036,7 @@ func applyPlanAndFire(ctx context.Context, plan []PlanEntry, workers *[]*WorkerS
 			}
 			log.Log("plan", "retarget", map[string]any{"worker_id": p.WorkerID})
 			w.Chronicle.Install(w.Agent, w.LastInstruction)
-			inflight[w.ID] = fire(ctx, w)
+			inflight[w.ID] = workerRun{w: w, join: fire(ctx, w)}
 			continue
 		}
 		// retired worker (Alive=false), never shadow the dead entry
@@ -1053,31 +1056,31 @@ func applyPlanAndFire(ctx context.Context, plan []PlanEntry, workers *[]*WorkerS
 		byID[nw.ID] = nw
 		existing++
 		nw.Chronicle.Install(nw.Agent, nw.LastInstruction)
-		inflight[nw.ID] = fire(ctx, nw)
+		inflight[nw.ID] = workerRun{w: nw, join: fire(ctx, nw)}
 		log.Log("plan", "spawn", map[string]any{"worker_id": p.WorkerID})
 	}
 }
 
-func stopInflightWorkerRun(w *WorkerState, inflight map[int]func() []agent.TurnSummary, log *Logger) {
+func stopInflightWorkerRun(w *WorkerState, inflight map[int]workerRun, log *Logger) {
 	if w == nil || inflight == nil {
 		return
 	}
-	join, exists := inflight[w.ID]
+	run, exists := inflight[w.ID]
 	if !exists {
 		return
 	}
 	if w.Agent != nil {
 		w.Agent.Interrupt()
 	}
-	_ = join()
+	_ = run.joinAndApply()
 	delete(inflight, w.ID)
 	log.Log("plan", "replaced in-flight run", map[string]any{"worker_id": w.ID})
 }
 
 // refireAlive fires an iter+1 run for every alive worker that doesn't already have a join in inflight.
 func refireAlive(ctx context.Context, workers []*WorkerState,
-	fire func(context.Context, *WorkerState) func() []agent.TurnSummary,
-	inflight map[int]func() []agent.TurnSummary, log *Logger) {
+	fire func(context.Context, *WorkerState) func() workerRunResult,
+	inflight map[int]workerRun, log *Logger) {
 	for _, w := range workers {
 		if !w.Alive {
 			continue
@@ -1085,14 +1088,14 @@ func refireAlive(ctx context.Context, workers []*WorkerState,
 			continue
 		}
 		w.Chronicle.Install(w.Agent, w.LastInstruction)
-		inflight[w.ID] = fire(ctx, w)
+		inflight[w.ID] = workerRun{w: w, join: fire(ctx, w)}
 		log.Log("refire", "alive worker", map[string]any{"worker_id": w.ID})
 	}
 }
 
 // publishJoins copies res's decision-phase join handles into inflight so
 // every controller exit path can join or interrupt the fired runs.
-func publishJoins(inflight map[int]func() []agent.TurnSummary, res *DecisionPhaseResult) {
+func publishJoins(inflight map[int]workerRun, res *DecisionPhaseResult) {
 	if res == nil {
 		return
 	}
@@ -1101,11 +1104,12 @@ func publishJoins(inflight map[int]func() []agent.TurnSummary, res *DecisionPhas
 	maps.Copy(inflight, res.joins)
 }
 
-// harvestInflight blocks on every join in inflight and returns the per-worker turn-summary map.
-func harvestInflight(inflight map[int]func() []agent.TurnSummary) map[int][]agent.TurnSummary {
+// harvestInflight blocks on every join in inflight, applies each run result
+// to its worker, and returns the per-worker turn-summary map.
+func harvestInflight(inflight map[int]workerRun) map[int][]agent.TurnSummary {
 	out := map[int][]agent.TurnSummary{}
-	for id, j := range inflight {
-		out[id] = j()
+	for id, r := range inflight {
+		out[id] = r.joinAndApply()
 	}
 	return out
 }

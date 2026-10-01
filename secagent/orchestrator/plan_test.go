@@ -23,13 +23,13 @@ func stubSpawn(counter *int) workerSpawnFunc {
 	}
 }
 
-// stubFire returns a fire callback that records every fired worker id and yields nil turn summaries on join.
-func stubFire(t *testing.T) (func(context.Context, *WorkerState) func() []agent.TurnSummary, *[]int) {
+// stubFire returns a fire callback that records every fired worker id and yields an empty run result on join.
+func stubFire(t *testing.T) (func(context.Context, *WorkerState) func() workerRunResult, *[]int) {
 	t.Helper()
 	fired := []int{}
-	return func(_ context.Context, w *WorkerState) func() []agent.TurnSummary {
+	return func(_ context.Context, w *WorkerState) func() workerRunResult {
 		fired = append(fired, w.ID)
-		return func() []agent.TurnSummary { return nil }
+		return func() workerRunResult { return workerRunResult{} }
 	}, &fired
 }
 
@@ -42,7 +42,7 @@ func TestApplyPlanAndFire(t *testing.T) {
 		}
 		var built int
 		fire, fired := stubFire(t)
-		inflight := map[int]func() []agent.TurnSummary{}
+		inflight := map[int]workerRun{}
 		applyPlanAndFire(t.Context(),
 			[]PlanEntry{{WorkerID: 1, Assignment: "new plan"}, {WorkerID: 2, Assignment: "second"}},
 			&workers, stubSpawn(&built), 5, fire, inflight, nil,
@@ -70,7 +70,7 @@ func TestApplyPlanAndFire(t *testing.T) {
 		applyPlanAndFire(t.Context(),
 			[]PlanEntry{{WorkerID: 1, Assignment: "try something new"}},
 			&workers, stubSpawn(&built), 5, fire,
-			map[int]func() []agent.TurnSummary{}, nil,
+			map[int]workerRun{}, nil,
 		)
 		assert.Equal(t, 3, w.ProgressNoneStreak)
 		assert.True(t, w.StallWarned)
@@ -91,7 +91,7 @@ func TestApplyPlanAndFire(t *testing.T) {
 		applyPlanAndFire(t.Context(),
 			[]PlanEntry{{WorkerID: 1, Assignment: "continue"}},
 			&workers, stubSpawn(&built), 5, fire,
-			map[int]func() []agent.TurnSummary{}, nil,
+			map[int]workerRun{}, nil,
 		)
 		assert.Equal(t, 0, w.ProgressNoneStreak)
 		assert.False(t, w.StallWarned)
@@ -111,7 +111,7 @@ func TestApplyPlanAndFire(t *testing.T) {
 				{WorkerID: 5, Assignment: "z"},
 			},
 			&workers, stubSpawn(&built), 2, fire,
-			map[int]func() []agent.TurnSummary{}, nil,
+			map[int]workerRun{}, nil,
 		)
 		assert.Len(t, workers, 2)
 		assert.Equal(t, 0, built)
@@ -127,7 +127,7 @@ func TestApplyPlanAndFire(t *testing.T) {
 		applyPlanAndFire(t.Context(),
 			[]PlanEntry{{WorkerID: 1, Assignment: "ghost"}},
 			&workers, stubSpawn(&built), 5, fire,
-			map[int]func() []agent.TurnSummary{}, nil,
+			map[int]workerRun{}, nil,
 		)
 		assert.Len(t, workers, 1)
 		assert.Equal(t, 0, built)
@@ -142,7 +142,7 @@ func TestRefireAlive(t *testing.T) {
 	w2 := &WorkerState{ID: 2, Alive: false, Agent: &agent.FakeAgent{}}
 	workers := []*WorkerState{w1, w2}
 	fire, fired := stubFire(t)
-	inflight := map[int]func() []agent.TurnSummary{}
+	inflight := map[int]workerRun{}
 	refireAlive(t.Context(), workers, fire, inflight, nil)
 	assert.Equal(t, []int{1}, *fired)
 	assert.Len(t, inflight, 1)
@@ -151,12 +151,22 @@ func TestRefireAlive(t *testing.T) {
 func TestHarvestInflight(t *testing.T) {
 	t.Parallel()
 
-	inflight := map[int]func() []agent.TurnSummary{
-		1: func() []agent.TurnSummary { return []agent.TurnSummary{{AssistantText: "w1"}} },
-		2: func() []agent.TurnSummary { return nil },
+	w1 := &WorkerState{ID: 1}
+	w2 := &WorkerState{ID: 2}
+	inflight := map[int]workerRun{
+		1: {w: w1, join: func() workerRunResult {
+			return workerRunResult{
+				EscalationReason: "budget",
+				AutonomousTurns:  []agent.TurnSummary{{AssistantText: "w1"}},
+			}
+		}},
+		2: {w: w2, join: func() workerRunResult { return workerRunResult{} }},
 	}
 	out := harvestInflight(inflight)
 	assert.Len(t, out, 2)
 	require.Len(t, out[1], 1)
 	assert.Equal(t, "w1", out[1][0].AssistantText)
+	// harvest applies each run result to its worker
+	assert.Equal(t, "budget", w1.EscalationReason)
+	assert.Len(t, w1.AutonomousTurns, 1)
 }

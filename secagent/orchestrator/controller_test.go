@@ -73,14 +73,14 @@ func TestPublishJoins(t *testing.T) {
 			Workers: []*WorkerState{w1}, Fire: fire,
 		}, nil)
 
-		inflight := map[int]func() []agent.TurnSummary{}
+		inflight := map[int]workerRun{}
 		publishJoins(inflight, res)
 		require.Len(t, inflight, 1)
 		assert.Equal(t, []agent.TurnSummary{{AssistantText: "w1 iter+1"}}, harvestInflight(inflight)[1])
 	})
 
 	t.Run("nil_result_noop", func(t *testing.T) {
-		inflight := map[int]func() []agent.TurnSummary{}
+		inflight := map[int]workerRun{}
 		publishJoins(inflight, nil)
 		assert.Empty(t, inflight)
 	})
@@ -114,8 +114,10 @@ func TestRunWorkerUntilEscalationBudget(t *testing.T) {
 		}}
 		w := &WorkerState{ID: 1, Alive: true, Agent: a, AutonomousBudget: 2, LastInstruction: "go"}
 		log, _ := newTestLogger(t)
-		runs, err := RunWorkerUntilEscalation(t.Context(), w, NewCandidatePool(), log)
+		rs := newWorkerRunResult(w)
+		runs, err := RunWorkerUntilEscalation(t.Context(), w, &rs, NewCandidatePool(), log)
 		require.NoError(t, err)
+		w.ApplyRunResult(rs)
 		assert.Len(t, runs, 2)
 		assert.Equal(t, "budget", w.EscalationReason)
 		require.Len(t, a.QueriedInputs, 1)
@@ -126,7 +128,8 @@ func TestRunWorkerUntilEscalationBudget(t *testing.T) {
 		a := &agent.FakeAgent{Turns: []agent.TurnSummary{{ToolCalls: []agent.ToolCallRecord{{Name: "x"}}}}}
 		w := &WorkerState{ID: 1, Alive: true, Agent: a, AutonomousBudget: 0}
 		log, _ := newTestLogger(t)
-		runs, err := RunWorkerUntilEscalation(t.Context(), w, NewCandidatePool(), log)
+		rs := newWorkerRunResult(w)
+		runs, err := RunWorkerUntilEscalation(t.Context(), w, &rs, NewCandidatePool(), log)
 		require.NoError(t, err)
 		assert.Len(t, runs, 1)
 	})

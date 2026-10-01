@@ -16,8 +16,24 @@ import (
 )
 
 // FireWorkerFunc starts one worker's iter+1 autonomous run and returns a
-// join function that blocks for the resulting TurnSummaries.
-type FireWorkerFunc func(ctx context.Context, w *WorkerState) (joinFn func() []agent.TurnSummary)
+// join function that blocks for the run result. The controller applies the
+// result to the worker at join time.
+type FireWorkerFunc func(ctx context.Context, w *WorkerState) (joinFn func() workerRunResult)
+
+// workerRun pairs a fired run's join with its worker so joining also applies
+// the run result to the shared WorkerState on the controller goroutine.
+type workerRun struct {
+	w    *WorkerState
+	join func() workerRunResult
+}
+
+// joinAndApply blocks for the run result, applies it to the worker, and
+// returns the run's turn summaries.
+func (r workerRun) joinAndApply() []agent.TurnSummary {
+	res := r.join()
+	r.w.ApplyRunResult(res)
+	return res.AutonomousTurns
+}
 
 // SpawnChildFunc returns a forked child worker provisioned with id and the initial instruction.
 type SpawnChildFunc func(ctx context.Context, id int, instruction string) (*WorkerState, error)
@@ -42,10 +58,11 @@ type DecisionPhaseInput struct {
 // during RunDecisionPhase. Call Wait at iter boundary to collect them.
 type DecisionPhaseResult struct {
 	mu    sync.Mutex
-	joins map[int]func() []agent.TurnSummary
+	joins map[int]workerRun
 }
 
-// Wait blocks on every fired worker run and returns the per-worker turn-summary map.
+// Wait blocks on every fired worker run, applies each result to its worker,
+// and returns the per-worker turn-summary map.
 func (r *DecisionPhaseResult) Wait() map[int][]agent.TurnSummary {
 	if r == nil {
 		return nil
@@ -55,7 +72,7 @@ func (r *DecisionPhaseResult) Wait() map[int][]agent.TurnSummary {
 	joins := r.joins
 	r.mu.Unlock()
 	for id, j := range joins {
-		out[id] = j()
+		out[id] = j.joinAndApply()
 	}
 	return out
 }
@@ -68,7 +85,7 @@ func RunDecisionPhase(
 	log *Logger,
 ) *DecisionPhaseResult {
 	in.Decisions.BeginPhase(agent.PhaseDirection)
-	res := &DecisionPhaseResult{joins: map[int]func() []agent.TurnSummary{}}
+	res := &DecisionPhaseResult{joins: map[int]workerRun{}}
 
 	// Sort alive workers by ID for deterministic order.
 	alive := bulk.SliceFilter(func(w *WorkerState) bool { return w.Alive }, in.Workers)
@@ -163,9 +180,8 @@ func applyDecisionAndFire(ctx context.Context,
 		w.LastInstruction = d.Instruction
 		if in.Fire != nil {
 			w.Chronicle.Install(w.Agent, w.LastInstruction)
-			join := in.Fire(ctx, w)
 			res.mu.Lock()
-			res.joins[w.ID] = join
+			res.joins[w.ID] = workerRun{w: w, join: in.Fire(ctx, w)}
 			res.mu.Unlock()
 		}
 		log.Log("decision", d.Kind, map[string]any{
@@ -188,9 +204,8 @@ func applyDecisionAndFire(ctx context.Context,
 		nw.Chronicle = w.Chronicle.CloneWithDirective(header, in.Iter)
 		if in.Fire != nil {
 			nw.Chronicle.Install(nw.Agent, nw.LastInstruction)
-			join := in.Fire(ctx, nw)
 			res.mu.Lock()
-			res.joins[nw.ID] = join
+			res.joins[nw.ID] = workerRun{w: nw, join: in.Fire(ctx, nw)}
 			res.mu.Unlock()
 		}
 		log.Log("fork", "spawn", map[string]any{

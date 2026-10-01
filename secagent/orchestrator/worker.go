@@ -44,8 +44,10 @@ type WorkerState struct {
 	ProgressNoneStreak int
 	StallWarned        bool
 	AutonomousBudget   int
-	EscalationReason   string
-	AutonomousTurns    []agent.TurnSummary
+	// Run-produced state; written only via ApplyRunResult at join time,
+	// never by run goroutines.
+	EscalationReason string
+	AutonomousTurns  []agent.TurnSummary
 	// Chronicle is the worker's accumulated chat history installed onto the agent at each iter start.
 	Chronicle history.Chronicle
 	// RecentToolErrors is a rolling window of recent tool-error signatures.
@@ -80,6 +82,16 @@ func (w *WorkerState) DrainSelfPrunes() []string {
 	ids := w.pendingSelfPruneIDs
 	w.pendingSelfPruneIDs = nil
 	return ids
+}
+
+// ApplyRunResult merges one completed autonomous run's outputs into w.
+// Called on the controller goroutine at join time; run goroutines build
+// results privately and never mutate w directly.
+func (w *WorkerState) ApplyRunResult(res workerRunResult) {
+	w.EscalationReason = res.EscalationReason
+	w.AutonomousTurns = res.AutonomousTurns
+	w.RecentToolErrors = res.RecentToolErrors
+	w.CoachedErrorSig = res.CoachedErrorSig
 }
 
 // AppendHistory records e in the ring buffer, overwriting the oldest entry

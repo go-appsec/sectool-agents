@@ -2,15 +2,38 @@ package orchestrator
 
 import (
 	"context"
+	"slices"
 
 	"github.com/go-appsec/sectool-agents/secagent/agent"
 	"github.com/go-appsec/sectool-agents/secagent/orchestrator/prompts"
 )
 
-// drainOne drains one turn on w and returns its summary, also appending
-// it to w.AutonomousTurns and updating the worker's escalation reason.
+// workerRunResult carries the WorkerState fields one autonomous run produces.
+// Run goroutines build it privately instead of mutating the shared
+// WorkerState; the controller applies it at join time via
+// WorkerState.ApplyRunResult, making the join the sole synchronization
+// point between the two goroutines.
+type workerRunResult struct {
+	EscalationReason string
+	AutonomousTurns  []agent.TurnSummary
+	RecentToolErrors []string
+	CoachedErrorSig  string
+}
+
+// newWorkerRunResult seeds a result with w's cross-run error tracking.
+// Called on the controller goroutine at fire time; the run goroutine owns
+// the value from then on.
+func newWorkerRunResult(w *WorkerState) workerRunResult {
+	return workerRunResult{
+		RecentToolErrors: slices.Clone(w.RecentToolErrors),
+		CoachedErrorSig:  w.CoachedErrorSig,
+	}
+}
+
+// drainOne drains one turn on w and records its summary in rs, classifying
+// the turn's escalation reason.
 func drainOne(ctx context.Context,
-	w *WorkerState, candidates *CandidatePool, log *Logger) (agent.TurnSummary, error) {
+	w *WorkerState, rs *workerRunResult, candidates *CandidatePool, log *Logger) (agent.TurnSummary, error) {
 	before := candidates.Counter()
 	summary, err := w.Agent.Drain(ctx)
 	if err != nil {
@@ -24,11 +47,11 @@ func drainOne(ctx context.Context,
 	} else {
 		summary.EscalationReason = agent.ClassifyEscalation(summary, false)
 	}
-	w.AutonomousTurns = append(w.AutonomousTurns, summary)
-	updateToolErrorSignatures(w, summary)
+	rs.AutonomousTurns = append(rs.AutonomousTurns, summary)
+	updateToolErrorSignatures(rs, summary)
 	log.Log("worker", "turn", map[string]any{
 		"worker_id":        w.ID,
-		"turn":             len(w.AutonomousTurns),
+		"turn":             len(rs.AutonomousTurns),
 		"escalation":       summary.EscalationReason,
 		"tokens_in":        summary.TokensIn,
 		"tokens_out":       summary.TokensOut,
@@ -39,8 +62,8 @@ func drainOne(ctx context.Context,
 }
 
 // updateToolErrorSignatures records summary's error-tool signatures into
-// w.RecentToolErrors. Any successful call clears w.CoachedErrorSig.
-func updateToolErrorSignatures(w *WorkerState, summary agent.TurnSummary) {
+// rs.RecentToolErrors. Any successful call clears rs.CoachedErrorSig.
+func updateToolErrorSignatures(rs *workerRunResult, summary agent.TurnSummary) {
 	var sawSuccess bool
 	for _, tc := range summary.ToolCalls {
 		if !tc.IsError {
@@ -55,64 +78,60 @@ func updateToolErrorSignatures(w *WorkerState, summary agent.TurnSummary) {
 		if sig == "" {
 			continue
 		}
-		w.RecentToolErrors = append(w.RecentToolErrors, sig)
-		if len(w.RecentToolErrors) > MaxRecentToolErrors {
-			w.RecentToolErrors = w.RecentToolErrors[len(w.RecentToolErrors)-MaxRecentToolErrors:]
+		rs.RecentToolErrors = append(rs.RecentToolErrors, sig)
+		if len(rs.RecentToolErrors) > MaxRecentToolErrors {
+			rs.RecentToolErrors = rs.RecentToolErrors[len(rs.RecentToolErrors)-MaxRecentToolErrors:]
 		}
 	}
 	if sawSuccess {
-		w.CoachedErrorSig = ""
+		rs.CoachedErrorSig = ""
 	}
 }
 
-// RunWorkerUntilEscalation drains w up to its AutonomousBudget (capped at 20) or until escalation.
-// Returns each turn's summary and sets w.EscalationReason. Caller must install the per-iter chronicle first.
+// RunWorkerUntilEscalation drains w up to its AutonomousBudget (capped at 20) or until
+// escalation, accumulating turn summaries and the escalation reason in rs.
+// Caller must install the per-iter chronicle first.
 func RunWorkerUntilEscalation(ctx context.Context,
-	w *WorkerState, candidates *CandidatePool, log *Logger) ([]agent.TurnSummary, error) {
+	w *WorkerState, rs *workerRunResult, candidates *CandidatePool, log *Logger) ([]agent.TurnSummary, error) {
 	budget := min(max(w.AutonomousBudget, 1), 20)
 
-	var runs []agent.TurnSummary
 	for attempt := 0; attempt < budget; attempt++ {
 		if attempt > 0 {
 			w.Agent.Query(prompts.IntraPhaseContinue)
 		}
-		summary, err := drainOne(ctx, w, candidates, log)
+		summary, err := drainOne(ctx, w, rs, candidates, log)
 		if err != nil {
-			w.EscalationReason = EscalationError
-			return runs, err
+			rs.EscalationReason = EscalationError
+			return rs.AutonomousTurns, err
 		}
-		runs = append(runs, summary)
 		if summary.EscalationReason != "" {
-			w.EscalationReason = summary.EscalationReason
-			return runs, nil
+			rs.EscalationReason = summary.EscalationReason
+			return rs.AutonomousTurns, nil
 		}
 	}
-	w.EscalationReason = EscalationBudget
-	return runs, nil
+	rs.EscalationReason = EscalationBudget
+	return rs.AutonomousTurns, nil
 }
 
-// runOneWorker drains w for one iteration and returns the turn summaries.
-// One recovery attempt is made on mid-iter error.
+// runOneWorker drains w for one iteration and returns the run's result.
+// One recovery attempt is made on mid-iter error. rs carries the cross-run
+// error tracking seeded at fire time; the controller applies the result to
+// w at join time.
 func runOneWorker(ctx context.Context,
-	w *WorkerState, candidates *CandidatePool, log *Logger) []agent.TurnSummary {
-	w.EscalationReason = ""
-	w.AutonomousTurns = nil
-	runs, err := RunWorkerUntilEscalation(ctx, w, candidates, log)
+	w *WorkerState, rs workerRunResult, candidates *CandidatePool, log *Logger) workerRunResult {
+	_, err := RunWorkerUntilEscalation(ctx, w, &rs, candidates, log)
 	if err != nil && w.LastInstruction != "" {
 		log.Log("worker", "recover", map[string]any{
 			"worker_id": w.ID, "attempt": 1, "err": err.Error(),
 		})
 		w.Agent.Interrupt()
 		w.Agent.Query(w.LastInstruction)
-		summary, err2 := drainOne(ctx, w, candidates, log)
+		summary, err2 := drainOne(ctx, w, &rs, candidates, log)
 		if err2 != nil {
-			w.EscalationReason = EscalationError
-		} else {
-			runs = append(runs, summary)
-			if summary.EscalationReason != "" {
-				w.EscalationReason = summary.EscalationReason
-			}
+			rs.EscalationReason = EscalationError
+		} else if summary.EscalationReason != "" {
+			rs.EscalationReason = summary.EscalationReason
 		}
 	}
-	return runs
+	return rs
 }
