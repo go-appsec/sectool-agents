@@ -40,6 +40,8 @@ func TestClassify(t *testing.T) {
 		{name: "server_500_exact", err: &openai.APIError{HTTPStatusCode: 500, Message: ""}, wantCat: ErrTransientNet},
 		{name: "model_error_400", err: &openai.APIError{HTTPStatusCode: 400, Message: "bad request"}, wantCat: ErrModelError},
 		{name: "auth_error_401", err: &openai.APIError{HTTPStatusCode: 401, Message: "unauthorized"}, wantCat: ErrModelError},
+		{name: "empty_choices", err: ErrEmptyChoices, wantCat: ErrTransientNet},
+		{name: "wrapped_empty_choices", err: fmt.Errorf("call: %w", ErrEmptyChoices), wantCat: ErrTransientNet},
 		{name: "connection_reset", err: errors.New("read tcp: connection reset by peer"), wantCat: ErrTransientNet},
 		{name: "connection_refused", err: errors.New("dial tcp: connection refused"), wantCat: ErrTransientNet},
 		{name: "eof", err: errors.New("unexpected EOF"), wantCat: ErrTransientNet},

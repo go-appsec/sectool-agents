@@ -50,6 +50,11 @@ func Classify(err error) (ErrCategory, time.Duration) {
 		return ErrContextOverflow, 0
 	}
 
+	// zero-choice payload from the provider, retry like any other transient hiccup
+	if errors.Is(err, ErrEmptyChoices) {
+		return ErrTransientNet, 0
+	}
+
 	// HTTP-shaped errors from go-openai
 	var apiErr *openai.APIError
 	if errors.As(err, &apiErr) {

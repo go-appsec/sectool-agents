@@ -2,12 +2,19 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
 
 	"github.com/go-appsec/sectool-agents/secagent/util"
 )
+
+// ErrEmptyChoices is returned when a chat-completion response arrives with zero
+// choices (content filter, provider hiccup, truncated payload). Classify maps
+// it to ErrTransientNet so it flows through the retry/backoff machinery.
+var ErrEmptyChoices = errors.New("chat completion returned no choices")
 
 // ChatMessage mirrors the subset of OpenAI chat-completion fields we need.
 type ChatMessage struct {
@@ -154,11 +161,10 @@ func (c *OpenAIChatClient) CreateChatCompletion(ctx context.Context, req ChatReq
 		return ChatResponse{}, err
 	}
 	if len(resp.Choices) == 0 {
-		return ChatResponse{Usage: Usage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
-		}, Model: resp.Model}, nil
+		// Usage detail stays in the message so usage-only responses remain
+		// distinguishable from a fully malformed payload.
+		return ChatResponse{}, fmt.Errorf("%w (model=%s prompt_tokens=%d completion_tokens=%d)",
+			ErrEmptyChoices, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 	choice := resp.Choices[0]
 	out := ChatResponse{
