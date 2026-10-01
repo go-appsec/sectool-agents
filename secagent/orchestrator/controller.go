@@ -795,6 +795,10 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 
 		enforceStallStopsAsync(workers, cfg.StallStopAfter, retire, iteration, log)
 
+		// reset iteration-scoped decision state before any consumer, including
+		// the dead-iteration history append below
+		decisions.Reset()
+
 		// dead-iteration short-circuit: skip verify/direction, refire alive workers
 		if isDeadIteration(workerRuns, candidatesBefore, candidates.Counter()) {
 			log.Log("controller", "dead-iteration", map[string]any{"iter": iteration})
@@ -803,8 +807,6 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			narrator.TriggerNow(narrCtx)
 			continue
 		}
-
-		decisions.Reset()
 
 		verifierOverflowed = false
 		verifierDirective := BuildVerifierPrompt(
@@ -943,6 +945,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	// graceful-shutdown finalization: stage 1 verify pending, stage 2 dump unvalidated
 	if sd.Phase() >= ShutdownPhaseVerifyOnly {
 		if sd.Phase() == ShutdownPhaseVerifyOnly && len(candidates.Pending()) > 0 {
+			// clean slate so only this final verification's findings are processed
+			decisions.Reset()
 			verifierOverflowed = false
 			finalDirective := BuildVerifierPrompt(
 				workers, map[int][]agent.TurnSummary{}, candidates.Pending(),
