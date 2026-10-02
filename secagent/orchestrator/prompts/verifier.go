@@ -18,4 +18,18 @@ When polling shared proxy history, window with explicit offset+limit rather than
 - **Close with a summary.** Call ` + "`verification_done(summary)`" + ` once every pending candidate is resolved; 1–3 sentences for the director.
 `
 
-func BuildVerifierSystemPrompt() string { return verifierBase }
+const verifierBashAddendum = `
+
+## Shell access
+
+You also have a ` + "`bash`" + ` tool with unrestricted command execution on the host running secagent — use it when the sectool tools cannot accomplish a reproduction step (shaped raw requests, payload encoding, decoding captured data). Prefer sectool primitives for target traffic so evidence stays flow-traceable — commands run outside the proxy and produce no flow IDs.
+`
+
+// BuildVerifierSystemPrompt renders the verifier system prompt. allowBash
+// appends the shell-access addendum granted by --allow-bash.
+func BuildVerifierSystemPrompt(allowBash bool) string {
+	if allowBash {
+		return verifierBase + verifierBashAddendum
+	}
+	return verifierBase
+}

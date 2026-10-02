@@ -271,7 +271,7 @@ func (f *OpenAIFactory) NewReconWorker(reconMission string) (agent.Agent, error)
 	return f.buildAgent(
 		"worker-1-recon",
 		f.Cfg.Model,
-		f.withRecon(prompts.BuildReconWorkerSystemPrompt(), reconMission),
+		f.withRecon(prompts.BuildReconWorkerSystemPrompt(f.Cfg.AllowBash), reconMission),
 		f.Pool,
 		f.Cfg.MaxContext,
 		f.Reasoning,
@@ -287,7 +287,7 @@ func (f *OpenAIFactory) NewVerifier(onContextOverflow func()) (agent.Agent, erro
 	return f.buildAgent(
 		"verifier",
 		f.Cfg.Model,
-		f.withMission(prompts.BuildVerifierSystemPrompt()),
+		f.withMission(prompts.BuildVerifierSystemPrompt(f.Cfg.AllowBash)),
 		f.Pool,
 		f.Cfg.MaxContext,
 		f.Reasoning,
@@ -390,7 +390,7 @@ type workerSpawnFunc func(ctx context.Context, id int, assignment string) (*Work
 
 // newWorkerSpawner returns a workerSpawnFunc that provisions workers against the MCP endpoint at mcpURL.
 // maxWorkers is the run's parallelism cap baked into the worker system prompt;
-// allowBash grants testing workers the unrestricted bash tool (--allow-bash);
+// allowBash grants every agent role the unrestricted bash tool (--allow-bash);
 // bg tracks their backgrounded processes (nil disables background=true).
 func newWorkerSpawner(mcpURL string, toolResultMaxBytes int,
 	factory AgentFactory, candidates *CandidatePool, writer *FindingWriter,
@@ -463,9 +463,18 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	})
 	if cfg.AllowBash {
 		log.Log("server", "bash enabled (--allow-bash)", map[string]any{
-			"scope": "testing workers",
-			"note":  "workers may execute arbitrary shell commands when needed or instructed",
+			"scope": "all agents (workers, recon, verifier, directors)",
+			"note":  "agents may execute arbitrary shell commands when needed or instructed",
 		})
+	}
+
+	// withBash appends the bash tool when --allow-bash grants shell access;
+	// every agent role gets it, the controller itself holds no tools
+	withBash := func(tools []agent.ToolDef) []agent.ToolDef {
+		if !cfg.AllowBash {
+			return tools
+		}
+		return append(tools, BashToolDef(cfg.ToolResultMaxBytes, bg))
 	}
 
 	// 2m headroom keeps context cancellation as the normal termination path
@@ -559,7 +568,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	defer func() { _ = synthesisDirectorMCP.Close() }()
 
 	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions, candidates)...)
-	verifier.SetTools(verifierTools)
+	verifier.SetTools(withBash(verifierTools))
 
 	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, dedupReviewer, asyncMerger, cfg.AutonomousBudget, cfg.MaxWorkers, cfg.AllowBash, bg)
 
@@ -601,7 +610,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			_ = m.Close()
 			return fmt.Errorf("new recon worker: %w", err)
 		}
-		a.SetTools(defs)
+		a.SetTools(withBash(defs))
 		w1 = &WorkerState{
 			ID:               1,
 			Agent:            a,
@@ -883,8 +892,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			synthesisDirector.SetTools(nil)
 			RunIter1ReconReviewCall(workerRunCtx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
 
-			synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
-				SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
+			synthesisDirector.SetTools(withBash(append(slices.Clone(synthesisDirectorSectoolDefs),
+				SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...)))
 			RunIter1ReconPlanCall(workerRunCtx, synthesisDirector, dirChat, decisions, iterStatus, cfg.MaxWorkers, log)
 
 			if decisions.HasEndRun {
@@ -910,8 +919,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		}
 
 		// directors get sectool tools so they can spot-check rather than hallucinate
-		decisionDirector.SetTools(append(slices.Clone(decisionDirectorSectoolDefs),
-			DecisionToolDefs(decisions, takenIDsFn, log)...))
+		decisionDirector.SetTools(withBash(append(slices.Clone(decisionDirectorSectoolDefs),
+			DecisionToolDefs(decisions, takenIDsFn, log)...)))
 		decRes := RunDecisionPhase(workerRunCtx, DecisionPhaseInput{
 			Director: decisionDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, WorkerRuns: workerRuns,
@@ -928,8 +937,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		LatchStallWarnings(workers, cfg.StallWarnAfter)
 		applyRetiredSummaries()
 
-		synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
-			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
+		synthesisDirector.SetTools(withBash(append(slices.Clone(synthesisDirectorSectoolDefs),
+			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...)))
 		RunSynthesisPhase(workerRunCtx, SynthesisPhaseInput{
 			Director: synthesisDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, Completed: completed,

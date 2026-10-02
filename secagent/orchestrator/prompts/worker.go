@@ -73,7 +73,21 @@ const reconWorkerBase = `You are the **recon worker**. Your single job is to map
 4. When the surface is mapped, end your turn with a concise observation summary. Your work will be distilled into a recon summary that anchors the testing workers spawned after you.
 `
 
-func BuildReconWorkerSystemPrompt() string { return reconWorkerBase }
+const reconBashAddendum = `
+
+## Shell access
+
+You also have a ` + "`bash`" + ` tool with unrestricted command execution on the host running secagent — useful for parsing captured data, decoding payloads, or inspecting local files. It does not relax the observation-only restriction above: never use it to send state-changing requests to the target. Commands run outside the proxy and produce no flow IDs.
+`
+
+// BuildReconWorkerSystemPrompt renders the recon worker system prompt.
+// allowBash appends the shell-access addendum granted by --allow-bash.
+func BuildReconWorkerSystemPrompt(allowBash bool) string {
+	if allowBash {
+		return reconWorkerBase + reconBashAddendum
+	}
+	return reconWorkerBase
+}
 
 // DefaultContinueDirective is the generic next-iter prompt used when the director calls
 // decide_worker(action="continue") without supplying an instruction.
