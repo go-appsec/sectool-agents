@@ -1032,20 +1032,23 @@ def update_worker_streaks(workers: list[WorkerState]) -> None:
 
 def _dump_unverified_candidates(
     candidates: CandidatePool, finding_writer: FindingWriter,
+    tag: str = "ctrl-c",
 ) -> int:
     """Write every still-pending candidate to disk as an UNVERIFIED finding.
 
-    Used by the double-Ctrl-C abort path: when the user aborts before the
-    verifier finishes, the candidate evidence the workers reported would
-    otherwise be lost. Returns the number of candidates dumped.
+    Called on every run exit path (double-Ctrl-C abort, shutdown, normal
+    end) so candidate evidence is never silently lost. Each candidate is
+    marked dismissed after its write, so repeat calls are no-ops. Returns
+    the number of candidates dumped.
     """
     pending = candidates.pending()
     if not pending:
         return 0
-    log("ctrl-c", f"Dumping {len(pending)} unverified candidate(s) to disk.")
+    log(tag, f"Dumping {len(pending)} unverified candidate(s) to disk.")
     for c in pending:
         path = finding_writer.write_unverified_candidate(c)
-        log("ctrl-c", f"Wrote unverified {c.candidate_id} → {path}")
+        candidates.mark(c.candidate_id, "dismissed")
+        log(tag, f"Wrote unverified {c.candidate_id} → {path}")
     return len(pending)
 
 
@@ -1436,6 +1439,10 @@ async def run(config: Config) -> None:
             for managed in (verifier_managed, director_managed):
                 if managed is not None:
                     await managed.aclose()
+            # Persist leftovers on every exit path; a normal end (done,
+            # max-iterations, cost ceiling) must not silently drop worker
+            # evidence. No-op when the double-Ctrl-C dump already ran.
+            _dump_unverified_candidates(candidates, finding_writer, tag="exit")
 
         print()
         log("summary",

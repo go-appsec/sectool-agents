@@ -211,3 +211,5 @@ The controller installs a triple-Ctrl-C handler so an in-flight run can be wound
 1. **First Ctrl-C** — cancels in-flight worker tasks and skips the next direction phase, but still runs final verification on whatever candidates were already filed. Verified findings are written to `--findings-dir` as normal.
 2. **Second Ctrl-C** — aborts the current verification (or direction) substep mid-flight and dumps every still-pending candidate to disk as an `unverified-<candidate_id>-<slug>.md` file with a clear `UNVERIFIED` header. Useful when verification is taking too long but you don't want to lose the worker's evidence.
 3. **Third Ctrl-C** — force-exits via `os._exit(130)`. No teardown, no further writes.
+
+Still-pending candidates are also dumped to disk (same `unverified-` format) on every normal exit — director `done`, `--max-iterations` exhaustion, or the cost ceiling — so worker evidence is never silently dropped regardless of how the run ends.

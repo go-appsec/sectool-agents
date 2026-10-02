@@ -147,7 +147,7 @@ func TestDumpUnvalidatedCandidates(t *testing.T) {
 			},
 		}
 
-		written := DumpUnvalidatedCandidates(pending, writer, nil)
+		written := DumpUnvalidatedCandidates(pending, writer, "test", nil)
 		assert.Equal(t, 2, written)
 
 		entries, err := os.ReadDir(dir)
@@ -202,7 +202,42 @@ func TestShutdownEscalateMidVerify(t *testing.T) {
 	assert.Equal(t, "candidate two", pending[0].Title)
 
 	// Dump persists the remaining pending candidate as UNVALIDATED
-	written := DumpUnvalidatedCandidates(pending, writer, nil)
+	written := DumpUnvalidatedCandidates(pending, writer, "test", nil)
 	assert.Equal(t, 1, written)
 	assert.Equal(t, 1, writer.UnvalidatedCount)
+}
+
+// TestDumpNormalExit covers the non-shutdown exit path: pending candidates
+// left by a normal run end (end_run, max-iterations) are persisted so worker
+// evidence survives.
+func TestDumpNormalExit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("writes_pending_with_reason", func(t *testing.T) {
+		dir := t.TempDir()
+		writer := newTestFindingWriter(t, dir)
+		candidates := NewCandidatePool()
+		candidates.Add(AddInput{
+			WorkerID: 1, Title: "leftover candidate",
+			Severity: "med", Endpoint: "GET /z",
+		})
+
+		// mirrors the post-loop dump in Run for sd.Phase() == Running
+		pending := candidates.Pending()
+		require.Len(t, pending, 1)
+		written := DumpUnvalidatedCandidates(pending, writer, "normal-exit", nil)
+
+		assert.Equal(t, 1, written)
+		assert.Equal(t, 1, writer.UnvalidatedCount)
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+	})
+
+	t.Run("no_pending_writes_nothing", func(t *testing.T) {
+		writer := newTestFindingWriter(t, t.TempDir())
+		written := DumpUnvalidatedCandidates(nil, writer, "normal-exit", nil)
+		assert.Equal(t, 0, written)
+		assert.Equal(t, 0, writer.UnvalidatedCount)
+	})
 }

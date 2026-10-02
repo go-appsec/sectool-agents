@@ -303,6 +303,8 @@ secagent installs a triple-Ctrl-C / SIGTERM handler so an in-flight run can be w
 
 The sectool MCP server is only torn down if secagent launched it; an attached pre-existing server is left running. Outstanding async finding-merge goroutines are awaited before the final verification and dump steps, so a merge that fails (LLM error, stale target, cancellation) preserves its evidence as a pending candidate that later verification or the shutdown dump recovers. Merge targets are re-resolved by sequence number at execution time, so a rename between submission and execution cannot orphan a queued merge.
 
+Pending candidates are also persisted on every normal exit (director `end_run`, `--max-iterations` exhaustion, or parent-context cancellation), so worker evidence is never silently dropped regardless of how the run ends.
+
 ## Running the tests
 
 From the repo root:

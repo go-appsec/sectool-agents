@@ -2029,5 +2029,41 @@ class TestApplyPlanDiffReconKickoff(unittest.TestCase):
         self.assertEqual(client.queries, ["bare assignment"])
 
 
+class DumpUnverifiedCandidatesTests(unittest.TestCase):
+    def _pool(self) -> CandidatePool:
+        pool = CandidatePool()
+        pool.add(
+            worker_id=1, title="Reflected XSS", severity="high",
+            endpoint="get /search", flow_ids=["f-1"], summary="reflects",
+            evidence_notes="n", reproduction_hint="h",
+        )
+        pool.add(
+            worker_id=1, title="SSRF candidate", severity="med",
+            endpoint="post /fetch", flow_ids=[], summary="fetches",
+            evidence_notes="n", reproduction_hint="h",
+        )
+        return pool
+
+    def test_writes_and_marks_dismissed(self):
+        with tempfile.TemporaryDirectory() as d:
+            writer = FindingWriter(d)
+            pool = self._pool()
+            dumped = controller._dump_unverified_candidates(pool, writer, tag="exit")
+            self.assertEqual(dumped, 2)
+            self.assertEqual(len(writer.paths), 2)
+            # marked dismissed so a repeat call (exit-path finally) is a no-op
+            self.assertEqual(pool.pending(), [])
+            self.assertEqual(
+                controller._dump_unverified_candidates(pool, writer, tag="exit"), 0)
+            self.assertEqual(len(writer.paths), 2)
+
+    def test_no_pending_returns_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            writer = FindingWriter(d)
+            self.assertEqual(
+                controller._dump_unverified_candidates(CandidatePool(), writer), 0)
+            self.assertEqual(writer.paths, [])
+
+
 if __name__ == "__main__":
     unittest.main()

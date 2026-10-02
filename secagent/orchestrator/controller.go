@@ -927,31 +927,38 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	// quiesces so any straggler submit is recovered into the candidate pool
 	asyncMerger.Wait()
 
-	// graceful-shutdown finalization: stage 1 verify pending, stage 2 dump unvalidated
-	if sd.Phase() >= ShutdownPhaseVerifyOnly {
-		if sd.Phase() == ShutdownPhaseVerifyOnly && len(candidates.Pending()) > 0 {
-			// clean slate so only this final verification's findings are processed
-			decisions.Reset()
-			verifierOverflowed = false
-			finalDirective := BuildVerifierPrompt(
-				workers, map[int][]agent.TurnSummary{}, candidates.Pending(),
-				writer.SummaryForOrchestrator(), factory.ReconSummary,
-				iteration, cfg.MaxIterations, writer.RunCount(),
-			)
-			verifier.ReplaceHistory([]agent.Message{{Role: "user", Content: finalDirective}})
-			log.Log("shutdown", "final-verification start", map[string]any{
-				"pending": len(candidates.Pending()),
-			})
-			RunVerificationPhase(
-				verifierRunCtx, verifier, decisions, candidates, writer, dedupReviewer, log,
-			)
-			if verifierOverflowed && !decisions.HasVerificationDone && len(candidates.Pending()) > 0 {
-				AutoDismissOnContextOverflow(candidates, decisions, log)
-			}
+	// graceful-shutdown stage 1: one final verification pass over leftovers
+	if sd.Phase() == ShutdownPhaseVerifyOnly && len(candidates.Pending()) > 0 {
+		// clean slate so only this final verification's findings are processed
+		decisions.Reset()
+		verifierOverflowed = false
+		finalDirective := BuildVerifierPrompt(
+			workers, map[int][]agent.TurnSummary{}, candidates.Pending(),
+			writer.SummaryForOrchestrator(), factory.ReconSummary,
+			iteration, cfg.MaxIterations, writer.RunCount(),
+		)
+		verifier.ReplaceHistory([]agent.Message{{Role: "user", Content: finalDirective}})
+		log.Log("shutdown", "final-verification start", map[string]any{
+			"pending": len(candidates.Pending()),
+		})
+		RunVerificationPhase(
+			verifierRunCtx, verifier, decisions, candidates, writer, dedupReviewer, log,
+		)
+		if verifierOverflowed && !decisions.HasVerificationDone && len(candidates.Pending()) > 0 {
+			AutoDismissOnContextOverflow(candidates, decisions, log)
 		}
-		if sd.Phase() >= ShutdownPhaseDumpUnvalidated {
-			DumpUnvalidatedCandidates(candidates.Pending(), writer, log)
+	}
+
+	// dump leftovers on every exit path: shutdown honors the graceful-shutdown
+	// guarantee, and a normal exit (end_run, max-iterations) must not silently
+	// drop worker evidence
+	var dumped int
+	if pending := candidates.Pending(); len(pending) > 0 {
+		reason := "normal-exit"
+		if sd.Phase() >= ShutdownPhaseVerifyOnly {
+			reason = "shutdown"
 		}
+		dumped = DumpUnvalidatedCandidates(pending, writer, reason, log)
 	}
 
 	retireQueue.Wait()
@@ -960,6 +967,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	log.Log("summary", "run complete", map[string]any{
 		"iterations":     iteration,
 		"findings_count": writer.RunCount(),
+		"unvalidated":    dumped,
 		"workers":        len(workers),
 	})
 	for _, p := range writer.RunPaths() {

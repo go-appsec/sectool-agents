@@ -169,7 +169,8 @@ func (s *Shutdown) RequestDumpUnvalidated() {
 
 // DumpUnvalidatedCandidates writes each pending candidate via
 // writer.WriteUnvalidated and returns the number of successful writes.
-func DumpUnvalidatedCandidates(pending []FindingCandidate, writer *FindingWriter, log *Logger) int {
+// reason labels the exit path (e.g. "shutdown", "normal-exit") in logs.
+func DumpUnvalidatedCandidates(pending []FindingCandidate, writer *FindingWriter, reason string, log *Logger) int {
 	var written int
 	for _, c := range pending {
 		path, err := writer.WriteUnvalidated(c)
@@ -184,8 +185,8 @@ func DumpUnvalidatedCandidates(pending []FindingCandidate, writer *FindingWriter
 			"candidate_id": c.CandidateID, "path": path, "title": c.Title,
 		})
 	}
-	log.Log("shutdown", "dumped unvalidated", map[string]any{
-		"written": written, "pending": len(pending),
+	log.Log("unvalidated", "dumped unvalidated", map[string]any{
+		"reason": reason, "written": written, "pending": len(pending),
 	})
 	return written
 }
