@@ -692,6 +692,10 @@ async def run_verification_phase(
             title_key = filed.title.strip().lower()
             if title_key and title_key in seen_titles:
                 log("finding", f"Duplicate (same substep) skipped: {filed.title}")
+                # Duplicate within the substep: skip the write but still honor
+                # explicit candidate links.
+                for cid in filed.supersedes_candidate_ids:
+                    candidates.mark(cid, "verified")
                 continue
             if title_key:
                 seen_titles.add(title_key)

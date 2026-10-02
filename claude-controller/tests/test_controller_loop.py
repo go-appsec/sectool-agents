@@ -1015,6 +1015,45 @@ class TestVerificationPhase(unittest.TestCase):
         self.assertEqual(pool.get(c_explicit).status, "verified")
         self.assertEqual(pool.get(c_similar).status, "dismissed")
 
+    def test_duplicate_filing_resolves_explicit_supersedes(self):
+        """A seen-duplicate burst filing still resolves its explicitly linked candidate."""
+        pool = CandidatePool()
+        c_first = pool.add(worker_id=1, title="Reflected XSS", severity="high",
+                           endpoint="GET /search", flow_ids=["fl0w01"],
+                           summary="", evidence_notes="", reproduction_hint="")
+        c_second = pool.add(worker_id=1, title="SQL injection in login", severity="high",
+                            endpoint="POST /login", flow_ids=["fl0w02"],
+                            summary="", evidence_notes="", reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="Reflected XSS", severity="high", endpoint="GET /search",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="v", supersedes_candidate_ids=[c_first],
+            ))
+            d.add_finding(FindingFiled(
+                title="Reflected XSS", severity="high", endpoint="GET /search",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="v", supersedes_candidate_ids=[c_second],
+            ))
+            d.set_verification_done("done")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("verification_done", {"summary": "x"})],
+            decisions, [action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(fw.count, 1)
+        self.assertEqual(pool.get(c_first).status, "verified")
+        self.assertEqual(pool.get(c_second).status, "verified")
+
     def test_skips_phase_when_no_pending(self):
         pool = CandidatePool()
         decisions = DecisionQueue()

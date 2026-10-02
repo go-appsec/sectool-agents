@@ -67,6 +67,10 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 			}
 			key := titleKey + "|" + CanonicalEndpoint(filed.Endpoint)
 			if seenFindings[key] {
+				// duplicate within the substep: skip the write but still honor explicit links
+				for _, cid := range filed.SupersedesCandidateIDs {
+					candidates.Mark(cid, CandidateStatusVerified)
+				}
 				continue
 			}
 			seenFindings[key] = true

@@ -212,6 +212,42 @@ func TestRunVerificationPhase(t *testing.T) {
 		assert.Contains(t, content, "orphan")
 	})
 
+	t.Run("duplicate_filing_resolves_explicit_links", func(t *testing.T) {
+		// A seen-duplicate filing must still resolve the candidates it explicitly links
+		writer := newTestFindingWriter(t, t.TempDir())
+		candidates := NewCandidatePool()
+		c1 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Dup filing",
+			Severity: "high", Endpoint: "GET /x",
+		})
+		c2 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Other angle",
+			Severity: "high", Endpoint: "GET /y",
+		})
+
+		decisions := NewDecisionQueue()
+		verifier := &agent.FakeAgent{Turns: []agent.TurnSummary{{}}}
+		verifier.OnDrain = func(_ int) {
+			decisions.AddFinding(FindingFiled{
+				Title: "Dup filing", Severity: "high", Endpoint: "GET /x",
+				VerificationNotes:      "first",
+				SupersedesCandidateIDs: []string{c1},
+			})
+			decisions.AddFinding(FindingFiled{
+				Title: "Dup filing", Severity: "high", Endpoint: "GET /x",
+				VerificationNotes:      "dup of the first",
+				SupersedesCandidateIDs: []string{c2},
+			})
+			decisions.SetVerificationDone("done")
+		}
+
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, nil)
+
+		assert.Equal(t, "verified", candidates.ByID(c1).Status)
+		assert.Equal(t, "verified", candidates.ByID(c2).Status)
+		assert.Empty(t, candidates.Pending())
+	})
+
 	t.Run("finding_duplicate_logged_once_per_substep", func(t *testing.T) {
 		writer := newTestFindingWriter(t, t.TempDir())
 		// Prime the writer with an existing finding so the burst below all match as duplicates against disk
