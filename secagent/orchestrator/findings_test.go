@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -526,6 +527,86 @@ func TestFindingWriterConcurrentAccessors(t *testing.T) {
 	require.NoError(t, renameErr)
 	assert.Equal(t, 50, w.RunCount())
 	assert.Len(t, w.RunPaths(), 50)
+}
+
+// TestFindingWriterMergeExistingParallel asserts that mergeFn runs with
+// mergeMu released: a merge on an unrelated finding must proceed while
+// another merge's LLM call is in flight.
+func TestFindingWriterMergeExistingParallel(t *testing.T) {
+	t.Parallel()
+
+	w := newTestFindingWriter(t, t.TempDir())
+	p1, err := w.Write(FindingFiled{Title: "One", Severity: "low", Endpoint: "GET /1"})
+	require.NoError(t, err)
+	p2, err := w.Write(FindingFiled{Title: "Two", Severity: "low", Endpoint: "GET /2"})
+	require.NoError(t, err)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var err1, err2 error
+	done2 := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err1 = w.MergeExisting(p1, func(existing FindingFiled) (FindingFiled, error) {
+			close(entered)
+			<-release
+			return existing, nil
+		})
+	}()
+	<-entered
+
+	go func() {
+		_, err2 = w.MergeExisting(p2, func(existing FindingFiled) (FindingFiled, error) {
+			return existing, nil
+		})
+		close(done2)
+	}()
+	select {
+	case <-done2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("merge on unrelated finding blocked behind in-flight merge")
+	}
+
+	close(release)
+	wg.Wait()
+	require.NoError(t, err1)
+	require.NoError(t, err2)
+}
+
+// TestFindingWriterMergeExistingRestacks asserts that a concurrent edit
+// landing during mergeFn causes the merge to retry against the newer content
+// instead of clobbering it.
+func TestFindingWriterMergeExistingRestacks(t *testing.T) {
+	t.Parallel()
+
+	w := newTestFindingWriter(t, t.TempDir())
+	path, err := w.Write(FindingFiled{Title: "Base", Severity: "low", Endpoint: "GET /", Evidence: "base"})
+	require.NoError(t, err)
+
+	var calls int
+	newPath, err := w.MergeExisting(path, func(existing FindingFiled) (FindingFiled, error) {
+		calls++
+		if calls == 1 {
+			// concurrent edit lands while the merge call is in flight
+			if _, err := w.Replace(path, FindingFiled{
+				Title: "Replaced", Severity: "high", Endpoint: "GET /", Evidence: "replaced",
+			}); err != nil {
+				return FindingFiled{}, err
+			}
+		}
+		existing.Evidence += " merged"
+		return existing, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, calls)
+
+	body := mustReadFile(t, newPath)
+	assert.Contains(t, body, "# Replaced")
+	assert.Contains(t, body, "replaced merged")
+	assert.NotContains(t, body, "base")
 }
 
 func TestMatchPendingCandidates(t *testing.T) {

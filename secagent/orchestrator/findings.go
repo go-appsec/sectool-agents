@@ -166,9 +166,11 @@ func MatchPendingCandidatesTiered(filed FindingFiled, pending []FindingCandidate
 // FindingWriter persists verified findings.
 type FindingWriter struct {
 	mu sync.Mutex
-	// mergeMu serializes read-modify-write composites on existing findings
-	// (Replace / MergeExisting) so concurrent merges cannot clobber each
-	// other. Always acquired before mu.
+	// mergeMu serializes the snapshot and write-back of read-modify-write
+	// composites on existing findings (Replace / MergeExisting) so concurrent
+	// merges cannot clobber each other. Released across MergeExisting's
+	// mergeFn call so slow LLM merges do not serialize file edits. Always
+	// acquired before mu.
 	mergeMu     sync.Mutex
 	findingsDir string
 	// Count is the highest finding-NN-*.md sequence on disk.
@@ -188,6 +190,9 @@ type findingIndexEntry struct {
 	titleSlug string
 	endpoint  string
 	path      string
+	// rev increments on every rewrite; MergeExisting uses it to detect a
+	// concurrent edit while its merge call was in flight.
+	rev int
 }
 
 // RunCount returns the number of findings filed in this process only.
@@ -458,11 +463,12 @@ func (w *FindingWriter) Replace(oldPath string, filed FindingFiled) (string, err
 	return w.replaceLocked(oldPath, filed)
 }
 
-// MergeExisting atomically merges into the finding at oldPath: it re-reads the
-// latest content, applies mergeFn (which may issue an LLM call) with no index
-// lock held, then writes the result back preserving the sequence number.
-// Serialized against concurrent Replace/MergeExisting via mergeMu so in-flight
-// merges cannot clobber one another. Returns the new path.
+// MergeExisting atomically merges into the finding at oldPath: it re-reads
+// the latest content, applies mergeFn (which may issue a slow LLM call) with
+// mergeMu released, then writes the result back preserving the sequence
+// number. The entry is re-validated on re-acquire, so a concurrent edit makes
+// the merge retry against the newer content and concurrent merges of the same
+// finding stack instead of clobbering. Returns the new path.
 func (w *FindingWriter) MergeExisting(oldPath string, mergeFn func(existing FindingFiled) (FindingFiled, error)) (string, error) {
 	w.mergeMu.Lock()
 	defer w.mergeMu.Unlock()
@@ -473,14 +479,37 @@ func (w *FindingWriter) MergeExisting(oldPath string, mergeFn func(existing Find
 		w.mu.Unlock()
 		return "", fmt.Errorf("merge: path not tracked: %s", oldPath)
 	}
-	existing, curPath := w.index[idx].filed, w.index[idx].path
+	seq := findingSeqFromPath(oldPath)
 	w.mu.Unlock()
 
-	merged, err := mergeFn(existing)
-	if err != nil {
-		return "", err
+	for {
+		w.mu.Lock()
+		idx = w.indexOfSeq(seq)
+		if idx < 0 {
+			w.mu.Unlock()
+			return "", fmt.Errorf("merge: path not tracked: %s", oldPath)
+		}
+		existing, curPath, curRev := w.index[idx].filed, w.index[idx].path, w.index[idx].rev
+		w.mu.Unlock()
+
+		// mergeFn may block on an LLM call; release mergeMu so other merges
+		// and file edits are not serialized behind it.
+		w.mergeMu.Unlock()
+		merged, err := mergeFn(existing)
+		w.mergeMu.Lock()
+		if err != nil {
+			return "", err
+		}
+
+		w.mu.Lock()
+		idx = w.indexOfSeq(seq)
+		stale := idx < 0 || w.index[idx].rev != curRev
+		w.mu.Unlock()
+		if !stale {
+			return w.replaceLocked(curPath, merged)
+		}
+		// entry changed during mergeFn; redo the merge on top of new content
 	}
-	return w.replaceLocked(curPath, merged)
 }
 
 // replaceLocked performs Replace's work assuming mergeMu is held by the caller.
@@ -510,7 +539,9 @@ func (w *FindingWriter) replaceLocked(oldPath string, filed FindingFiled) (strin
 			return "", fmt.Errorf("replace: remove old %s: %w", oldPath, err)
 		}
 	}
-	w.index[idx] = indexEntry(filed, newPath)
+	entry := indexEntry(filed, newPath)
+	entry.rev = w.index[idx].rev + 1
+	w.index[idx] = entry
 	for i := range w.paths {
 		if w.paths[i] == oldPath {
 			w.paths[i] = newPath
@@ -523,6 +554,18 @@ func (w *FindingWriter) replaceLocked(oldPath string, filed FindingFiled) (strin
 func (w *FindingWriter) indexOfPath(path string) int {
 	for i, e := range w.index {
 		if e.path == path {
+			return i
+		}
+	}
+	return -1
+}
+
+// indexOfSeq returns the index of the entry whose path carries seq, or -1.
+// Sequence numbers survive renames, making this the stable lookup for queued
+// merges.
+func (w *FindingWriter) indexOfSeq(seq int) int {
+	for i, e := range w.index {
+		if findingSeqFromPath(e.path) == seq {
 			return i
 		}
 	}
@@ -624,10 +667,8 @@ func (w *FindingWriter) LookupBySequence(seq int) (FindingFiled, string, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	for _, e := range w.index {
-		if findingSeqFromPath(e.path) == seq {
-			return e.filed, e.path, true
-		}
+	if idx := w.indexOfSeq(seq); idx >= 0 {
+		return w.index[idx].filed, w.index[idx].path, true
 	}
 	return FindingFiled{}, "", false
 }
