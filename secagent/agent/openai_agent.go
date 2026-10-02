@@ -626,6 +626,11 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 			if hardTruncated {
 				return ChatResponse{}, err
 			}
+			// skip the destructive fast-path unless the estimate is plausibly
+			// over-context, a misclassified error must not erase working memory
+			if a.history.EstimateTokens() <= a.history.EffectiveMaxContext()/2 {
+				return ChatResponse{}, err
+			}
 			hardTruncated = true
 			a.history.ShrinkEffectiveMaxOnRejection(a.history.EstimateTokens())
 			if a.cfg.OnContextOverflow != nil {

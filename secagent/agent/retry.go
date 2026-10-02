@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,21 +42,14 @@ func Classify(err error) (ErrCategory, time.Duration) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return ErrDeadline, 0
 	}
-	// upstream context-overflow rejection
-	emsg := strings.ToLower(err.Error())
-	if strings.Contains(emsg, "context size has been exceeded") ||
-		strings.Contains(emsg, "context_length_exceeded") ||
-		strings.Contains(emsg, "maximum context length") ||
-		strings.Contains(emsg, "context window") {
-		return ErrContextOverflow, 0
-	}
-
 	// zero-choice payload from the provider, retry like any other transient hiccup
 	if errors.Is(err, ErrEmptyChoices) {
 		return ErrTransientNet, 0
 	}
 
-	// HTTP-shaped errors from go-openai
+	// HTTP status is decisive for HTTP-shaped errors; overflow markers are
+	// only consulted inside classifyHTTPStatus so an unrelated 4xx message
+	// mentioning context cannot trigger the destructive truncation fast-path
 	var apiErr *openai.APIError
 	if errors.As(err, &apiErr) {
 		return classifyHTTPStatus(apiErr.HTTPStatusCode, apiErr.Message)
@@ -67,6 +61,11 @@ func Classify(err error) (ErrCategory, time.Duration) {
 			body = reqErr.Err.Error()
 		}
 		return classifyHTTPStatus(reqErr.HTTPStatusCode, body)
+	}
+
+	// status-less upstream context-overflow rejection, tight markers only
+	if isOverflowMessage(err.Error()) {
+		return ErrContextOverflow, 0
 	}
 
 	// Network-shaped errors
@@ -91,9 +90,31 @@ func classifyHTTPStatus(status int, message string) (ErrCategory, time.Duration)
 	case status >= 500:
 		return ErrTransientNet, 0
 	case status >= 400:
+		// only explicit overflow-shaped 4xx rejections count as overflow
+		if isOverflowMessage(message) {
+			return ErrContextOverflow, 0
+		}
 		return ErrModelError, 0
 	}
 	return ErrOther, 0
+}
+
+// overflowMarkers are the unambiguous provider phrases identifying a
+// context-length rejection. Loose phrases like "context window" are
+// intentionally excluded so unrelated error messages cannot trigger the
+// destructive truncation fast-path.
+var overflowMarkers = []string{
+	"context_length_exceeded",
+	"maximum context length",
+	"context size has been exceeded",
+}
+
+// isOverflowMessage reports whether msg carries an explicit context-length rejection.
+func isOverflowMessage(msg string) bool {
+	msg = strings.ToLower(msg)
+	return slices.ContainsFunc(overflowMarkers, func(marker string) bool {
+		return strings.Contains(msg, marker)
+	})
 }
 
 var retryAfterRe = regexp.MustCompile(`(?i)retry[- ]after[^0-9]{0,10}(\d+(?:\.\d+)?)\s*(s|sec|second|seconds|ms|millis|milliseconds)?`)

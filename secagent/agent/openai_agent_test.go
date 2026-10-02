@@ -347,7 +347,8 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 			DrainRetryMax:     1,
 			DrainRetryBackoff: time.Microsecond,
 		})
-		big := strings.Repeat("y", 1_500)
+		// 12 messages x ~3000 tokens clears the half-ceiling watermark (32_000)
+		big := strings.Repeat("y", 12_000)
 		for range 6 {
 			a.history.Append(Message{
 				Role:      RoleAssistant,
@@ -405,6 +406,29 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 		require.Error(t, err)
 		assert.Equal(t, escalationError, sum.EscalationReason)
 		assert.LessOrEqual(t, int(client.idx), 4)
+	})
+
+	t.Run("overflow_below_watermark", func(t *testing.T) {
+		// A misclassified overflow with a small history must propagate without
+		// shrinking the ceiling or truncating history
+		rejectErr := errors.New(`error, status code: 400, body: {"error":"Context size has been exceeded."}`)
+		client := &fakeChatClient{
+			responses: []ChatResponse{{}, {}},
+			errors:    []error{rejectErr, nil},
+		}
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", Pool: newPoolWith(client),
+			MaxContext: 64_000,
+		})
+		a.history.Append(Message{Role: RoleUser, Content: "tiny"})
+		a.history.Append(Message{Role: RoleAssistant, Content: "reply"})
+
+		a.Query("go")
+		_, err := a.Drain(t.Context())
+		require.Error(t, err)
+		assert.Equal(t, 1, int(client.idx))
+		assert.Equal(t, 64_000, a.history.EffectiveMaxContext())
+		assert.Equal(t, 3, a.history.Len())
 	})
 
 	t.Run("model_error_not_retried", func(t *testing.T) {
