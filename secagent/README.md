@@ -20,7 +20,7 @@ Use `secagent` when you want autonomous security exploration driven by any OpenA
 
 By default, the run begins with an **initial recon** pass — a dedicated recon worker that maps the target's surface area, retires at the end of iteration 1, and whose summary is anchored into every subsequent worker's system prompt and the verifier's per-iter compose. Pass `--skip-recon` to disable this and have the run start with a regular testing worker against `--prompt` (no recon summary anchor for downstream workers). See "How It Works" step 3 for the full mechanics.
 
-A separate **log model** can be configured (`--log-model`) for the cheap LLM operations that don't need the main flagship model: the narrator. It shares the main client pool — only the model identifier on each request differs. Defaults to `--model` when unset. Candidate-dedup and async-merge classification deliberately stay on the main model (the log model produced too many false-merge verdicts), as do worker-retire and recon-end recaps since those summaries are load-bearing.
+A separate **log model** can be configured (`--log-model`) for the cheap LLM operations that don't need the main flagship model: the narrator. It shares the main client pool — only the model identifier on each request differs. Defaults to `--model` when unset.
 
 Splitting verification and direction into separate clients with separate system prompts forces each role to do its job thoroughly — a single-turn orchestrator tends to short-circuit both.
 
@@ -89,7 +89,7 @@ bin/secagent \
 | `--base-url` | - | OpenAI-compatible base URL |
 | `--api-key` | - | Optional API key |
 | `--model` | - | Main model ID (workers, verifier, director, boundary-summarize) |
-| `--log-model` | (= `--model`) | Model ID for the narrator (dedup/merge classify stay on `--model`) |
+| `--log-model` | (= `--model`) | Model ID for the narrator |
 | `--agent-pool-size` | `4` | Concurrent model-request bound (shared pool) |
 
 **Context / compaction**
@@ -155,8 +155,6 @@ The resolved or configured sectool is used for both the version check and the MC
 
 secagent probes `--mcp-port` at startup. If a sectool MCP server is already serving on that port, secagent attaches to it (no child process started, no teardown on exit). Otherwise it launches `sectool mcp` from `$PATH` and tears it down at exit.
 
-Each agent (worker, verifier, director) opens its own MCP session. Every session handshake — connect, initialize, tool listing — is bounded by a 10s deadline, so a wedged server fails startup with a distinct handshake-timeout error instead of hanging forever.
-
 ```bash
 # Start the MCP server separately
 sectool mcp --proxy-port 8181
@@ -204,9 +202,9 @@ Every `report_finding_candidate` call runs through an LLM dedup check (main mode
 
 - **unique** — candidate enters the pool and is presented to the verifier next phase.
 - **duplicate** — rejected at the tool boundary; the worker is told which finding already covers it and to pivot to a different angle.
-- **merge** — acknowledged synchronously to the worker; the candidate's evidence is queued onto a background pool with bounded concurrency and a capped backlog (submissions arriving when the backlog is full fail fast into the pending-candidate pool). The pool opens the matched finding, calls the main model again to merge the new evidence in, and writes the result. The controller waits on outstanding merges at shutdown so no work is lost.
+- **merge** — acknowledged synchronously to the worker; the candidate's evidence is queued onto a bounded background pool that opens the matched finding, calls the main model again to merge the new evidence in, and writes the result. The controller waits on outstanding merges at shutdown so no work is lost.
 
-Findings filed by the verifier go through a similar dedup pass before being written to disk (`writer.MatchesFiled` deterministic match plus an LLM review for soft matches), and pending candidates that aren't explicitly linked via `supersedes_candidate_ids` are tier-matched so the verifier can leave the linkage implicit. Only the unambiguous title+endpoint tier resolves candidates to `verified`; looser matches (endpoint-only, title-only) are logged as `candidate match-fallback` with the candidate titles and left pending for an explicit verdict in a later substep or iteration.
+Findings filed by the verifier go through a similar dedup pass before being written to disk (`writer.MatchesFiled` deterministic match plus an LLM review for soft matches), and pending candidates that aren't explicitly linked via `supersedes_candidate_ids` are tier-matched so the verifier can leave the linkage implicit. Only the unambiguous title+endpoint tier resolves candidates to `verified`; looser matches (endpoint-only, title-only) are left pending for an explicit verifier verdict.
 
 ## Orchestrator Tools (phase-gated decision surface)
 
@@ -214,7 +212,7 @@ Findings filed by the verifier go through a similar dedup pass before being writ
 
 | Tool | Purpose |
 |------|---------|
-| `file_finding(...)` | Record a *verified* finding; `verification_notes` must describe how the issue was reproduced, and all other required fields must be non-empty. Optional `supersedes_candidate_ids` explicitly links the finding to the candidate(s) it covers — unknown or already-resolved IDs are rejected. Optional `follow_up_hint` advises the director on adjacent angles to probe. |
+| `file_finding(...)` | Record a *verified* finding; `verification_notes` must describe how the issue was reproduced. Optional `supersedes_candidate_ids` explicitly links the finding to the candidate(s) it covers — unknown or already-resolved IDs are rejected. Optional `follow_up_hint` advises the director on adjacent angles to probe. |
 | `dismiss_candidate(candidate_id, reason)` | Mark a worker candidate as not-a-finding; unknown or already-resolved candidate IDs are rejected. Optional `follow_up_hint` advises the director. |
 | `verification_done(summary)` | Signal verification complete; transitions to direction. |
 
@@ -228,7 +226,7 @@ Per-worker decision tool:
 
 | Tool | Purpose |
 |------|---------|
-| `decide_worker(worker_id, action, instruction?, reason?, autonomous_budget?, fork?)` | The unified per-worker decision. `action="continue"` keeps the worker on its current angle (`instruction` is the next-iter directive). `action="expand"` pivots to a new angle (`instruction` is the new directive). `action="stop"` retires the worker (`reason` explains why; `fork` is rejected in combination). Optional `autonomous_budget` (1–20) sets the next iteration's turn cap. Optional `fork={new_worker_id, instruction}` spawns a child worker that inherits this worker's chronicle; a second `decide_worker` for the same worker in one phase is rejected, and `new_worker_id` must not collide with the alive/completed set or a fork claimed earlier in the same drain. |
+| `decide_worker(worker_id, action, instruction?, reason?, autonomous_budget?, fork?)` | The unified per-worker decision. `action="continue"` keeps the worker on its current angle (`instruction` is the next-iter directive). `action="expand"` pivots to a new angle (`instruction` is the new directive). `action="stop"` retires the worker (`reason` explains why; `fork` is rejected in combination). Optional `autonomous_budget` (1–20) sets the next iteration's turn cap. Optional `fork={new_worker_id, instruction}` spawns a child worker that inherits this worker's chronicle; only one `decide_worker` per worker per phase is allowed, and `new_worker_id` must not collide with an existing worker. |
 
 Synthesis tools (one call after all per-worker decisions):
 
@@ -256,10 +254,10 @@ Per iteration the director receives the verification summary, every worker's aut
 |-------|---------|
 | `stopped` | Worker was stopped this iteration (no longer alive). |
 | `finding` | Verifier explicitly linked a filed finding to one of this worker's candidates via `supersedes_candidate_ids`. |
-| `possible-finding` | Verifier filed a finding that heuristically matches one of this worker's candidates (title+endpoint tier match) but didn't explicitly link it. The director should follow up rather than assume coverage — a finding outcome should be explicit. |
+| `possible-finding` | Verifier filed a finding that heuristically matches one of this worker's candidates (title+endpoint tier match) but didn't explicitly link it. |
 | `dismissed` | Verifier dismissed a candidate from this worker. |
 | `candidate` | Worker reported a candidate that's still pending at iter end. |
-| `silent` / `error` / `budget` / `context_exhausted` | Escalation reason from a worker that didn't produce a candidate. `context_exhausted` means compaction could not bring the history under the high watermark, so the director should stop or recompose the worker rather than continue it. |
+| `silent` / `error` / `budget` / `context_exhausted` | Escalation reason from a worker that didn't produce a candidate. |
 
 The director's system prompt also defines an **angle exhaustion** rule: when a worker's history shows the same or near-identical angle across 2+ iterations with no finding filed, treat it as exhausted and pivot or stop — don't re-issue a lightly-reworded variant.
 
@@ -284,7 +282,7 @@ Each file has Title, Severity, Affected Endpoint, Description, Reproduction Step
 
 - **Max iterations**: `--max-iterations` caps the outer loop (default 30). Each iteration runs one autonomous worker phase + verification + direction, so an iteration involves many underlying model turns.
 - **Autonomous budget per worker**: 1–20 turns, default 8, settable per worker by the director via `decide_worker(autonomous_budget=...)`.
-- **Phase substep caps**: `VerificationMaxSubsteps=6` (a verifier substep that dispatches no tool calls and records no decisions is re-prompted instead of consuming the cap, bounded by 3 idle retries); per-worker `decide_worker` drain capped at `decisionDrainMaxRounds=4`.
+- **Phase substep caps**: `VerificationMaxSubsteps=6`; per-worker `decide_worker` drain capped at `decisionDrainMaxRounds=4`.
 - **Per-agent turn cap**: `--max-turns-per-agent` (default 100) bounds any single Drain chain.
 - **Stall detection**: configurable via `--stall-warn-after` / `--stall-stop-after`.
 - **Per-turn timeout**: `--turn-timeout` (default 10m) bounds each model call. `--per-tool-timeout` (default 5m) bounds each tool dispatch.
@@ -301,9 +299,9 @@ secagent installs a triple-Ctrl-C / SIGTERM handler so an in-flight run can be w
 2. **Second signal** — dumps every still-pending candidate to disk as an unverified record so the worker's evidence isn't lost.
 3. **Third signal** — force-exits with code 130. No further teardown.
 
-The sectool MCP server is only torn down if secagent launched it; an attached pre-existing server is left running. Outstanding async finding-merge goroutines are awaited before the final verification and dump steps, so a merge that fails (LLM error, stale target, cancellation) preserves its evidence as a pending candidate that later verification or the shutdown dump recovers. Merge targets are re-resolved by sequence number at execution time, so a rename between submission and execution cannot orphan a queued merge.
+The sectool MCP server is only torn down if secagent launched it; an attached pre-existing server is left running. Outstanding async finding-merge goroutines are awaited at exit; a merge that fails keeps its evidence as a pending candidate for later verification or the shutdown dump.
 
-Pending candidates are also persisted on every normal exit (director `end_run`, `--max-iterations` exhaustion, or parent-context cancellation), so worker evidence is never silently dropped regardless of how the run ends.
+Pending candidates are also persisted on every normal exit, so worker evidence is never silently dropped.
 
 ## Running the tests
 
