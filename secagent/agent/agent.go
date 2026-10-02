@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
 
 // OpenAI chat message roles.
@@ -79,11 +80,18 @@ type TurnSummary struct {
 	TimedOut         bool
 }
 
+// ErrDrainInterrupted is returned by Drain/DrainBounded when the drain ended
+// because Interrupt or ReplaceHistory cancelled it. It never wraps
+// context.Canceled so callers can distinguish self-cancellation from a
+// genuinely cancelled caller context.
+var ErrDrainInterrupted = errors.New("drain interrupted")
+
 // Agent is the orchestrator's interface to a chat model.
 //
 // Concurrency contract: at most one Drain runs per agent at a time.
 // Interrupt and ReplaceHistory are safe to call concurrently with an
-// in-flight Drain (both cancel it). SetTools is safe at any time; the
+// in-flight Drain (both cancel it; the interrupted Drain returns
+// ErrDrainInterrupted, not a nil error). SetTools is safe at any time; the
 // new tools apply to subsequent dispatches.
 type Agent interface {
 	Query(content string)

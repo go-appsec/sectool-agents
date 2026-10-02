@@ -75,6 +75,19 @@ func TestRunWorkerUntilEscalation(t *testing.T) {
 		assert.Equal(t, "candidate", w.EscalationReason)
 	})
 
+	t.Run("interrupted_run_no_error_escalation", func(t *testing.T) {
+		fake := &agent.FakeAgent{
+			Turns:  []agent.TurnSummary{{ToolCalls: []agent.ToolCallRecord{{Name: "t"}}}},
+			Errors: []error{agent.ErrDrainInterrupted},
+		}
+		w := &WorkerState{ID: 1, Agent: fake, Alive: true, AutonomousBudget: 5}
+		log, _ := newTestLogger(t)
+		rs := newWorkerRunResult(w)
+		_, err := RunWorkerUntilEscalation(t.Context(), w, &rs, NewCandidatePool(), log)
+		require.ErrorIs(t, err, agent.ErrDrainInterrupted)
+		assert.Empty(t, rs.EscalationReason)
+	})
+
 	t.Run("context_exhausted_survives_candidate", func(t *testing.T) {
 		pool := NewCandidatePool()
 		fake := &agent.FakeAgent{
@@ -114,6 +127,20 @@ func TestRunOneWorkerRecovery(t *testing.T) {
 		rs := newWorkerRunResult(w)
 		res := runOneWorker(t.Context(), w, rs, NewCandidatePool(), log)
 		assert.Empty(t, res.EscalationReason)
+	})
+
+	t.Run("interrupted_run_skips_recovery", func(t *testing.T) {
+		fake := &agent.FakeAgent{
+			Turns:  []agent.TurnSummary{{ToolCalls: []agent.ToolCallRecord{{Name: "t"}}}},
+			Errors: []error{agent.ErrDrainInterrupted},
+		}
+		w := &WorkerState{ID: 1, Agent: fake, Alive: true, AutonomousBudget: 5, LastInstruction: "continue"}
+		log, _ := newTestLogger(t)
+		rs := newWorkerRunResult(w)
+		res := runOneWorker(t.Context(), w, rs, NewCandidatePool(), log)
+		assert.Empty(t, res.EscalationReason)
+		// the recovery re-Query never ran; the refire owns fresh state
+		assert.Empty(t, fake.QueriedInputs)
 	})
 
 	t.Run("unrecovered_error_stays_error", func(t *testing.T) {

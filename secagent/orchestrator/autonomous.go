@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"slices"
 
 	"github.com/go-appsec/sectool-agents/secagent/agent"
@@ -106,6 +107,10 @@ func RunWorkerUntilEscalation(ctx context.Context,
 		}
 		summary, err := drainOne(ctx, w, rs, candidates, log)
 		if err != nil {
+			if errors.Is(err, agent.ErrDrainInterrupted) {
+				// retarget discarded the run; the caller refires with fresh state
+				return rs.AutonomousTurns, err
+			}
 			rs.EscalationReason = EscalationError
 			return rs.AutonomousTurns, err
 		}
@@ -125,6 +130,10 @@ func RunWorkerUntilEscalation(ctx context.Context,
 func runOneWorker(ctx context.Context,
 	w *WorkerState, rs workerRunResult, candidates *CandidatePool, log *Logger) workerRunResult {
 	_, err := RunWorkerUntilEscalation(ctx, w, &rs, candidates, log)
+	if errors.Is(err, agent.ErrDrainInterrupted) {
+		// interrupted by retarget; the refire replaces this run, no recovery
+		return rs
+	}
 	if err != nil && w.LastInstruction != "" {
 		log.Log("worker", "recover", map[string]any{
 			"worker_id": w.ID, "attempt": 1, "err": err.Error(),

@@ -1057,15 +1057,16 @@ func TestOpenAIAgent_DrainConcurrency(t *testing.T) {
 		client := newGatedChatClient(1)
 		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
 		a.Query("go")
-		done := make(chan struct{})
+		errCh := make(chan error, 1)
 		go func() {
-			defer close(done)
-			_, _ = a.Drain(t.Context())
+			_, err := a.Drain(t.Context())
+			errCh <- err
 		}()
 		<-client.started
 		a.Interrupt()
 		select {
-		case <-done:
+		case err := <-errCh:
+			require.ErrorIs(t, err, ErrDrainInterrupted)
 		case <-time.After(2 * time.Second):
 			t.Fatal("Interrupt did not unblock the Drain")
 		}
@@ -1075,17 +1076,39 @@ func TestOpenAIAgent_DrainConcurrency(t *testing.T) {
 		client := newGatedChatClient(1)
 		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
 		a.Query("go")
-		done := make(chan struct{})
+		errCh := make(chan error, 1)
 		go func() {
-			defer close(done)
-			_, _ = a.Drain(t.Context())
+			_, err := a.Drain(t.Context())
+			errCh <- err
 		}()
 		<-client.started
 		a.ReplaceHistory([]Message{{Role: RoleUser, Content: "restart"}})
 		select {
-		case <-done:
+		case err := <-errCh:
+			require.ErrorIs(t, err, ErrDrainInterrupted)
 		case <-time.After(2 * time.Second):
 			t.Fatal("ReplaceHistory did not unblock the Drain")
+		}
+	})
+
+	t.Run("outer_cancel_propagates", func(t *testing.T) {
+		client := newGatedChatClient(1)
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+		a.Query("go")
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := a.Drain(ctx)
+			errCh <- err
+		}()
+		<-client.started
+		cancel()
+		select {
+		case err := <-errCh:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(2 * time.Second):
+			t.Fatal("outer cancel did not unblock the Drain")
 		}
 	})
 

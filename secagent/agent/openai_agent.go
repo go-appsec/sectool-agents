@@ -348,7 +348,12 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 			return summary, nil
 		} else if errors.Is(err, context.Canceled) {
 			a.synthesizePendingToolStubs()
-			return summary, ctx.Err()
+			if ctx.Err() != nil {
+				return summary, ctx.Err()
+			}
+			// inner was cancelled by Interrupt/ReplaceHistory while the outer
+			// context is still alive; surface it as a distinct outcome
+			return summary, ErrDrainInterrupted
 		} else if err != nil {
 			summary.EscalationReason = escalationError
 			return summary, err
