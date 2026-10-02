@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,8 +14,8 @@ func TestCalibration_PerModelIsolation(t *testing.T) {
 	observe := func(model string) {
 		h := NewHistoryForModel(8192, model, nil)
 		h.Append(Message{Role: RoleUser, Content: "abcdefghij"})
-		// raw 6 tokens, reported 60 -> observed ratio clamps the EMA at calibrationMax
-		h.SetPromptTokens(60)
+		// raw 11 tokens, reported 200 -> observed ratio clamps the EMA at calibrationMax
+		h.SetPromptTokens(200)
 	}
 
 	observe("model-a")
@@ -53,6 +54,28 @@ func TestRawChatMessagesTokens_MatchesStoredShape(t *testing.T) {
 		want += rawMessageTokens(m)
 	}
 	assert.Equal(t, want, rawChatMessagesTokens(chatMsgs))
+}
+
+func TestRawBodyTokens_ShortToolCallsCounted(t *testing.T) {
+	t.Parallel()
+
+	// ten short calls would each truncate to zero under per-call integer division
+	calls := make([]ToolCall, 10)
+	for i := range calls {
+		calls[i] = ToolCall{ID: strconv.Itoa(i), Function: ToolFunction{Name: "t", Arguments: "{}"}}
+	}
+	m := Message{Role: RoleAssistant, ToolCalls: calls}
+	assert.Greater(t, rawMessageTokens(m), perMessageOverhead)
+
+	empty := Message{Role: RoleAssistant}
+	assert.Equal(t, perMessageOverhead, rawMessageTokens(empty))
+}
+
+func TestEstimateStringTokens_CeilsPartialToken(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 1, EstimateStringTokens("a"))
+	assert.Equal(t, 0, EstimateStringTokens(""))
 }
 
 func TestEstimateTokensForModel_UsesModelBucket(t *testing.T) {

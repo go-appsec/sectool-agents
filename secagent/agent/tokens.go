@@ -6,8 +6,9 @@ import "sync"
 // calibration factor updated by EMA on each observed prompt-token count. Bounds prevent outliers. Calibration
 // is scoped per model so different tokenizers cannot contaminate each other's estimates.
 const (
-	charsPerToken      = 4
-	perMessageOverhead = 4
+	charsPerToken = 4
+	// role, separators, and JSON key/structure the server prices per message
+	perMessageOverhead = 8
 	calibrationMin     = 0.5
 	calibrationMax     = 3.0
 	calibrationAlpha   = 0.3
@@ -69,7 +70,7 @@ func EstimateStringTokens(s string) int {
 // EstimateStringTokensForModel returns the token estimate for s using model's calibration bucket,
 // with no per-message overhead.
 func EstimateStringTokensForModel(model, s string) int {
-	return int(float64(len(s)) / charsPerToken * Calibration(model))
+	return int(float64(ceilTokens(len(s))) * Calibration(model))
 }
 
 // EstimateMessageTokens returns the token estimate for m using the default calibration bucket,
@@ -102,10 +103,16 @@ func rawChatMessagesTokens(msgs []ChatMessage) int {
 }
 
 // rawBodyTokens returns the uncalibrated estimate for one message body, including per-message overhead.
+// Bytes are summed before one ceiling division so short tool calls cannot truncate to zero.
 func rawBodyTokens(content string, calls []ToolCall) int {
-	total := len(content) / charsPerToken
+	n := len(content)
 	for _, tc := range calls {
-		total += (len(tc.Function.Name) + len(tc.Function.Arguments)) / charsPerToken
+		n += len(tc.Function.Name) + len(tc.Function.Arguments)
 	}
-	return total + perMessageOverhead
+	return ceilTokens(n) + perMessageOverhead
+}
+
+// ceilTokens returns ceil(n / charsPerToken).
+func ceilTokens(n int) int {
+	return (n + charsPerToken - 1) / charsPerToken
 }

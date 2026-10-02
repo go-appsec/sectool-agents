@@ -67,9 +67,9 @@ func TestHistory_Calibration(t *testing.T) {
 		for range 10 {
 			h.Append(Message{Role: RoleUser, Content: "abcdefghij"})
 		}
-		// raw ~69 tokens, reported 200 -> observed ratio ~2.9; EMA alpha=0.3 lands ~1.57
+		// raw 119 tokens, reported 200 -> observed ratio ~1.68; EMA alpha=0.3 lands ~1.20
 		h.SetPromptTokens(200)
-		assert.InDelta(t, 1.57, h.Calibration(), 0.2)
+		assert.InDelta(t, 1.20, h.Calibration(), 0.2)
 	})
 
 	t.Run("clamped_to_bounds", func(t *testing.T) {
@@ -86,9 +86,9 @@ func TestHistory_Calibration(t *testing.T) {
 		t.Cleanup(resetCalibrationForTest)
 		h := NewHistory(8192)
 		h.Append(Message{Role: RoleUser, Content: strings.Repeat("x", 400)})
-		// raw 104, real 208 -> ratio 2.0; EMA converges over many updates
+		// raw 108, real 216 -> ratio 2.0; EMA converges over many updates
 		for range 50 {
-			h.SetPromptTokens(208)
+			h.SetPromptTokens(216)
 		}
 		assert.InDelta(t, 2.0, h.Calibration(), 0.05)
 	})
@@ -106,15 +106,15 @@ func TestHistory_WireShape(t *testing.T) {
 		h := NewHistoryForModel(8192, "wire-est", stripAll)
 		h.Append(Message{Role: RoleUser, Content: strings.Repeat("a", 400)})
 		h.Append(Message{Role: RoleAssistant, Content: thinkContent})
-		// Stored raw is 211; the wire shape strips the think block leaving 108.
-		assert.Equal(t, 108, h.EstimateTokens())
+		// Stored raw is 221; the wire shape strips the think block leaving 116.
+		assert.Equal(t, 116, h.EstimateTokens())
 	})
 
 	t.Run("calibration_uses_wire_estimate", func(t *testing.T) {
 		h := NewHistoryForModel(8192, "wire-cal", stripAll)
 		h.Append(Message{Role: RoleUser, Content: strings.Repeat("a", 400)})
 		h.Append(Message{Role: RoleAssistant, Content: thinkContent})
-		// real 216 over wire raw 108 -> observed ratio 2.0; stored raw would give ~1.02.
+		// real 216 over wire raw 108 -> observed ratio 2.0; stored raw 221 would give ~1.26.
 		h.RecordWireEstimate(108)
 		h.SetPromptTokens(216)
 		assert.InDelta(t, 1.3, h.Calibration(), 0.001)
@@ -123,11 +123,11 @@ func TestHistory_WireShape(t *testing.T) {
 	t.Run("growth_uses_wire_shape", func(t *testing.T) {
 		h := NewHistoryForModel(8192, "wire-growth", stripAll)
 		h.Append(Message{Role: RoleUser, Content: strings.Repeat("a", 400)})
-		h.RecordWireEstimate(104)
-		h.SetPromptTokens(104)
+		h.RecordWireEstimate(108)
+		h.SetPromptTokens(108)
 		h.Append(Message{Role: RoleAssistant, Content: thinkContent})
 		// Growth is estimated over the stripped shape, not the stored think content.
-		assert.Equal(t, 108, h.EstimateTokens())
+		assert.Equal(t, 116, h.EstimateTokens())
 	})
 
 	t.Run("wire_estimate_reset_on_replace", func(t *testing.T) {
@@ -136,7 +136,7 @@ func TestHistory_WireShape(t *testing.T) {
 		h.ReplaceAll(nil)
 		h.Append(Message{Role: RoleUser, Content: strings.Repeat("a", 400)})
 		// Falls back to the stored-shape estimate once the wire estimate is cleared.
-		h.SetPromptTokens(208)
+		h.SetPromptTokens(216)
 		assert.InDelta(t, 1.3, h.Calibration(), 0.001)
 	})
 }
