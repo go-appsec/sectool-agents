@@ -7,6 +7,7 @@ import (
 	iofs "io/fs"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -148,7 +149,8 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 			return nil, fmt.Errorf("--prompt: file %s is empty", c.Prompt)
 		}
 		c.Prompt = trimmed
-	} else if err != nil && !errors.Is(err, iofs.ErrNotExist) {
+	} else if err != nil && !errors.Is(err, iofs.ErrNotExist) && !errors.Is(err, syscall.ENAMETOOLONG) {
+		// ENAMETOOLONG means the value is literal prompt text too long to be a path
 		return nil, fmt.Errorf("--prompt: stat %s: %w", c.Prompt, err)
 	}
 	c.MaxWorkers = min(max(c.MaxWorkers, MinWorkers), MaxWorkers)
