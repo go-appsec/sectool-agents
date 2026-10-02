@@ -20,7 +20,7 @@ Use `secagent` when you want autonomous security exploration driven by any OpenA
 
 By default, the run begins with an **initial recon** pass — a dedicated recon worker that maps the target's surface area, retires at the end of iteration 1, and whose summary is anchored into every subsequent worker's system prompt and the verifier's per-iter compose. Pass `--skip-recon` to disable this and have the run start with a regular testing worker against `--prompt` (no recon summary anchor for downstream workers). See "How It Works" step 3 for the full mechanics.
 
-A separate **log model** can be configured (`--log-model`) for cheap LLM operations that don't need the main flagship model: the narrator, candidate-dedup classification, and async-merge classification. It shares the main client pool — only the model identifier on each request differs. Defaults to `--model` when unset. Worker-retire and recon-end recaps stay on the main model since those summaries are load-bearing.
+A separate **log model** can be configured (`--log-model`) for the cheap LLM operations that don't need the main flagship model: the narrator. It shares the main client pool — only the model identifier on each request differs. Defaults to `--model` when unset. Candidate-dedup and async-merge classification deliberately stay on the main model (the log model produced too many false-merge verdicts), as do worker-retire and recon-end recaps since those summaries are load-bearing.
 
 Splitting verification and direction into separate clients with separate system prompts forces each role to do its job thoroughly — a single-turn orchestrator tends to short-circuit both.
 
@@ -89,7 +89,7 @@ bin/secagent \
 | `--base-url` | - | OpenAI-compatible base URL |
 | `--api-key` | - | Optional API key |
 | `--model` | - | Main model ID (workers, verifier, director, boundary-summarize) |
-| `--log-model` | (= `--model`) | Model ID for narrator, candidate dedup, async-merge classify |
+| `--log-model` | (= `--model`) | Model ID for the narrator (dedup/merge classify stay on `--model`) |
 | `--agent-pool-size` | `4` | Concurrent model-request bound (shared pool) |
 
 **Context / compaction**
@@ -200,11 +200,11 @@ Workers do not write finding documents themselves — that's the verifier's job 
 
 ### Candidate dedup pipeline
 
-Every `report_finding_candidate` call runs through a cheap LLM dedup check (log model) against the digests of already-filed findings before the candidate enters the pool. Three outcomes:
+Every `report_finding_candidate` call runs through an LLM dedup check (main model) against the digests of already-filed findings before the candidate enters the pool. Three outcomes:
 
 - **unique** — candidate enters the pool and is presented to the verifier next phase.
 - **duplicate** — rejected at the tool boundary; the worker is told which finding already covers it and to pivot to a different angle.
-- **merge** — acknowledged synchronously to the worker; the candidate's evidence is queued onto a background pool with bounded concurrency and a capped backlog (submissions arriving when the backlog is full fail fast into the pending-candidate pool). The pool opens the matched finding, calls the log model again to merge the new evidence in, and writes the result. The controller waits on outstanding merges at shutdown so no work is lost.
+- **merge** — acknowledged synchronously to the worker; the candidate's evidence is queued onto a background pool with bounded concurrency and a capped backlog (submissions arriving when the backlog is full fail fast into the pending-candidate pool). The pool opens the matched finding, calls the main model again to merge the new evidence in, and writes the result. The controller waits on outstanding merges at shutdown so no work is lost.
 
 Findings filed by the verifier go through a similar dedup pass before being written to disk (`writer.MatchesFiled` deterministic match plus an LLM review for soft matches), and pending candidates that aren't explicitly linked via `supersedes_candidate_ids` are tier-matched so the verifier can leave the linkage implicit. Only the unambiguous title+endpoint tier resolves candidates to `verified`; looser matches (endpoint-only, title-only) are logged as `candidate match-fallback` with the candidate titles and left pending for an explicit verdict in a later substep or iteration.
 
@@ -274,7 +274,7 @@ findings/
 └── ...
 ```
 
-Each file has Title, Severity, Affected Endpoint, Description, Reproduction Steps, Evidence, Impact, and a **Verification** section in which the verifier records how it reproduced the issue. Findings are deduplicated by title-slug and canonicalized endpoint plus an LLM soft-match review before write; merges from later iterations re-open and rewrite the matched file via the log model.
+Each file has Title, Severity, Affected Endpoint, Description, Reproduction Steps, Evidence, Impact, and a **Verification** section in which the verifier records how it reproduced the issue. Findings are deduplicated by title-slug and canonicalized endpoint plus an LLM soft-match review before write; merges from later iterations re-open and rewrite the matched file via the main model.
 
 ## Logs
 

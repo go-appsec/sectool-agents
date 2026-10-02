@@ -15,8 +15,8 @@ type Config struct {
 	// Connection
 	BaseURL       string
 	APIKey        string
-	Model         string // workers, verifier, director, summarizer, verifier-side dedup
-	LogModel      string // narrator, candidate-dedup classifier, async-merge; defaults to Model
+	Model         string // workers, verifier, director, summarizer, dedup/merge classify
+	LogModel      string // narrator; defaults to Model
 	AgentPoolSize int    // shared pool size
 
 	// Context / compaction
@@ -88,7 +88,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.BaseURL, "base-url", "", "OpenAI-compatible base URL")
 	fs.StringVar(&c.APIKey, "api-key", "", "optional API key")
 	fs.StringVar(&c.Model, "model", "", "main model ID (workers, verifier, director, summarizer)")
-	fs.StringVar(&c.LogModel, "log-model", "", "model ID for narrator + candidate dedup; defaults to --model")
+	fs.StringVar(&c.LogModel, "log-model", "", "model ID for the narrator; defaults to --model")
 	fs.IntVar(&c.AgentPoolSize, "agent-pool-size", 4, "concurrent model request bound (shared pool)")
 
 	fs.IntVar(&c.MaxContext, "max-context", 200000, "main-model context window (tokens)")

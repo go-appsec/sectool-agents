@@ -59,7 +59,7 @@ Reading any single file under `secagent/` underspecifies the system — the mult
 - **`cli/`** — terminal color helpers used by the narrator.
 - **`util/`** — small string and JSON helpers.
 
-Everything that drives an LLM call is funnelled through the `Agent` interface. The orchestrator builds agents through an `AgentFactory` (currently `OpenAIFactory`) so tests can substitute `FakeAgent` and exercise full phase logic without an LLM. A separate **log model** (`--log-model`) is used for cheap LLM ops (narrator, candidate-dedup classification, async-merge classification); it shares the client pool, only the model identifier differs per request.
+Everything that drives an LLM call is funnelled through the `Agent` interface. The orchestrator builds agents through an `AgentFactory` (currently `OpenAIFactory`) so tests can substitute `FakeAgent` and exercise full phase logic without an LLM. A separate **log model** (`--log-model`) is used for the narrator; it shares the client pool, only the model identifier differs per request. Candidate-dedup and async-merge classification deliberately stay on the main model (the log model produced too many false-merge verdicts).
 
 The recon-pass mechanics, `autonomous_budget` semantics, dedup pipeline, candidate/finding linkage rules, premature-`end_run` guard, and graceful-shutdown ladder are documented in detail in `secagent/README.md` — read that before changing orchestrator behavior.
 
