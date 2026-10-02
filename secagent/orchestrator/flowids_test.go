@@ -27,10 +27,10 @@ func TestExtractFlowIDs(t *testing.T) {
 		{
 			name: "nested_slice",
 			inputs: []any{[]any{
-				map[string]any{"flow_a": "IDAaA11"},
-				map[string]any{"flow_b": "IDBbB22"},
+				map[string]any{"flow_a": "IDAaA1"},
+				map[string]any{"flow_b": "IDBbB2"},
 			}},
-			want: []string{"IDAaA11", "IDBbB22"},
+			want: []string{"IDAaA1", "IDBbB2"},
 		},
 		{
 			name:   "quoted_json_style",
@@ -61,6 +61,26 @@ func TestExtractFlowIDs(t *testing.T) {
 			name:   "rejects_invalid_map_value",
 			inputs: []any{map[string]any{"flow_id": "ab1", "flow_a": "abc-123!"}},
 			want:   nil,
+		},
+		{
+			name:   "four_char_prose_value",
+			inputs: []any{"flow_id: ab12, flow_a=xyz9"},
+			want:   []string{"ab12", "xyz9"},
+		},
+		{
+			name:   "rejects_glued_value",
+			inputs: []any{"flow_id: abc123def", "flow_id:abc123and more"},
+			want:   nil,
+		},
+		{
+			name:   "rejects_oversized_map_value",
+			inputs: []any{map[string]any{"flow_id": "abc123def", "flow_b": "abcdefgh"}},
+			want:   nil,
+		},
+		{
+			name:   "value_before_punctuation",
+			inputs: []any{"flow_id: abc123.", "flow_id=def456,"},
+			want:   []string{"abc123", "def456"},
 		},
 		{
 			name:   "numeric_map_value",

@@ -6,15 +6,20 @@ import (
 	"strings"
 )
 
-// Flow IDs (sectool/service/ids/ids.go): base62, default length 6, entity IDs 4.
+// flowIDShape is the base62 ID shape minted by sectool/service/ids:
+// flows length 6, entity IDs 4. Exact lengths reject glued tokens instead of
+// truncating them; all flow-ID matching must use this shape.
+const flowIDShape = `[0-9A-Za-z]{6}|[0-9A-Za-z]{4}`
+
 // The key requires word boundaries on both sides and an explicit [:=]
 // separator so suffix-embedded names (workflow_id) and bare prose never match.
+// The trailing word boundary rejects glued prose (flow_id:abc123def).
 var flowIDRegex = regexp.MustCompile(
-	`(?i)\b(?:flow[_ ]?id|flow_a|flow_b|source_flow_id)\b["']?\s*[:=]\s*["']?([0-9A-Za-z]{4,16})`,
+	`(?i)\b(?:flow[_ ]?id|flow_a|flow_b|source_flow_id)\b["']?\s*[:=]\s*["']?(` + flowIDShape + `)\b`,
 )
 
 // Same shape constraint as flowIDRegex, applied to map-key values.
-var flowIDValueRegex = regexp.MustCompile(`^[0-9A-Za-z]{4,16}$`)
+var flowIDValueRegex = regexp.MustCompile(`^(?:` + flowIDShape + `)$`)
 
 var flowIDKeyNames = map[string]bool{
 	"flow_id":        true,
