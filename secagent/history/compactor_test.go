@@ -3,6 +3,7 @@ package history_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -274,6 +275,73 @@ func TestCompactor_TieredFlow(t *testing.T) {
 		})
 		require.NoError(t, c.MaybeCompact(t.Context(), h))
 		assert.Equal(t, 2, report.AuxCallsSkipped)
+	})
+}
+
+func TestCompactor_StaleWriteBackSkipped(t *testing.T) {
+	t.Parallel()
+
+	// concurrentAppend simulates a writer landing while the aux callback is in
+	// flight, invalidating the compactor's snapshot.
+	concurrentAppend := func(h *agent.History) {
+		h.Append(agent.Message{Role: agent.RoleUser, Content: "late append"})
+	}
+
+	t.Run("self_prune_aborts", func(t *testing.T) {
+		var applied bool
+		var cbErrs []error
+		h := buildBigHistory(4096, false)
+		c := history.NewLayeredCompactor(history.CompactorOptions{
+			Compaction: agent.CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				RecoveryThreshold:      0.99,
+				HardTruncateOnOverflow: true,
+			},
+			OnSelfPruneCandidates: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]string, error) {
+				concurrentAppend(h)
+				return []string{"t0", "t1", "t2", "t3"}, nil
+			},
+			OnSelfPruneApplied: func(_ []string) { applied = true },
+			OnCallbackError:    func(err error) { cbErrs = append(cbErrs, err) },
+		})
+		_ = c.MaybeCompact(t.Context(), h)
+		assert.False(t, applied)
+		require.Len(t, cbErrs, 1)
+		require.ErrorIs(t, cbErrs[0], history.ErrStaleSnapshot)
+		assert.True(t, slices.ContainsFunc(h.Snapshot(),
+			func(m agent.Message) bool { return m.Content == "late append" }))
+	})
+
+	t.Run("distill_aborts", func(t *testing.T) {
+		var cbErrs []error
+		h := buildBigHistory(4096, false)
+		c := history.NewLayeredCompactor(history.CompactorOptions{
+			Compaction: agent.CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				RecoveryThreshold:      0.99,
+				HardTruncateOnOverflow: true,
+			},
+			OnSelfPruneCandidates: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]string, error) {
+				return nil, nil
+			},
+			OnDistillResults: func(_ context.Context, _ *history.AuxBudget, snap []agent.Message) ([]agent.Message, error) {
+				concurrentAppend(h)
+				out := slices.Clone(snap)
+				for i := range out {
+					if out[i].Role == agent.RoleTool {
+						out[i].Content = "(distilled batch 1: brief summary)"
+						break
+					}
+				}
+				return out, nil
+			},
+			OnCallbackError: func(err error) { cbErrs = append(cbErrs, err) },
+		})
+		_ = c.MaybeCompact(t.Context(), h)
+		require.Len(t, cbErrs, 1)
+		require.ErrorIs(t, cbErrs[0], history.ErrStaleSnapshot)
+		assert.True(t, slices.ContainsFunc(h.Snapshot(),
+			func(m agent.Message) bool { return m.Content == "late append" }))
 	})
 }
 

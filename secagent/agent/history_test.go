@@ -173,6 +173,34 @@ func TestHistory_ReplaceAllAnchor(t *testing.T) {
 	})
 }
 
+func TestHistory_ReplaceAllIfUnchanged(t *testing.T) {
+	t.Parallel()
+
+	t.Run("applies_when_unchanged", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleUser, Content: "u1"})
+		gen := h.Generation()
+
+		ok := h.ReplaceAllIfUnchanged(gen, []Message{{Role: RoleUser, Content: "replaced"}})
+
+		assert.True(t, ok)
+		assert.Equal(t, "replaced", h.Snapshot()[0].Content)
+		assert.NotEqual(t, gen, h.Generation())
+	})
+
+	t.Run("stale_generation_aborts", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleUser, Content: "u1"})
+		gen := h.Generation()
+		h.Append(Message{Role: RoleUser, Content: "u2"})
+
+		ok := h.ReplaceAllIfUnchanged(gen, []Message{{Role: RoleUser, Content: "replaced"}})
+
+		assert.False(t, ok)
+		assert.Len(t, h.Snapshot(), 2)
+	})
+}
+
 func TestHistory_IterationBoundaryID(t *testing.T) {
 	t.Parallel()
 

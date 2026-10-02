@@ -58,6 +58,9 @@ type History struct {
 	// iterStartID is the HistoryID watermark recorded at iter start.
 	// Iter content = messages with HistoryID > iterStartID.
 	iterStartID uint64
+	// version bumps on every mutation; guards compaction write-backs
+	// via ReplaceAllIfUnchanged.
+	version uint64
 }
 
 const (
@@ -88,6 +91,7 @@ func NewHistoryForModel(maxContext int, model string, wireShape func([]Message) 
 func (h *History) Append(m Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.version++
 	if m.HistoryID == 0 {
 		h.nextID++
 		m.HistoryID = h.nextID
@@ -224,6 +228,33 @@ func (h *History) WireView(msgs []Message) []Message {
 // iteration.
 func (h *History) ReplaceAll(msgs []Message) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.replaceAllLocked(msgs)
+}
+
+// Generation returns a counter bumped on every Append and ReplaceAll. Pair
+// with ReplaceAllIfUnchanged to detect writers between snapshot and apply.
+func (h *History) Generation() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.version
+}
+
+// ReplaceAllIfUnchanged behaves like ReplaceAll but applies only when the
+// message log is unchanged since generation was taken via Generation.
+// Returns false without mutating when a writer landed in between.
+func (h *History) ReplaceAllIfUnchanged(generation uint64, msgs []Message) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.version != generation {
+		return false
+	}
+	h.replaceAllLocked(msgs)
+	return true
+}
+
+func (h *History) replaceAllLocked(msgs []Message) {
+	h.version++
 	h.nextID = 0
 	for i := range msgs {
 		if msgs[i].HistoryID == 0 {
@@ -247,7 +278,6 @@ func (h *History) ReplaceAll(msgs []Message) {
 		h.baselineMsgCount = len(msgs)
 	}
 	h.wireRaw = 0
-	h.mu.Unlock()
 }
 
 // IterationBoundaryID returns the HistoryID watermark for the current iter.

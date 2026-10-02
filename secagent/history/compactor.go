@@ -2,11 +2,16 @@ package history
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
+
+// ErrStaleSnapshot is reported through OnCallbackError when a compaction
+// write-back is dropped because the history changed during the aux callback.
+var ErrStaleSnapshot = errors.New("compaction write-back skipped: history changed during aux callback")
 
 // CompactorOptions configures a LayeredCompactor.
 type CompactorOptions struct {
@@ -105,7 +110,8 @@ func (c *LayeredCompactor) MaybeCompact(ctx context.Context, h *agent.History) e
 	return err
 }
 
-// runSelfPrune applies self-prune drops; fails open on callback errors.
+// runSelfPrune applies self-prune drops; fails open on callback errors and
+// skips the write-back when the history changed during the callback.
 func (c *LayeredCompactor) runSelfPrune(ctx context.Context, h *agent.History,
 	opts CompactorOptions, aux *AuxBudget) agent.CompactionReport {
 	before := h.EstimateTokens()
@@ -113,6 +119,7 @@ func (c *LayeredCompactor) runSelfPrune(ctx context.Context, h *agent.History,
 	ctx, cancel := auxContext(ctx, opts.AuxTimeout)
 	defer cancel()
 	skippedBefore := aux.Skipped()
+	version := h.Generation()
 	snap := h.Snapshot()
 	dropIDs, err := opts.OnSelfPruneCandidates(ctx, aux, snap)
 	report.AuxCallsSkipped = aux.Skipped() - skippedBefore
@@ -136,7 +143,12 @@ func (c *LayeredCompactor) runSelfPrune(ctx context.Context, h *agent.History,
 		return report
 	}
 	pruned, _, _ := PruneToolResults(snap, dropSet, nil)
-	h.ReplaceAll(pruned)
+	if !h.ReplaceAllIfUnchanged(version, pruned) {
+		if opts.OnCallbackError != nil {
+			opts.OnCallbackError(ErrStaleSnapshot)
+		}
+		return report
+	}
 	report.SelfPrunedCalls = len(dropped)
 	report.PassesApplied = append(report.PassesApplied, "self-prune")
 	report.After = h.EstimateTokens()
@@ -147,13 +159,15 @@ func (c *LayeredCompactor) runSelfPrune(ctx context.Context, h *agent.History,
 	return report
 }
 
-// runDistill applies distill replacement; fails open on callback errors.
+// runDistill applies distill replacement; fails open on callback errors and
+// skips the write-back when the history changed during the callback.
 func runDistill(ctx context.Context, h *agent.History, opts CompactorOptions, aux *AuxBudget) agent.CompactionReport {
 	before := h.EstimateTokens()
 	report := agent.CompactionReport{Before: before, After: before}
 	ctx, cancel := auxContext(ctx, opts.AuxTimeout)
 	defer cancel()
 	skippedBefore := aux.Skipped()
+	version := h.Generation()
 	snap := h.Snapshot()
 	replacement, err := opts.OnDistillResults(ctx, aux, snap)
 	report.AuxCallsSkipped = aux.Skipped() - skippedBefore
@@ -170,7 +184,12 @@ func runDistill(ctx context.Context, h *agent.History, opts CompactorOptions, au
 	if distilled == 0 {
 		return report
 	}
-	h.ReplaceAll(replacement)
+	if !h.ReplaceAllIfUnchanged(version, replacement) {
+		if opts.OnCallbackError != nil {
+			opts.OnCallbackError(ErrStaleSnapshot)
+		}
+		return report
+	}
 	report.DistilledResults = distilled
 	report.PassesApplied = append(report.PassesApplied, "distill")
 	report.After = h.EstimateTokens()
