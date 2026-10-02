@@ -736,6 +736,13 @@ func TestMatchPendingCandidatesTiered(t *testing.T) {
 		assert.Equal(t, MatchEndpointOnly, tier)
 	})
 
+	t.Run("terminal_only_title_endpoint", func(t *testing.T) {
+		assert.False(t, MatchNone.Terminal())
+		assert.True(t, MatchTitleAndEndpoint.Terminal())
+		assert.False(t, MatchEndpointOnly.Terminal())
+		assert.False(t, MatchTitleOnly.Terminal())
+	})
+
 	t.Run("no_match_returns_none_tier", func(t *testing.T) {
 		ids, tier := MatchPendingCandidatesTiered(FindingFiled{
 			Title:    "Totally unrelated vulnerability",

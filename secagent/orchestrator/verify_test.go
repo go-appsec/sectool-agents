@@ -152,8 +152,34 @@ func TestRunVerificationPhase(t *testing.T) {
 		assert.Len(t, entries, 1)
 	})
 
-	t.Run("match_fallback_logs_tier", func(t *testing.T) {
-		// Title diverges but endpoint matches: verified via endpoint-only tier with match-fallback log
+	t.Run("implicit_title_endpoint_resolves", func(t *testing.T) {
+		// Title similar AND endpoint matches: implicit link resolves verified
+		writer := newTestFindingWriter(t, t.TempDir())
+		candidates := NewCandidatePool()
+		c1 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Reflected XSS in search param",
+			Severity: "high", Endpoint: "GET /search",
+		})
+
+		decisions := NewDecisionQueue()
+		verifier := &agent.FakeAgent{Turns: []agent.TurnSummary{{}}}
+		verifier.OnDrain = func(_ int) {
+			decisions.AddFinding(FindingFiled{
+				Title:             "Reflected XSS in search",
+				Severity:          "high",
+				Endpoint:          "GET /search",
+				VerificationNotes: "ok",
+			})
+			decisions.SetVerificationDone("done")
+		}
+
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, nil)
+		assert.Equal(t, "verified", candidates.ByID(c1).Status)
+	})
+
+	t.Run("match_fallback_leaves_pending", func(t *testing.T) {
+		// Title diverges but endpoint matches: too ambiguous to resolve,
+		// candidate stays pending with a match-fallback log for audit
 		writer := newTestFindingWriter(t, t.TempDir())
 		candidates := NewCandidatePool()
 		c1 := candidates.Add(AddInput{
@@ -177,10 +203,40 @@ func TestRunVerificationPhase(t *testing.T) {
 		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, log)
 		require.NoError(t, log.Close())
 
-		assert.Equal(t, "verified", candidates.ByID(c1).Status)
+		assert.Equal(t, "pending", candidates.ByID(c1).Status)
 		content := mustReadFile(t, path)
 		assert.Contains(t, content, `"msg":"candidate match-fallback"`)
 		assert.Contains(t, content, `"tier":"endpoint-only"`)
+		assert.Contains(t, content, "Standard User Cookie Reuse on Admin API")
+	})
+
+	t.Run("title_only_fallback_leaves_pending", func(t *testing.T) {
+		// Similar title but diverging endpoint: candidate stays pending
+		writer := newTestFindingWriter(t, t.TempDir())
+		candidates := NewCandidatePool()
+		c1 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Reflected XSS in search",
+			Severity: "high", Endpoint: "GET /other",
+		})
+
+		decisions := NewDecisionQueue()
+		verifier := &agent.FakeAgent{Turns: []agent.TurnSummary{{}}}
+		verifier.OnDrain = func(_ int) {
+			decisions.AddFinding(FindingFiled{
+				Title:             "Reflected XSS in search",
+				Severity:          "high",
+				Endpoint:          "GET /search",
+				VerificationNotes: "ok",
+			})
+			decisions.SetVerificationDone("done")
+		}
+
+		log, path, _ := newCapturedLogger(t)
+		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, log)
+		require.NoError(t, log.Close())
+
+		assert.Equal(t, "pending", candidates.ByID(c1).Status)
+		assert.Contains(t, mustReadFile(t, path), `"tier":"title-only"`)
 	})
 
 	t.Run("orphan_candidate_logged_when_no_match", func(t *testing.T) {

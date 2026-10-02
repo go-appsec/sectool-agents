@@ -108,6 +108,12 @@ func (t MatchTier) String() string {
 	return "none"
 }
 
+// Terminal reports whether the tier is unambiguous enough to resolve a
+// pending candidate to verified without explicit supersedes links.
+func (t MatchTier) Terminal() bool {
+	return t == MatchTitleAndEndpoint
+}
+
 // MatchPendingCandidates returns pending candidate IDs that match filed.
 // Prefer MatchPendingCandidatesTiered when the matching tier is needed.
 func MatchPendingCandidates(filed FindingFiled, pending []FindingCandidate) []string {

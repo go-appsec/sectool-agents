@@ -206,7 +206,7 @@ Every `report_finding_candidate` call runs through a cheap LLM dedup check (log 
 - **duplicate** — rejected at the tool boundary; the worker is told which finding already covers it and to pivot to a different angle.
 - **merge** — acknowledged synchronously to the worker; the candidate's evidence is queued onto a background pool with bounded concurrency and a capped backlog (submissions arriving when the backlog is full fail fast into the pending-candidate pool). The pool opens the matched finding, calls the log model again to merge the new evidence in, and writes the result. The controller waits on outstanding merges at shutdown so no work is lost.
 
-Findings filed by the verifier go through a similar dedup pass before being written to disk (`writer.MatchesFiled` deterministic match plus an LLM review for soft matches), and pending candidates that aren't explicitly linked via `supersedes_candidate_ids` are tier-matched (title+endpoint, then endpoint-only, then title-only) so the verifier can leave the linkage implicit when the relationship is obvious.
+Findings filed by the verifier go through a similar dedup pass before being written to disk (`writer.MatchesFiled` deterministic match plus an LLM review for soft matches), and pending candidates that aren't explicitly linked via `supersedes_candidate_ids` are tier-matched so the verifier can leave the linkage implicit. Only the unambiguous title+endpoint tier resolves candidates to `verified`; looser matches (endpoint-only, title-only) are logged as `candidate match-fallback` with the candidate titles and left pending for an explicit verdict in a later substep or iteration.
 
 ## Orchestrator Tools (phase-gated decision surface)
 
