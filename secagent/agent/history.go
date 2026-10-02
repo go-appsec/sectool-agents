@@ -42,7 +42,12 @@ func (m Message) IsErrorResult() bool {
 type History struct {
 	mu       sync.Mutex
 	messages []Message
-	// token accounting
+	// model scopes the token calibration; wireShape maps stored messages to
+	// the shape sent on the wire before estimation (nil keeps stored shape).
+	model     string
+	wireShape func([]Message) []Message
+	// wireRaw is the last recorded uncalibrated estimate of the wire shape.
+	wireRaw          int
 	lastPromptTokens int
 	baselineMsgCount int // messages length when lastPromptTokens was recorded
 	maxContext       int
@@ -66,10 +71,17 @@ const (
 
 // NewHistory returns an empty History with the given context ceiling.
 func NewHistory(maxContext int) *History {
+	return NewHistoryForModel(maxContext, "", nil)
+}
+
+// NewHistoryForModel returns an empty History with the given context ceiling and model-scoped
+// token calibration. wireShape optionally maps stored messages to their wire shape before
+// estimation; nil keeps the stored shape.
+func NewHistoryForModel(maxContext int, model string, wireShape func([]Message) []Message) *History {
 	if maxContext <= 0 {
 		maxContext = 32768
 	}
-	return &History{maxContext: maxContext}
+	return &History{maxContext: maxContext, model: model, wireShape: wireShape}
 }
 
 // Append adds m to history. Callers should pre-populate ToolName and Summary120 on tool messages.
@@ -85,14 +97,26 @@ func (h *History) Append(m Message) {
 	h.messages = append(h.messages, m)
 }
 
-// SetPromptTokens records the server-reported prompt token count.
+// SetPromptTokens records the server-reported prompt token count and feeds the model-scoped
+// calibration EMA, comparing against the recorded wire estimate when available.
 func (h *History) SetPromptTokens(n int) {
 	h.mu.Lock()
-	raw := h.rawEstimateRangeLocked(0, len(h.messages))
+	raw := h.wireRaw
+	if raw <= 0 {
+		raw = h.rawEstimateRangeLocked(0, len(h.messages))
+	}
 	h.lastPromptTokens = n
 	h.baselineMsgCount = len(h.messages)
 	h.mu.Unlock()
-	ObservePromptTokens(n, raw)
+	ObservePromptTokens(h.model, n, raw)
+}
+
+// RecordWireEstimate stores the uncalibrated token estimate of the message shape actually sent on
+// the wire, keeping calibration and growth estimates like-for-like. Cleared on history replacement.
+func (h *History) RecordWireEstimate(raw int) {
+	h.mu.Lock()
+	h.wireRaw = raw
+	h.mu.Unlock()
 }
 
 // MaxContext returns the configured ceiling.
@@ -131,12 +155,14 @@ func (h *History) ShrinkEffectiveMaxOnRejection(estimateAtRejection int) {
 	}
 }
 
-// Calibration returns the current learned multiplier.
+// Calibration returns the learned multiplier for the history's model.
 func (h *History) Calibration() float64 {
-	return Calibration()
+	return Calibration(h.model)
 }
 
 // EstimateTokens returns the estimated total prompt token count for the current history.
+// Anchored on the last server-reported count when available, with growth estimated over the
+// wire shape so stripped content does not skew the result.
 func (h *History) EstimateTokens() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -153,10 +179,11 @@ func (h *History) EstimateTokens() int {
 
 // estimateRangeLocked returns the calibrated token estimate for messages in [start, end).
 func (h *History) estimateRangeLocked(start, end int) int {
-	return int(float64(h.rawEstimateRangeLocked(start, end)) * Calibration())
+	return int(float64(h.rawEstimateRangeLocked(start, end)) * Calibration(h.model))
 }
 
 // rawEstimateRangeLocked returns the uncalibrated token estimate for messages in [start, end).
+// Messages are mapped to their wire shape first so estimates match what the server priced.
 func (h *History) rawEstimateRangeLocked(start, end int) int {
 	if start < 0 {
 		start = 0
@@ -164,9 +191,13 @@ func (h *History) rawEstimateRangeLocked(start, end int) int {
 	if end > len(h.messages) {
 		end = len(h.messages)
 	}
+	msgs := h.messages[start:end]
+	if h.wireShape != nil {
+		msgs = h.wireShape(msgs)
+	}
 	var total int
-	for i := start; i < end; i++ {
-		total += rawMessageTokens(h.messages[i])
+	for i := range msgs {
+		total += rawMessageTokens(msgs[i])
 	}
 	return total
 }
@@ -196,6 +227,7 @@ func (h *History) ReplaceAll(msgs []Message) {
 	h.messages = msgs
 	h.lastPromptTokens = 0
 	h.baselineMsgCount = 0
+	h.wireRaw = 0
 	h.mu.Unlock()
 }
 

@@ -16,7 +16,7 @@ const (
 	ReasoningFormatUnknown ReasoningFormat = iota
 	// ReasoningFormatNone model does not emit any thinking (small / non-reasoning).
 	ReasoningFormatNone
-	// ReasoningFormatInline model embeds `<think>...</think>` inside content.
+	// ReasoningFormatInline model embeds inline think tags inside content.
 	ReasoningFormatInline
 	// ReasoningFormatStructured model populates the `reasoning_content` field.
 	ReasoningFormatStructured
@@ -58,11 +58,13 @@ type ReasoningHandler interface {
 	Tail(resp ChatResponse) string
 }
 
-// NewReasoningHandler returns the handler for f. ReasoningFormatUnknown maps to the inline handler.
+// NewReasoningHandler returns the handler for f. ReasoningFormatUnknown maps
+// to the inline handler. ReasoningFormatNone returns a self-healing handler
+// that upgrades to inline when real responses show inline think tags.
 func NewReasoningHandler(f ReasoningFormat) ReasoningHandler {
 	switch f {
 	case ReasoningFormatNone:
-		return noReasoningHandler{}
+		return &autoReasoningHandler{h: noReasoningHandler{}}
 	case ReasoningFormatStructured:
 		return structuredHandler{}
 	default:
@@ -70,7 +72,54 @@ func NewReasoningHandler(f ReasoningFormat) ReasoningHandler {
 	}
 }
 
-// inlineHandler handles models that emit `<think>...</think>` in content.
+// autoReasoningHandler wraps a base handler and self-heals a misdetected
+// ReasoningFormatNone: once any response shows inline think tags it upgrades
+// to the inline handler for this and all later calls.
+type autoReasoningHandler struct {
+	mu sync.Mutex
+	h  ReasoningHandler
+}
+
+// current returns the active handler under lock.
+func (a *autoReasoningHandler) current() ReasoningHandler {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.h
+}
+
+func (a *autoReasoningHandler) Format() ReasoningFormat {
+	return a.current().Format()
+}
+
+// Ingest upgrades to the inline handler before delegating when resp shows
+// inline think tags.
+func (a *autoReasoningHandler) Ingest(resp ChatResponse) (string, string) {
+	a.mu.Lock()
+	if a.h.Format() == ReasoningFormatNone && HasInlineThink(resp.Content) {
+		a.h = inlineHandler{}
+	}
+	h := a.h
+	a.mu.Unlock()
+	return h.Ingest(resp)
+}
+
+func (a *autoReasoningHandler) Replay(msgs []Message, keepLastN int) []Message {
+	return a.current().Replay(msgs, keepLastN)
+}
+
+func (a *autoReasoningHandler) ForSummary(msgs []Message) []Message {
+	return a.current().ForSummary(msgs)
+}
+
+func (a *autoReasoningHandler) Extract(resp ChatResponse) string {
+	return a.current().Extract(resp)
+}
+
+func (a *autoReasoningHandler) Tail(resp ChatResponse) string {
+	return a.current().Tail(resp)
+}
+
+// inlineHandler handles models that embed think tags in content.
 type inlineHandler struct{}
 
 func (inlineHandler) Format() ReasoningFormat { return ReasoningFormatInline }
@@ -118,7 +167,7 @@ func (structuredHandler) Replay(msgs []Message, _ int) []Message {
 }
 
 func (structuredHandler) ForSummary(msgs []Message) []Message {
-	// Unify to inline: wrap structured reasoning as <think>...</think> and prepend to Content so the
+	// Unify to inline: wrap structured reasoning in think tags and prepend to Content so the
 	// summary prompt looks the same regardless of source. Safe for one-shot summary calls;
 	// the summary model's output is processed via StripThinkBlocks after.
 	out := slices.Clone(msgs)
@@ -127,7 +176,7 @@ func (structuredHandler) ForSummary(msgs []Message) []Message {
 		if m.Role != RoleAssistant || m.ReasoningContent == "" {
 			continue
 		}
-		wrapped := "<think>" + m.ReasoningContent + "</think>"
+		wrapped := wrapThinkBlock(m.ReasoningContent)
 		if m.Content != "" {
 			wrapped = wrapped + "\n" + m.Content
 		}

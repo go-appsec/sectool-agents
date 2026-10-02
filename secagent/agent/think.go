@@ -7,35 +7,72 @@ import (
 	"unicode/utf8"
 )
 
-// Think-block variants seen in practice; case-insensitive, non-greedy.
-var thinkBlockPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?is)<think>.*?</think>`),
-	regexp.MustCompile(`(?is)<thinking>.*?</thinking>`),
-	regexp.MustCompile(`(?is)<\|thinking\|>.*?<\|/thinking\|>`),
-	regexp.MustCompile(`(?is)<reasoning>.*?</reasoning>`),
+// thinkTagNames are the tag words recognized as inline think delimiters.
+// Single source of truth: open/close/block patterns and the synthesized
+// canonical tags all derive from this list.
+var thinkTagNames = []string{"think", "thinking", "reasoning"}
+
+// Canonical inline tags, used when synthesizing an inline think block.
+const (
+	thinkOpenTag  = "<think>"
+	thinkCloseTag = "</think>"
+)
+
+var (
+	// Patterns tolerate whitespace/pipe variants around the tag names so
+	// `< think>`, `</think>`, `<|thinking|>`, `< think >`, etc. all match.
+	thinkNamePattern  = `(?:` + strings.Join(thinkTagNames, "|") + `)`
+	thinkOpenPattern  = `<[\s|]*` + thinkNamePattern + `[\s|]*>`
+	thinkClosePattern = `<[\s|]*/[\s|]*` + thinkNamePattern + `[\s|]*>`
+
+	thinkOpenRe  = regexp.MustCompile(`(?i)` + thinkOpenPattern)
+	thinkCloseRe = regexp.MustCompile(`(?i)` + thinkClosePattern)
+	thinkBlockRe = regexp.MustCompile(`(?is)` + thinkOpenPattern + `.*?` + thinkClosePattern)
+	thinkLeadRe  = regexp.MustCompile(`(?i)^\s*` + thinkOpenPattern)
+)
+
+// wrapThinkBlock wraps s in the canonical inline think tags.
+func wrapThinkBlock(s string) string {
+	return thinkOpenTag + s + thinkCloseTag
 }
 
-// Literal open/close strings mirroring thinkBlockPatterns for unclosed-tag detection; must be kept in sync.
-var thinkTagPairs = []struct {
-	open, close string
-}{
-	{"<think>", "</think>"},
-	{"<thinking>", "</thinking>"},
-	{"<|thinking|>", "<|/thinking|>"},
-	{"<reasoning>", "</reasoning>"},
-}
-
-// StripThinkBlocks removes recognized thinking-block variants from s.
-// Unclosed blocks are left intact; pair with HasLeadingThinkOpen to detect them.
+// StripThinkBlocks removes recognized thinking-block variants from s,
+// handling mixed and nested blocks. Unclosed blocks are left intact; pair
+// with HasLeadingThinkOpen to detect them.
 func StripThinkBlocks(s string) string {
-	out := s
-	for _, re := range thinkBlockPatterns {
-		out = re.ReplaceAllString(out, "")
+	opens := thinkOpenRe.FindAllStringIndex(s, -1)
+	closes := thinkCloseRe.FindAllStringIndex(s, -1)
+	if len(opens) == 0 {
+		return s
 	}
-	return out
+	var b strings.Builder
+	b.Grow(len(s))
+	depth, openStart, prev := 0, 0, 0
+	oi, ci := 0, 0
+	for oi < len(opens) || ci < len(closes) {
+		switch {
+		case ci >= len(closes) || (oi < len(opens) && opens[oi][0] < closes[ci][0]):
+			if depth == 0 {
+				openStart = opens[oi][0]
+			}
+			depth++
+			oi++
+		default:
+			if depth > 0 {
+				depth--
+				if depth == 0 {
+					b.WriteString(s[prev:openStart])
+					prev = closes[ci][1]
+				}
+			}
+			ci++
+		}
+	}
+	b.WriteString(s[prev:])
+	return b.String()
 }
 
-// FilterThinkBlocks returns a copy of msgs with `<think>` blocks preserved on the last keepLastN
+// FilterThinkBlocks returns a copy of msgs with think blocks preserved on the last keepLastN
 // assistant messages and stripped from older assistants. keepLastN <= 0 strips think from every
 // assistant message. Non-assistant messages pass through untouched.
 func FilterThinkBlocks(msgs []Message, keepLastN int) []Message {
@@ -59,36 +96,24 @@ func FilterThinkBlocks(msgs []Message, keepLastN int) []Message {
 
 // HasLeadingThinkOpen reports whether s begins with an opening think tag, signaling an unclosed block.
 func HasLeadingThinkOpen(s string) bool {
-	lower := strings.ToLower(strings.TrimSpace(s))
-	for _, p := range thinkTagPairs {
-		if strings.HasPrefix(lower, strings.ToLower(p.open)) {
-			return true
-		}
-	}
-	return false
+	return thinkLeadRe.MatchString(s)
 }
 
-// HasInlineThink reports whether s contains a balanced `<think>...</think>` pair.
+// HasInlineThink reports whether s contains a balanced inline think pair.
 func HasInlineThink(s string) bool {
-	return slices.ContainsFunc(thinkBlockPatterns, func(re *regexp.Regexp) bool { return re.MatchString(s) })
+	return thinkBlockRe.MatchString(s)
 }
 
 // TruncatedThinkTail returns a best-effort tail of the content inside an
 // unclosed think block in s, or "" when no unclosed think tag is found.
 func TruncatedThinkTail(s string) string {
-	lower := strings.ToLower(s)
-	for _, p := range thinkTagPairs {
-		openLow := strings.ToLower(p.open)
-		closeLow := strings.ToLower(p.close)
-		openIdx := strings.LastIndex(lower, openLow)
-		if openIdx < 0 {
+	opens := thinkOpenRe.FindAllStringIndex(s, -1)
+	for i := len(opens) - 1; i >= 0; i-- {
+		after := s[opens[i][1]:]
+		if thinkCloseRe.MatchString(after) {
 			continue
 		}
-		afterStart := openIdx + len(p.open)
-		if strings.Contains(lower[afterStart:], closeLow) {
-			continue
-		}
-		return compactThinkTail(s[afterStart:], 240)
+		return compactThinkTail(after, 240)
 	}
 	return ""
 }

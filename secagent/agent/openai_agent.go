@@ -104,8 +104,10 @@ func NewOpenAIAgent(cfg OpenAIAgentConfig) *OpenAIAgent {
 		cfg.Reasoning = NewReasoningHandler(ReasoningFormatInline)
 	}
 	a := &OpenAIAgent{
-		cfg:      cfg,
-		history:  NewHistory(cfg.MaxContext),
+		cfg: cfg,
+		history: NewHistoryForModel(cfg.MaxContext, cfg.Model, func(msgs []Message) []Message {
+			return cfg.Reasoning.Replay(msgs, cfg.KeepThinkTurns)
+		}),
 		handlers: map[string]ToolHandler{},
 	}
 	if cfg.SystemPrompt != "" {
@@ -578,6 +580,7 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 	a.mu.Unlock()
 
 	msgs := a.buildChatMessages()
+	a.history.RecordWireEstimate(rawChatMessagesTokens(msgs))
 	var hardTruncated bool
 	var retries int
 
@@ -610,6 +613,7 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 				return ChatResponse{}, err
 			}
 			msgs = a.buildChatMessages()
+			a.history.RecordWireEstimate(rawChatMessagesTokens(msgs))
 			continue
 
 		case ErrRateLimit, ErrTransientNet:

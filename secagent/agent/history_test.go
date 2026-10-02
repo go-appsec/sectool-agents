@@ -94,6 +94,53 @@ func TestHistory_Calibration(t *testing.T) {
 	})
 }
 
+func TestHistory_WireShape(t *testing.T) {
+	// Serial: SetPromptTokens mutates the shared calibration EMA, so each subtest
+	// uses its own model bucket to stay isolated.
+	t.Cleanup(resetCalibrationForTest)
+
+	stripAll := func(msgs []Message) []Message { return FilterThinkBlocks(msgs, 0) }
+	thinkContent := "<think>" + strings.Repeat("t", 400) + "</think>"
+
+	t.Run("estimate_uses_wire_shape", func(t *testing.T) {
+		h := NewHistoryForModel(8192, "wire-est", stripAll)
+		h.Append(Message{Role: RoleUser, Content: strings.Repeat("a", 400)})
+		h.Append(Message{Role: RoleAssistant, Content: thinkContent})
+		// Stored raw is 211; the wire shape strips the think block leaving 108.
+		assert.Equal(t, 108, h.EstimateTokens())
+	})
+
+	t.Run("calibration_uses_wire_estimate", func(t *testing.T) {
+		h := NewHistoryForModel(8192, "wire-cal", stripAll)
+		h.Append(Message{Role: RoleUser, Content: strings.Repeat("a", 400)})
+		h.Append(Message{Role: RoleAssistant, Content: thinkContent})
+		// real 216 over wire raw 108 -> observed ratio 2.0; stored raw would give ~1.02.
+		h.RecordWireEstimate(108)
+		h.SetPromptTokens(216)
+		assert.InDelta(t, 1.3, h.Calibration(), 0.001)
+	})
+
+	t.Run("growth_uses_wire_shape", func(t *testing.T) {
+		h := NewHistoryForModel(8192, "wire-growth", stripAll)
+		h.Append(Message{Role: RoleUser, Content: strings.Repeat("a", 400)})
+		h.RecordWireEstimate(104)
+		h.SetPromptTokens(104)
+		h.Append(Message{Role: RoleAssistant, Content: thinkContent})
+		// Growth is estimated over the stripped shape, not the stored think content.
+		assert.Equal(t, 108, h.EstimateTokens())
+	})
+
+	t.Run("wire_estimate_reset_on_replace", func(t *testing.T) {
+		h := NewHistoryForModel(8192, "wire-reset", nil)
+		h.RecordWireEstimate(100)
+		h.ReplaceAll(nil)
+		h.Append(Message{Role: RoleUser, Content: strings.Repeat("a", 400)})
+		// Falls back to the stored-shape estimate once the wire estimate is cleared.
+		h.SetPromptTokens(208)
+		assert.InDelta(t, 1.3, h.Calibration(), 0.001)
+	})
+}
+
 func TestHistory_IterationBoundaryID(t *testing.T) {
 	t.Parallel()
 
