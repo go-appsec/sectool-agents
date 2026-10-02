@@ -209,8 +209,10 @@ func (h *History) Snapshot() []Message {
 	return slices.Clone(h.messages)
 }
 
-// ReplaceAll replaces the message slice with msgs and resets the token baseline. Preserves the
-// iteration watermark; use ResetIterationBoundary when the swap should also end the current iteration.
+// ReplaceAll replaces the message slice with msgs and re-bases the token anchor onto the
+// replacement, so estimates stay on one accounting basis across the swap. Preserves the
+// iteration watermark; use ResetIterationBoundary when the swap should also end the current
+// iteration.
 func (h *History) ReplaceAll(msgs []Message) {
 	h.mu.Lock()
 	h.nextID = 0
@@ -224,9 +226,17 @@ func (h *History) ReplaceAll(msgs []Message) {
 			h.nextID = msgs[i].HistoryID
 		}
 	}
+	// keep estimates comparable across the swap: carry the prompt-side overhead
+	// recorded with the last server count onto the replacement messages
+	var prevBase int
+	if h.lastPromptTokens > 0 {
+		prevBase = h.estimateRangeLocked(0, h.baselineMsgCount)
+	}
 	h.messages = msgs
-	h.lastPromptTokens = 0
-	h.baselineMsgCount = 0
+	if h.lastPromptTokens > 0 {
+		h.lastPromptTokens += h.estimateRangeLocked(0, len(msgs)) - prevBase
+		h.baselineMsgCount = len(msgs)
+	}
 	h.wireRaw = 0
 	h.mu.Unlock()
 }

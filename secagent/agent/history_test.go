@@ -141,6 +141,38 @@ func TestHistory_WireShape(t *testing.T) {
 	})
 }
 
+func TestHistory_ReplaceAllAnchor(t *testing.T) {
+	// Serial: SetPromptTokens mutates the process-wide calibration EMA
+	t.Cleanup(resetCalibrationForTest)
+
+	t.Run("identical_replace_keeps_estimate", func(t *testing.T) {
+		resetCalibrationForTest()
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleUser, Content: "hello world hello world"})
+		h.SetPromptTokens(1000)
+		h.Append(Message{Role: RoleUser, Content: strings.Repeat("g", 400)})
+		anchored := h.EstimateTokens() // server count plus growth
+
+		h.ReplaceAll(h.Snapshot())
+		assert.Equal(t, anchored, h.EstimateTokens())
+	})
+
+	t.Run("shrink_carries_server_overhead", func(t *testing.T) {
+		resetCalibrationForTest()
+		sys := Message{Role: RoleSystem, Content: "sys"}
+		h := NewHistory(8192)
+		h.Append(sys)
+		h.Append(Message{Role: RoleUser, Content: strings.Repeat("a", 400)})
+		h.SetPromptTokens(1000)
+
+		h.ReplaceAll([]Message{sys})
+		// the prompt-side overhead survives the swap, keeping the estimate above
+		// the raw estimate of the surviving message alone
+		assert.Greater(t, h.EstimateTokens(), EstimateMessageTokens(sys))
+	})
+}
+
 func TestHistory_IterationBoundaryID(t *testing.T) {
 	t.Parallel()
 

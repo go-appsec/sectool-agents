@@ -224,6 +224,44 @@ func TestForceHardTruncate(t *testing.T) {
 	})
 }
 
+// Regression: ReplaceAll used to zero the token anchor mid-pass, flipping the estimate
+// basis so a nearly no-op pass could appear to reach the low-watermark target.
+func TestCompactRemainder_AnchorBasis(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no_op_pass_does_not_hit_target", func(t *testing.T) {
+		// model-scoped so SetPromptTokens cannot shift the shared calibration bucket
+		// other parallel tests estimate with
+		const model = "compact-anchor-basis"
+		h := NewHistoryForModel(4096, model, nil)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{Role: RoleUser, Content: strings.Repeat("u", 400)})
+		for i := range 6 {
+			id := strconv.Itoa(i)
+			h.Append(Message{
+				Role:      RoleAssistant,
+				ToolCalls: []ToolCall{{ID: id, Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: RoleTool, ToolCallID: id, ToolName: "t",
+				Content: strings.Repeat("r", 300), Summary120: "result",
+			})
+			h.Append(Message{Role: RoleAssistant, Content: "step " + id + " done."})
+		}
+		// anchor well above the raw estimate, as the server-reported count does
+		h.SetPromptTokens(3000)
+		before := h.EstimateTokens()
+		require.Greater(t, before, 1638) // above the low-watermark target
+
+		report, err := CompactRemainder(h, CompactionOptions{HardTruncateOnOverflow: true})
+		require.NoError(t, err)
+		// the mechanical passes free little, so reaching the target requires the
+		// turn-drop pass instead of an early basis-flip stop
+		assert.Contains(t, report.PassesApplied, "turn-drop")
+		assert.Less(t, report.After, before)
+	})
+}
+
 // buildErrorStreakHistory seeds n consecutive same-tool error tool-results after a single
 // assistant tool_calls message. Drives CompactErrorsOnly's streak-collapse path.
 func buildErrorStreakHistory(maxCtx int, n int) *History {
