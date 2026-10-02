@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-appsec/sectool-agents/secagent/util"
@@ -61,11 +62,10 @@ type OpenAIAgentConfig struct {
 	Compactor Compactor
 }
 
-// OpenAIAgent implements Agent over an OpenAI-compatible endpoint.
-type OpenAIAgent struct {
-	cfg      OpenAIAgentConfig
-	history  *History
-	toolDefs []ToolDef
+// toolRegistry is the immutable snapshot of tool state swapped in by SetTools
+// and read lock-free during dispatch.
+type toolRegistry struct {
+	defs     []ToolDef
 	tools    []ChatTool
 	handlers map[string]ToolHandler
 	// canonHandlers/canonNames provide fallback lookup when a model emits a
@@ -73,8 +73,54 @@ type OpenAIAgent struct {
 	// `mcp__sectool__proxy_poll`). Keyed by canonicalToolName.
 	canonHandlers map[string]ToolHandler
 	canonNames    map[string]string
-	mu            sync.Mutex
-	cancelCtx     func()
+}
+
+// drainHandle wraps a Drain's cancel func so the registered handle can be
+// compared by identity when cleaning up under the mutex.
+type drainHandle struct {
+	cancel context.CancelFunc
+}
+
+// OpenAIAgent implements Agent over an OpenAI-compatible endpoint.
+type OpenAIAgent struct {
+	cfg     OpenAIAgentConfig
+	history *History
+	reg     atomic.Pointer[toolRegistry]
+	mu      sync.Mutex
+	drain   *drainHandle // cancel handle of the active Drain; nil when idle
+}
+
+// buildRegistry derives the immutable lookup structures for defs.
+func buildRegistry(defs []ToolDef) *toolRegistry {
+	reg := &toolRegistry{
+		defs:          slices.Clone(defs),
+		tools:         make([]ChatTool, 0, len(defs)),
+		handlers:      make(map[string]ToolHandler, len(defs)),
+		canonHandlers: make(map[string]ToolHandler, len(defs)),
+		canonNames:    make(map[string]string, len(defs)),
+	}
+	for _, d := range defs {
+		reg.tools = append(reg.tools, ChatTool{
+			Type: "function",
+			Function: ChatToolSchema{
+				Name:        d.Name,
+				Description: d.Description,
+				Parameters:  d.Schema,
+			},
+		})
+		if d.Handler == nil {
+			continue
+		}
+		reg.handlers[d.Name] = d.Handler
+		c := canonicalToolName(d.Name)
+		// First-write wins on canonical collisions: if two registered names canonicalize the same way,
+		// only the first is reachable via fuzzy fallback. Exact lookups still distinguish them.
+		if _, exists := reg.canonHandlers[c]; !exists {
+			reg.canonHandlers[c] = d.Handler
+			reg.canonNames[c] = d.Name
+		}
+	}
+	return reg
 }
 
 // NewOpenAIAgent constructs an agent and seeds history with system prompt.
@@ -108,44 +154,18 @@ func NewOpenAIAgent(cfg OpenAIAgentConfig) *OpenAIAgent {
 		history: NewHistoryForModel(cfg.MaxContext, cfg.Model, func(msgs []Message) []Message {
 			return cfg.Reasoning.Replay(msgs, cfg.KeepThinkTurns)
 		}),
-		handlers: map[string]ToolHandler{},
 	}
+	a.reg.Store(buildRegistry(nil))
 	if cfg.SystemPrompt != "" {
 		a.history.Append(Message{Role: "system", Content: cfg.SystemPrompt})
 	}
 	return a
 }
 
-// SetTools replaces the tool registry (active on next Drain).
+// SetTools atomically replaces the tool registry. Safe to call during a
+// Drain; subsequent dispatches see the new tools.
 func (a *OpenAIAgent) SetTools(defs []ToolDef) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	a.toolDefs = append(a.toolDefs[:0], defs...)
-	a.tools = make([]ChatTool, 0, len(defs))
-	a.handlers = make(map[string]ToolHandler, len(defs))
-	a.canonHandlers = make(map[string]ToolHandler, len(defs))
-	a.canonNames = make(map[string]string, len(defs))
-	for _, d := range defs {
-		a.tools = append(a.tools, ChatTool{
-			Type: "function",
-			Function: ChatToolSchema{
-				Name:        d.Name,
-				Description: d.Description,
-				Parameters:  d.Schema,
-			},
-		})
-		if d.Handler != nil {
-			a.handlers[d.Name] = d.Handler
-			c := canonicalToolName(d.Name)
-			// First-write wins on canonical collisions: if two registered names canonicalize the same way,
-			// only the first is reachable via fuzzy fallback. Exact lookups still distinguish them.
-			if _, exists := a.canonHandlers[c]; !exists {
-				a.canonHandlers[c] = d.Handler
-				a.canonNames[c] = d.Name
-			}
-		}
-	}
+	a.reg.Store(buildRegistry(defs))
 }
 
 // Query appends a user message to history. Does not send.
@@ -153,13 +173,13 @@ func (a *OpenAIAgent) Query(content string) {
 	a.history.Append(Message{Role: "user", Content: content})
 }
 
-// Interrupt cancels any in-flight Drain.
+// Interrupt cancels the active Drain, if any.
 func (a *OpenAIAgent) Interrupt() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.cancelCtx != nil {
-		a.cancelCtx()
+	if h := a.drain; h != nil {
+		h.cancel()
 	}
 }
 
@@ -229,9 +249,9 @@ func (a *OpenAIAgent) SnapshotSinceID(id uint64) []Message {
 func (a *OpenAIAgent) ReplaceHistory(msgs []Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.cancelCtx != nil {
-		a.cancelCtx()
-		a.cancelCtx = nil
+	if h := a.drain; h != nil {
+		h.cancel()
+		a.drain = nil
 	}
 	if len(msgs) == 0 || msgs[0].Role != "system" {
 		if sys := a.cfg.SystemPrompt; sys != "" {
@@ -273,13 +293,19 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 	if maxRounds <= 0 {
 		maxRounds = a.cfg.MaxTurnsPerAgent
 	}
-	inner, cancel := context.WithCancel(ctx)
+	// Register under the lock so Interrupt/ReplaceHistory either see the
+	// handle or observe a Drain that has not started yet.
 	a.mu.Lock()
-	a.cancelCtx = cancel
+	inner, cancel := context.WithCancel(ctx)
+	h := &drainHandle{cancel: cancel}
+	a.drain = h
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
-		a.cancelCtx = nil
+		// Only clear when still registered; a stale drain must not drop a newer handle.
+		if a.drain == h {
+			a.drain = nil
+		}
 		a.mu.Unlock()
 		cancel()
 	}()
@@ -457,6 +483,7 @@ func (a *OpenAIAgent) dispatchToolCalls(
 // start/end callbacks, returning a self-contained outcome.
 func (a *OpenAIAgent) runSingleTool(inner context.Context, tc ToolCall,
 	args json.RawMessage, flowIDs []string, extractFlow func(...any) []string) toolOutcome {
+	reg := a.reg.Load()
 	rec := ToolCallRecord{Name: tc.Function.Name, RawInput: args}
 	rec.InputSummary = util.Truncate(string(args), 240)
 
@@ -464,25 +491,25 @@ func (a *OpenAIAgent) runSingleTool(inner context.Context, tc ToolCall,
 		a.cfg.OnToolStart(tc.Function.Name, args)
 	}
 
-	handler, known := a.handlers[tc.Function.Name]
+	handler, known := reg.handlers[tc.Function.Name]
 	if !known {
 		// Fuzzy-fallback: lower + collapse runs of '_' so the most common model typos still route to the real handler.
 		// We do NOT rewrite tc.Function.Name in history: the assistant message records what the model emitted.
 		// TODO - is this correct or will this result in agents being more likely to repeat failures
 		c := canonicalToolName(tc.Function.Name)
-		if h, ok := a.canonHandlers[c]; ok {
+		if h, ok := reg.canonHandlers[c]; ok {
 			handler = h
 			known = true
 			if a.cfg.OnFuzzyToolMatch != nil {
-				a.cfg.OnFuzzyToolMatch(tc.Function.Name, a.canonNames[c])
+				a.cfg.OnFuzzyToolMatch(tc.Function.Name, reg.canonNames[c])
 			}
-		} else if matched := fuzzyContainsToolMatch(c, a.canonNames); matched != "" {
+		} else if matched := fuzzyContainsToolMatch(c, reg.canonNames); matched != "" {
 			// Word-bounded contains-match resolves prefix-overgeneralization . Only fires when exactly one
 			// registered name is a unique word-bounded substring; ambiguous cases fall through to "unknown tool".
-			handler = a.canonHandlers[matched]
+			handler = reg.canonHandlers[matched]
 			known = true
 			if a.cfg.OnFuzzyToolMatch != nil {
-				a.cfg.OnFuzzyToolMatch(tc.Function.Name, a.canonNames[matched])
+				a.cfg.OnFuzzyToolMatch(tc.Function.Name, reg.canonNames[matched])
 			}
 		}
 	}
@@ -549,15 +576,13 @@ const maxRepairSchemaBytes = 500
 // formatRepairError renders the error sent to the model when its tool_call
 // arguments fail to parse. The tool schema is embedded when known.
 func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string {
-	a.mu.Lock()
 	var schemaJSON []byte
-	for _, d := range a.toolDefs {
+	for _, d := range a.reg.Load().defs {
 		if d.Name == toolName && d.Schema != nil {
 			schemaJSON, _ = json.Marshal(d.Schema)
 			break
 		}
 	}
-	a.mu.Unlock()
 	if len(schemaJSON) == 0 {
 		return fmt.Sprintf(
 			"ERROR: your arguments did not parse: %s. Call again with valid JSON matching the schema.",
@@ -575,9 +600,7 @@ func (a *OpenAIAgent) formatRepairError(toolName string, repairErr error) string
 
 // sendWithRetry dispatches one chat-completion request and applies the retry policy from Classify and BackoffFor.
 func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
-	a.mu.Lock()
-	tools := a.tools
-	a.mu.Unlock()
+	tools := a.reg.Load().tools
 
 	msgs := a.buildChatMessages()
 	a.history.RecordWireEstimate(rawChatMessagesTokens(msgs))

@@ -80,6 +80,11 @@ type TurnSummary struct {
 }
 
 // Agent is the orchestrator's interface to a chat model.
+//
+// Concurrency contract: at most one Drain runs per agent at a time.
+// Interrupt and ReplaceHistory are safe to call concurrently with an
+// in-flight Drain (both cancel it). SetTools is safe at any time; the
+// new tools apply to subsequent dispatches.
 type Agent interface {
 	Query(content string)
 	Drain(ctx context.Context) (TurnSummary, error)

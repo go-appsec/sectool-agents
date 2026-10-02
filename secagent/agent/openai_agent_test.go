@@ -993,6 +993,150 @@ func TestOpenAIAgent_MarkIterationBoundary(t *testing.T) {
 	})
 }
 
+// gatedChatClient gates requests in call order: call i blocks until gates[i]
+// is closed (calls past the list return an error). Signals each call on started.
+type gatedChatClient struct {
+	gates   []chan struct{}
+	started chan struct{}
+	next    atomic.Int32
+}
+
+func newGatedChatClient(gates int) *gatedChatClient {
+	c := &gatedChatClient{
+		gates:   make([]chan struct{}, gates),
+		started: make(chan struct{}, gates+1),
+	}
+	for i := range c.gates {
+		c.gates[i] = make(chan struct{})
+	}
+	return c
+}
+
+func (c *gatedChatClient) CreateChatCompletion(ctx context.Context, _ ChatRequest) (ChatResponse, error) {
+	i := int(c.next.Add(1)) - 1
+	c.started <- struct{}{}
+	if i >= len(c.gates) {
+		return ChatResponse{}, errors.New("gated: past end")
+	}
+	select {
+	case <-c.gates[i]:
+		return ChatResponse{Content: "ok"}, nil
+	case <-ctx.Done():
+		return ChatResponse{}, ctx.Err()
+	}
+}
+
+func TestOpenAIAgent_DrainConcurrency(t *testing.T) {
+	t.Parallel()
+
+	t.Run("interrupt_during_drain", func(t *testing.T) {
+		client := newGatedChatClient(1)
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+		a.Query("go")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = a.Drain(t.Context())
+		}()
+		<-client.started
+		a.Interrupt()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Interrupt did not unblock the Drain")
+		}
+	})
+
+	t.Run("replace_history_during_drain", func(t *testing.T) {
+		client := newGatedChatClient(1)
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+		a.Query("go")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = a.Drain(t.Context())
+		}()
+		<-client.started
+		a.ReplaceHistory([]Message{{Role: RoleUser, Content: "restart"}})
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("ReplaceHistory did not unblock the Drain")
+		}
+	})
+
+	t.Run("set_tools_during_drain", func(t *testing.T) {
+		defs := []ToolDef{{
+			Name:   "echo",
+			Schema: map[string]any{"type": "object"},
+			Handler: func(_ context.Context, _ json.RawMessage) ToolResult {
+				return ToolResult{Text: "ok"}
+			},
+		}}
+		client := &fakeChatClient{responses: []ChatResponse{
+			{ToolCalls: []ToolCall{{
+				ID: "c1", Type: "function",
+				Function: ToolFunction{Name: "echo", Arguments: `{}`},
+			}}},
+			{Content: "done"},
+		}}
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(client)})
+		a.SetTools(defs)
+		a.Query("go")
+
+		stop := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					a.SetTools(defs)
+				}
+			}
+		}()
+		sum, err := a.Drain(t.Context())
+		close(stop)
+		require.NoError(t, err)
+		require.Len(t, sum.ToolCalls, 1)
+		assert.False(t, sum.ToolCalls[0].IsError)
+	})
+
+	t.Run("stale_drain_keeps_new_handle", func(t *testing.T) {
+		client := newGatedChatClient(2)
+		pool := NewClientPoolWithClients([]ChatClient{client, client})
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: pool})
+		a.Query("go")
+
+		first := make(chan struct{})
+		go func() {
+			defer close(first)
+			_, _ = a.Drain(t.Context())
+		}()
+		<-client.started
+
+		// Second Drain registers while the first is still winding down;
+		// the first's cleanup must not drop the second's cancel handle.
+		second := make(chan struct{})
+		go func() {
+			defer close(second)
+			_, _ = a.Drain(t.Context())
+		}()
+		<-client.started
+
+		// Release only the first Drain so its cleanup runs before Interrupt.
+		close(client.gates[0])
+		<-first
+		a.Interrupt()
+
+		select {
+		case <-second:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Interrupt did not cancel the newer Drain")
+		}
+	})
+}
+
 func TestOpenAIAgent_DrainCompactor(t *testing.T) {
 	t.Parallel()
 
