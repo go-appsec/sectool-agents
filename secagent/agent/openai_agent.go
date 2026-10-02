@@ -343,6 +343,11 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 		resp, err := a.sendWithRetry(inner)
 		if errors.Is(err, context.DeadlineExceeded) {
 			a.synthesizePendingToolStubs()
+			if ctx.Err() != nil {
+				// an outer phase deadline fired, not the per-turn timeout;
+				// propagate so the caller doesn't feed the stall counters
+				return summary, err
+			}
 			summary.TimedOut = true
 			summary.EscalationReason = escalationSilent
 			return summary, nil

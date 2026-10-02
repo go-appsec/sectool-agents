@@ -945,7 +945,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			RunVerificationPhase(
 				verifierRunCtx, verifier, decisions, candidates, writer, dedupReviewer, log,
 			)
-			if verifierOverflowed && len(candidates.Pending()) > 0 {
+			if verifierOverflowed && !decisions.HasVerificationDone && len(candidates.Pending()) > 0 {
 				AutoDismissOnContextOverflow(candidates, decisions, log)
 			}
 		}

@@ -38,7 +38,7 @@ func (s *Summarizer) SummarizeReconMission(ctx context.Context, mission string) 
 	user := "Mission:\n" + mission + "\n\nRecon goal:"
 	out, err := s.oneShot(ctx, reconMissionSystemPrompt, user)
 	if err != nil {
-		s.Log.Log("summarize", "recon-mission error", map[string]any{"err": err.Error()})
+		s.logger().Log("summarize", "recon-mission error", map[string]any{"err": err.Error()})
 		return "", err
 	}
 	out = strings.TrimSpace(agent.StripThinkBlocks(out))
@@ -65,7 +65,7 @@ func (s *Summarizer) SummarizeCompletedWorker(ctx context.Context,
 	transcript = agent.FilterErrorMessages(transcript)
 	if !agent.HasSubstantiveMessages(transcript) {
 		// noise-only transcript, skip the LLM call
-		s.Log.Log("summarize", "completed-worker skip-noise-only", map[string]any{
+		s.logger().Log("summarize", "completed-worker skip-noise-only", map[string]any{
 			"worker_id": workerID,
 		})
 		return "", nil
@@ -73,7 +73,7 @@ func (s *Summarizer) SummarizeCompletedWorker(ctx context.Context,
 	user := buildCompletedWorkerPrompt(transcript, mission, reason, workerID)
 	out, err := s.oneShot(ctx, completedWorkerSystemPrompt, user)
 	if err != nil {
-		s.Log.Log("summarize", "completed-worker error", map[string]any{
+		s.logger().Log("summarize", "completed-worker error", map[string]any{
 			"err": err.Error(), "worker_id": workerID,
 		})
 		return "", err

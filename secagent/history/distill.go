@@ -38,14 +38,14 @@ func DistillCallback(s *Summarizer) func(ctx context.Context, aux *AuxBudget, sn
 		var distilledBatches, distilledMsgs int
 		for batchIdx, b := range batches {
 			if !aux.Allow() {
-				s.Log.Log("compact", "distill budget exhausted", map[string]any{
+				s.logger().Log("compact", "distill budget exhausted", map[string]any{
 					"batches_total": len(batches), "batches_run": batchIdx,
 				})
 				break
 			}
 			prose, err := runDistillBatch(ctx, s, b)
 			if err != nil {
-				s.Log.Log("compact", "distill batch error", map[string]any{
+				s.logger().Log("compact", "distill batch error", map[string]any{
 					"batch_idx": batchIdx, "events": len(b.indices),
 					"err": err.Error(),
 				})
@@ -64,7 +64,7 @@ func DistillCallback(s *Summarizer) func(ctx context.Context, aux *AuxBudget, sn
 		if distilledBatches == 0 {
 			return nil, nil
 		}
-		s.Log.Log("compact", "distill apply", map[string]any{
+		s.logger().Log("compact", "distill apply", map[string]any{
 			"batches":  distilledBatches,
 			"messages": distilledMsgs,
 		})

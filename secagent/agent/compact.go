@@ -13,9 +13,9 @@ type CompactionOptions struct {
 	HighWatermark float64 // e.g. 0.80
 	LowWatermark  float64 // e.g. 0.40
 	KeepTurns     int     // e.g. 4
-	// HardTruncateOnOverflow controls the final fallbacks. When true (default),
-	// drops turns down to a 2-turn window and, as a last resort, stubs tool
-	// results inside the protected tail. When false, returns the overflow error.
+	// HardTruncateOnOverflow controls the final fallbacks. When true, drops turns
+	// down to a 2-turn window and, as a last resort, stubs tool results inside the
+	// protected tail. When false (default), returns the overflow error.
 	HardTruncateOnOverflow bool
 	// RecoveryThreshold is the fraction of EffectiveMaxContext that one compaction step must
 	// free to skip later, more expensive ones. 0 falls back to defaultRecoveryThreshold.
@@ -70,15 +70,16 @@ func IsCompactionStub(content string) bool {
 }
 
 // StubToolResult replaces m's Content with a compact stub and returns true when m.Content changed.
+// model scopes the reported token estimate's calibration bucket; "" uses the default bucket.
 // Skips repair-error messages and content already stubbed. Idempotent.
-func StubToolResult(m *Message) bool {
+func StubToolResult(m *Message, model string) bool {
 	if m.Role != RoleTool || m.IsRepairError {
 		return false
 	}
 	if IsCompactionStub(m.Content) {
 		return false
 	}
-	approxTokens := EstimateStringTokens(m.Content)
+	approxTokens := EstimateStringTokensForModel(model, m.Content)
 	toolName := m.ToolName
 	if toolName == "" {
 		toolName = "tool"
@@ -184,9 +185,11 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 		return report, nil
 	}
 
-	// stub oldest tool results; repair errors carry schema guidance, skip them
+	// stub oldest tool results; repair errors carry schema guidance, skip them.
+	// One write-back per pass; remaining tracks local savings toward target.
 	var stubbed, repairsProtected int
-	for i := 0; i < bound; i++ {
+	remaining := h.EstimateTokens() - target
+	for i := 0; i < bound && remaining > 0; i++ {
 		if msgs[i].Role != RoleTool {
 			continue
 		} else if msgs[i].IsRepairError {
@@ -194,15 +197,14 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 			continue
 		}
 
-		if StubToolResult(&msgs[i]) {
+		prev := msgs[i]
+		if StubToolResult(&msgs[i], h.Model()) {
 			stubbed++
-			h.ReplaceAll(slices.Clone(msgs))
-			if h.EstimateTokens() <= target {
-				break
-			}
+			remaining -= h.estimateOne(prev) - h.estimateOne(msgs[i])
 		}
 	}
 	if stubbed > 0 {
+		h.ReplaceAll(slices.Clone(msgs))
 		report.PassesApplied = append(report.PassesApplied, "tool-stub")
 		report.StubbedResults = stubbed
 	}
@@ -212,32 +214,27 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 		return report, nil
 	}
 
-	// Truncate older assistant content to its first sentence
+	// Truncate older assistant content to its first sentence; one write-back per pass
 	var truncCount int
-	for i := 0; i < bound; i++ {
+	remaining = h.EstimateTokens() - target
+	for i := 0; i < bound && remaining > 0; i++ {
 		if msgs[i].Role != RoleAssistant {
 			continue
 		} else if msgs[i].Content == "" {
 			continue
 		}
 
-		first := msgs[i].Content
-		for j, r := range msgs[i].Content {
-			if r == '.' || r == '!' || r == '?' || r == '\n' {
-				first = strings.TrimSpace(msgs[i].Content[:j+1])
-				break
-			}
+		prev := msgs[i]
+		first := firstSentence(msgs[i].Content)
+		if first == prev.Content {
+			continue
 		}
-		if first != msgs[i].Content {
-			msgs[i].Content = first
-			truncCount++
-			h.ReplaceAll(slices.Clone(msgs))
-			if h.EstimateTokens() <= target {
-				break
-			}
-		}
+		msgs[i].Content = first
+		truncCount++
+		remaining -= h.estimateOne(prev) - h.estimateOne(msgs[i])
 	}
 	if truncCount > 0 {
+		h.ReplaceAll(slices.Clone(msgs))
 		report.PassesApplied = append(report.PassesApplied, "text-trunc")
 		report.Truncated = truncCount
 	}
@@ -246,18 +243,22 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 		return report, nil
 	}
 
-	// Drop oldest full turn triples until under target or nothing left
+	// Drop oldest full turn triples until under target or nothing left; one write-back per pass
 	var droppedTurns int
-	for h.EstimateTokens() > target {
-		newMsgs, dropped := dropOldestTurn(msgs, keep)
+	remaining = h.EstimateTokens() - target
+	for remaining > 0 {
+		next, droppedMsgs, dropped := dropOldestTurn(msgs, keep)
 		if !dropped {
 			break
 		}
-		msgs = newMsgs
+		for _, m := range droppedMsgs {
+			remaining -= h.estimateOne(m)
+		}
+		msgs = next
 		droppedTurns++
-		h.ReplaceAll(msgs)
 	}
 	if droppedTurns > 0 {
+		h.ReplaceAll(msgs)
 		report.PassesApplied = append(report.PassesApplied, "turn-drop")
 		report.DroppedTurns = droppedTurns
 	}
@@ -265,16 +266,18 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	// drop stale user messages; turn-drop only starts on assistants, so a history
 	// dominated by installed user directives would otherwise be uncompactable
 	var droppedUsers int
-	for h.EstimateTokens() > target {
-		next, dropped := dropOldestUser(msgs, keep)
+	remaining = h.EstimateTokens() - target
+	for remaining > 0 {
+		next, droppedMsgs, dropped := dropOldestUser(msgs, keep)
 		if !dropped {
 			break
 		}
+		remaining -= h.estimateOne(droppedMsgs[0])
 		msgs = next
 		droppedUsers++
-		h.ReplaceAll(msgs)
 	}
 	if droppedUsers > 0 {
+		h.ReplaceAll(msgs)
 		report.PassesApplied = append(report.PassesApplied, "user-drop")
 		report.DroppedUsers = droppedUsers
 	}
@@ -283,16 +286,20 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	// shrink keep window to 2 to drop more while preserving tool pairing
 	if opt.HardTruncateOnOverflow && h.EstimateTokens() > high {
 		var hardDropped int
-		for h.EstimateTokens() > high {
-			newMsgs, dropped := dropOldestTurn(msgs, 2)
+		remaining := h.EstimateTokens() - high
+		for remaining > 0 {
+			next, droppedMsgs, dropped := dropOldestTurn(msgs, 2)
 			if !dropped {
 				break
 			}
-			msgs = newMsgs
+			for _, m := range droppedMsgs {
+				remaining -= h.estimateOne(m)
+			}
+			msgs = next
 			hardDropped++
-			h.ReplaceAll(msgs)
 		}
 		if hardDropped > 0 {
+			h.ReplaceAll(msgs)
 			report.PassesApplied = append(report.PassesApplied, "hard-truncate")
 			report.DroppedTurns += hardDropped
 		}
@@ -306,7 +313,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 			if msgs[i].IsRepairError {
 				continue
 			}
-			if StubToolResult(&msgs[i]) {
+			if StubToolResult(&msgs[i], h.Model()) {
 				tailStubbed++
 			}
 		}
@@ -361,16 +368,20 @@ func ForceHardTruncate(h *History, targetTokens, keep int) CompactionReport {
 	report := CompactionReport{Before: h.EstimateTokens()}
 	msgs := h.Snapshot()
 	var dropped int
-	for h.EstimateTokens() > targetTokens {
-		next, ok := dropOldestTurn(msgs, keep)
+	remaining := h.EstimateTokens() - targetTokens
+	for remaining > 0 {
+		next, droppedMsgs, ok := dropOldestTurn(msgs, keep)
 		if !ok {
 			break
 		}
+		for _, m := range droppedMsgs {
+			remaining -= h.estimateOne(m)
+		}
 		msgs = next
 		dropped++
-		h.ReplaceAll(msgs)
 	}
 	if dropped > 0 {
+		h.ReplaceAll(msgs)
 		report.PassesApplied = append(report.PassesApplied, "force-hard-truncate")
 		report.DroppedTurns = dropped
 	}
@@ -378,49 +389,39 @@ func ForceHardTruncate(h *History, targetTokens, keep int) CompactionReport {
 	return report
 }
 
-// dropOldestTurn removes the oldest assistant-tool-calls turn (paired tool results plus a trailing assistant text) from
-// msgs, keeping the system prompt and the trailing keep-turn window. Returns the new slice and whether a turn was dropped.
-func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
+// dropOldestTurn removes the oldest assistant-led turn (paired tool results plus a trailing assistant text) from
+// msgs, keeping the system prompt and the trailing keep-turn window. Returns the new slice, the removed
+// messages, and whether a turn was dropped.
+func dropOldestTurn(msgs []Message, keep int) ([]Message, []Message, bool) {
 	if keep < 2 {
 		keep = 2
 	}
 	floor := systemFloor(msgs)
 	ceil := KeepWindowStart(msgs, keep)
 	if ceil <= floor {
-		return msgs, false
+		return msgs, nil, false
 	}
 
 	for i := floor; i < ceil; i++ {
 		if msgs[i].Role != RoleAssistant {
 			continue
 		}
-		end := i + 1
-		// consume paired tool results
-		for end < len(msgs) && msgs[end].Role == RoleTool {
-			end++
-		}
-		// consume a trailing assistant TEXT (no tool calls of its own) if it
-		// immediately follows, it's part of this same turn's final reply.
-		// Do NOT swallow the next turn's assistant-with-tool-calls; doing so
-		// would orphan its tool results.
-		if end < len(msgs) && msgs[end].Role == RoleAssistant && len(msgs[end].ToolCalls) == 0 {
-			end++
-		}
+		end := turnEnd(msgs, i)
 		if end > ceil {
-			return msgs, false
+			return msgs, nil, false
 		}
 		out := make([]Message, 0, len(msgs)-(end-i))
 		out = append(out, msgs[:i]...)
 		out = append(out, msgs[end:]...)
-		return out, true
+		return out, msgs[i:end], true
 	}
-	return msgs, false
+	return msgs, nil, false
 }
 
 // dropOldestUser removes the oldest user message outside the trailing keep-turn
 // window. User messages never join tool pairing, so removal is wire-safe. Returns
-// the new slice and whether a user message was dropped.
-func dropOldestUser(msgs []Message, keep int) ([]Message, bool) {
+// the new slice, the removed message, and whether a user message was dropped.
+func dropOldestUser(msgs []Message, keep int) ([]Message, []Message, bool) {
 	bound := KeepWindowStart(msgs, clampKeepTurns(msgs, keep))
 	for i := systemFloor(msgs); i < bound; i++ {
 		if msgs[i].Role != RoleUser {
@@ -429,9 +430,20 @@ func dropOldestUser(msgs []Message, keep int) ([]Message, bool) {
 		out := make([]Message, 0, len(msgs)-1)
 		out = append(out, msgs[:i]...)
 		out = append(out, msgs[i+1:]...)
-		return out, true
+		return out, msgs[i : i+1], true
 	}
-	return msgs, false
+	return msgs, nil, false
+}
+
+// firstSentence returns s truncated to its first sentence terminator, or s
+// unchanged when no terminator appears.
+func firstSentence(s string) string {
+	for j, r := range s {
+		if r == '.' || r == '!' || r == '?' || r == '\n' {
+			return strings.TrimSpace(s[:j+1])
+		}
+	}
+	return s
 }
 
 // clampKeepTurns caps keep so the protected window leaves at least one turn
@@ -461,15 +473,31 @@ func turnStarts(msgs []Message) []int {
 			continue
 		}
 		starts = append(starts, i)
-		i++
-		for i < len(msgs) && msgs[i].Role == RoleTool {
-			i++
-		}
-		if i < len(msgs) && msgs[i].Role == RoleAssistant && len(msgs[i].ToolCalls) == 0 {
-			i++
-		}
+		i = turnEnd(msgs, i)
 	}
 	return starts
+}
+
+// turnEnd returns the exclusive end index of the turn starting at msgs[start],
+// an assistant message. Consumes paired tool results plus a trailing text
+// assistant (no tool calls of its own); text followed by further results —
+// histories assembled outside Drain — keeps consumption going so those results
+// are never orphaned.
+func turnEnd(msgs []Message, start int) int {
+	end := start + 1
+	for end < len(msgs) && msgs[end].Role == RoleTool {
+		end++
+	}
+	if end >= len(msgs) || msgs[end].Role != RoleAssistant || len(msgs[end].ToolCalls) != 0 {
+		return end
+	}
+	// trailing text is part of this turn's final reply; do not swallow a next
+	// turn's assistant-with-tool-calls
+	end++
+	for end < len(msgs) && msgs[end].Role == RoleTool {
+		end++
+	}
+	return end
 }
 
 // KeepWindowStart returns the index of the first message in the trailing keep-turn window

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+
+	"github.com/go-analyze/bulk"
 )
 
 const statusSummaryRequest = "Provide a single concise and clearly worded sentence summarizing what you are currently investigating and what you will try next."
@@ -49,7 +51,8 @@ func summarizeStatusVia(ctx context.Context, a *OpenAIAgent, client ChatClient,
 		maxTokens = 20000
 	}
 	a.mu.Lock()
-	before := a.history.Len()
+	// watermark scopes the post-call trim to messages appended during the call
+	watermark := a.history.NextID()
 	agentModel := a.cfg.Model
 	a.mu.Unlock()
 	if model == "" {
@@ -64,7 +67,7 @@ func summarizeStatusVia(ctx context.Context, a *OpenAIAgent, client ChatClient,
 	if !HasSubstantiveMessages(filtered) {
 		return "", "", nil
 	}
-	msgs := buildStatusMessages(filtered, statusTokenBudget, a.cfg.KeepThinkTurns)
+	msgs := buildStatusMessages(model, filtered, statusTokenBudget, a.cfg.KeepThinkTurns)
 	msgs = append(msgs, ChatMessage{Role: "user", Content: statusSummaryRequest})
 
 	resp, err := client.CreateChatCompletion(ctx, ChatRequest{
@@ -77,9 +80,12 @@ func summarizeStatusVia(ctx context.Context, a *OpenAIAgent, client ChatClient,
 		return "", "", err
 	}
 
+	// Match appended messages by HistoryID so a concurrent compaction cannot
+	// shift a positional cut into the wrong region
 	snap := a.history.Snapshot()
-	if len(snap) > before {
-		a.history.ReplaceAll(snap[:before])
+	kept := bulk.SliceFilter(func(m Message) bool { return m.HistoryID <= watermark }, snap)
+	if len(kept) < len(snap) {
+		a.history.ReplaceAll(kept)
 	}
 
 	// Tail is a fallback for fragments when no confident line was produced
@@ -91,7 +97,7 @@ func summarizeStatusVia(ctx context.Context, a *OpenAIAgent, client ChatClient,
 }
 
 // buildStatusMessages returns the chat-message slice for a status summary over hist, fit within budget tokens.
-func buildStatusMessages(hist []Message, budget, keepThinkTurns int) []ChatMessage {
+func buildStatusMessages(model string, hist []Message, budget, keepThinkTurns int) []ChatMessage {
 	if len(hist) == 0 {
 		return nil
 	}
@@ -118,13 +124,13 @@ func buildStatusMessages(hist []Message, budget, keepThinkTurns int) []ChatMessa
 
 	var anchorCost int
 	for _, m := range anchor {
-		anchorCost += EstimateMessageTokens(m)
+		anchorCost += EstimateMessageTokensForModel(model, m)
 	}
 	remaining := budget - anchorCost
 	if remaining < 0 {
 		remaining = 0
 	}
-	tail := pickTail(filtered, remaining)
+	tail := pickTail(model, filtered, remaining)
 
 	out := make([]ChatMessage, 0, len(anchor)+len(tail))
 	for _, m := range anchor {
@@ -141,14 +147,14 @@ func buildStatusMessages(hist []Message, budget, keepThinkTurns int) []ChatMessa
 }
 
 // pickTail returns the trailing slice of msgs whose estimated token sum fits within budget.
-func pickTail(msgs []Message, budget int) []Message {
+func pickTail(model string, msgs []Message, budget int) []Message {
 	if budget <= 0 || len(msgs) == 0 {
 		return nil
 	}
 	var cost int
 	start := len(msgs)
 	for i := len(msgs) - 1; i >= 0; i-- {
-		c := EstimateMessageTokens(msgs[i])
+		c := EstimateMessageTokensForModel(model, msgs[i])
 		if cost+c > budget && start < len(msgs) {
 			break
 		}

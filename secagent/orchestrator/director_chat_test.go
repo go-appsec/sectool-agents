@@ -285,4 +285,12 @@ func TestDirectorChatApplyWorkerSelfPrune(t *testing.T) {
 		assert.Equal(t, 0, c.ApplyWorkerSelfPrune(3, []string{""}))
 		require.Len(t, c.Messages, 6)
 	})
+
+	t.Run("meta_drift_noop", func(t *testing.T) {
+		// A Meta/Messages length drift must not panic the controller
+		c := NewDirectorChat()
+		c.Messages = append(c.Messages, agent.Message{Role: "assistant", Content: "x"})
+		assert.Equal(t, 0, c.ApplyWorkerSelfPrune(3, []string{"w3a"}))
+		require.Len(t, c.Messages, 1)
+	})
 }

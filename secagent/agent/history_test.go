@@ -272,3 +272,40 @@ func TestHistory_IterationBoundaryID(t *testing.T) {
 		assert.Zero(t, h.IterationBoundaryID())
 	})
 }
+
+func TestHistory_ReplaceAllIDMinting(t *testing.T) {
+	t.Parallel()
+
+	t.Run("mints_above_existing_ids", func(t *testing.T) {
+		// A zero-ID message placed before an existing ID must not collide with it
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleUser, Content: "keep"})
+		existing := h.Snapshot()[0].HistoryID
+		require.NotZero(t, existing)
+
+		h.ReplaceAll([]Message{
+			{Role: RoleUser, Content: "zero-id"},
+			{Role: RoleAssistant, Content: "keep", HistoryID: existing},
+		})
+
+		snap := h.Snapshot()
+		ids := []uint64{snap[0].HistoryID, snap[1].HistoryID}
+		assert.NotEqual(t, ids[0], ids[1])
+		assert.Equal(t, existing, ids[1])
+		assert.Greater(t, ids[0], existing)
+		assert.Equal(t, ids[0], h.NextID())
+	})
+
+	t.Run("watermark_never_reuses_dropped_ids", func(t *testing.T) {
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleUser, Content: "a"})
+		h.Append(Message{Role: RoleUser, Content: "b"})
+		high := h.NextID()
+
+		// replace with a subset: minted IDs must stay above every dropped ID
+		kept := h.Snapshot()[:1]
+		h.ReplaceAll(kept)
+		h.Append(Message{Role: RoleUser, Content: "c"})
+		assert.Greater(t, h.Snapshot()[1].HistoryID, high)
+	})
+}

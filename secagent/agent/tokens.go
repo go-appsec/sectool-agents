@@ -61,15 +61,28 @@ func resetCalibrationForTest() {
 }
 
 // EstimateStringTokens returns the token estimate for s using the default calibration bucket, with
-// no per-message overhead. Model-scoped estimation goes through History.
+// no per-message overhead. Model-scoped estimation goes through History or EstimateStringTokensForModel.
 func EstimateStringTokens(s string) int {
-	return int(float64(len(s)) / charsPerToken * Calibration(""))
+	return EstimateStringTokensForModel("", s)
+}
+
+// EstimateStringTokensForModel returns the token estimate for s using model's calibration bucket,
+// with no per-message overhead.
+func EstimateStringTokensForModel(model, s string) int {
+	return int(float64(len(s)) / charsPerToken * Calibration(model))
 }
 
 // EstimateMessageTokens returns the token estimate for m using the default calibration bucket,
-// including per-message overhead. Model-scoped estimation goes through History.
+// including per-message overhead. Model-scoped estimation goes through History or
+// EstimateMessageTokensForModel.
 func EstimateMessageTokens(m Message) int {
-	return int(float64(rawMessageTokens(m)) * Calibration(""))
+	return EstimateMessageTokensForModel("", m)
+}
+
+// EstimateMessageTokensForModel returns the token estimate for m using model's calibration bucket,
+// including per-message overhead.
+func EstimateMessageTokensForModel(model string, m Message) int {
+	return int(float64(rawMessageTokens(m)) * Calibration(model))
 }
 
 // rawMessageTokens returns the uncalibrated token estimate for m, including per-message overhead.

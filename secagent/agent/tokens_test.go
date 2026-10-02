@@ -54,3 +54,19 @@ func TestRawChatMessagesTokens_MatchesStoredShape(t *testing.T) {
 	}
 	assert.Equal(t, want, rawChatMessagesTokens(chatMsgs))
 }
+
+func TestEstimateTokensForModel_UsesModelBucket(t *testing.T) {
+	// Serial: mutates the model-scoped calibration EMA
+	t.Cleanup(resetCalibrationForTest)
+
+	// observed ratio clamps the EMA at calibrationMax
+	ObservePromptTokens("model-a", 100, 10)
+
+	s := "abcdefgh"
+	assert.Equal(t, EstimateStringTokens(s), EstimateStringTokensForModel("", s))
+	assert.Greater(t, EstimateStringTokensForModel("model-a", s), EstimateStringTokensForModel("", s))
+
+	m := Message{Role: RoleUser, Content: s}
+	assert.Equal(t, EstimateMessageTokens(m), EstimateMessageTokensForModel("", m))
+	assert.Greater(t, EstimateMessageTokensForModel("model-a", m), EstimateMessageTokensForModel("", m))
+}

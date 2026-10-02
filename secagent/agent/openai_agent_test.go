@@ -307,6 +307,19 @@ func TestOpenAIAgent_PerTurnTimeout(t *testing.T) {
 		assert.True(t, sum.TimedOut)
 		assert.Equal(t, escalationSilent, sum.EscalationReason)
 	})
+
+	t.Run("outer_deadline_propagates", func(t *testing.T) {
+		// A deadline on the caller's context is not a turn timeout; it must
+		// surface as an error instead of feeding the stall counters
+		slow := &slowClient{delay: 100 * time.Millisecond}
+		a := NewOpenAIAgent(OpenAIAgentConfig{Model: "m", Pool: newPoolWith(slow)})
+		a.Query("hi")
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		sum, err := a.Drain(ctx)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.False(t, sum.TimedOut)
+	})
 }
 
 func TestOpenAIAgent_SendWithRetry(t *testing.T) {

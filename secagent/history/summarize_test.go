@@ -148,4 +148,23 @@ func TestSummarizeCompletedWorker(t *testing.T) {
 		assert.Empty(t, out)
 		assert.Empty(t, client.requests)
 	})
+
+	t.Run("nil_log_noise_only_transcript", func(t *testing.T) {
+		// The noise-only skip logs; a nil Log must fall back to a no-op sink
+		client := &scriptedClient{response: "should not be called"}
+		s := &Summarizer{Pool: poolOf(client), Model: "m", Timeout: time.Second}
+		out, err := s.SummarizeCompletedWorker(t.Context(),
+			[]agent.Message{
+				{Role: "user", Content: "do thing"},
+				{Role: "assistant", ToolCalls: []agent.ToolCall{
+					{ID: "t1", Function: agent.ToolFunction{Name: "x"}},
+				}},
+				{Role: "tool", ToolCallID: "t1", Content: "ERROR: nope", IsError: true},
+			},
+			"mission", "reason", 1,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, out)
+		assert.Empty(t, client.requests)
+	})
 }

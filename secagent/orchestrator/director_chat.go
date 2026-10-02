@@ -75,6 +75,10 @@ func (c *DirectorChat) ApplyWorkerSelfPrune(workerID int, dropIDs []string) int 
 	if workerID <= 0 || len(dropIDs) == 0 {
 		return 0
 	}
+	// parallel-slice invariant; a drift would index Meta out of range below
+	if len(c.Meta) != len(c.Messages) {
+		return 0
+	}
 	dropSet := bulk.SliceToSet(bulk.SliceFilter(func(s string) bool { return s != "" }, dropIDs))
 	if len(dropSet) == 0 {
 		return 0
@@ -103,7 +107,7 @@ func (c *DirectorChat) RenderForWorker(currentWorkerID int) []agent.Message {
 			continue
 		}
 		agent.StripAssistantThink(&out[i])
-		agent.StubToolResult(&out[i])
+		agent.StubToolResult(&out[i], "")
 	}
 	NormalizeEmptyContent(out)
 	return out
@@ -120,7 +124,7 @@ func (c *DirectorChat) RenderForSynthesis() []agent.Message {
 		}
 
 		agent.StripAssistantThink(&out[i])
-		agent.StubToolResult(&out[i])
+		agent.StubToolResult(&out[i], "")
 	}
 	NormalizeEmptyContent(out)
 	return out

@@ -151,7 +151,7 @@ func TestBuildStatusMessages(t *testing.T) {
 			{Role: RoleTool, Content: "HTTP/1.1 200 OK\n..." + strings.Repeat("x", 4000), ToolCallID: "c1"},
 			{Role: RoleAssistant, Content: "<think>next step</think>checking response"},
 		}
-		msgs := buildStatusMessages(hist, 2000, 2)
+		msgs := buildStatusMessages("m", hist, 2000, 2)
 		require.Len(t, msgs, 5)
 
 		assert.Equal(t, RoleSystem, msgs[0].Role)
@@ -171,7 +171,7 @@ func TestBuildStatusMessages(t *testing.T) {
 		for range 50 {
 			hist = append(hist, Message{Role: RoleAssistant, Content: strings.Repeat("x", 500)})
 		}
-		msgs := buildStatusMessages(hist, 2000, 0)
+		msgs := buildStatusMessages("m", hist, 2000, 0)
 
 		var total int
 		for _, m := range msgs {
@@ -193,14 +193,14 @@ func TestBuildStatusMessages(t *testing.T) {
 			{Role: RoleTool, Content: strings.Repeat("x", 4000), ToolCallID: "c1"},
 			{Role: RoleAssistant, Content: strings.Repeat("y", 4000)},
 		}
-		msgs := buildStatusMessages(hist, 200, 0)
+		msgs := buildStatusMessages("m", hist, 200, 0)
 		// First post-anchor message must not be a tool with no parent assistant in scope
 		require.GreaterOrEqual(t, len(msgs), 3)
 		assert.NotEqual(t, RoleTool, msgs[2].Role)
 	})
 
 	t.Run("empty_history", func(t *testing.T) {
-		assert.Nil(t, buildStatusMessages(nil, 1000, 0))
+		assert.Nil(t, buildStatusMessages("m", nil, 1000, 0))
 	})
 
 	t.Run("no_system_anchor", func(t *testing.T) {
@@ -208,7 +208,7 @@ func TestBuildStatusMessages(t *testing.T) {
 			{Role: RoleUser, Content: "u"},
 			{Role: RoleAssistant, Content: "a"},
 		}
-		msgs := buildStatusMessages(hist, 1000, 0)
+		msgs := buildStatusMessages("m", hist, 1000, 0)
 		require.GreaterOrEqual(t, len(msgs), 1)
 		assert.Equal(t, RoleUser, msgs[0].Role)
 	})
@@ -219,7 +219,7 @@ func TestBuildStatusMessages(t *testing.T) {
 			{Role: RoleUser, Content: "u"},
 			{Role: RoleAssistant, Content: "should be dropped"},
 		}
-		msgs := buildStatusMessages(hist, 0, 0)
+		msgs := buildStatusMessages("m", hist, 0, 0)
 		// Only the anchor (system + first non-system) survives
 		require.Len(t, msgs, 2)
 		assert.Equal(t, RoleSystem, msgs[0].Role)

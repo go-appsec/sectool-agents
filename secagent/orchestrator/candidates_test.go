@@ -93,3 +93,18 @@ func TestCandidatePoolMarkable(t *testing.T) {
 	p.Mark(id, CandidateStatusDismissed)
 	assert.False(t, p.Markable(id), "terminal status")
 }
+
+func TestCandidatePoolPendingClonesFlowIDs(t *testing.T) {
+	t.Parallel()
+
+	p := NewCandidatePool()
+	id := p.Add(AddInput{WorkerID: 1, Title: "x", FlowIDs: []string{"f1"}})
+
+	// Mutations on the returned snapshot must not bleed into the pool.
+	pending := p.Pending()
+	require.Len(t, pending, 1)
+	pending[0].FlowIDs[0] = "mutated"
+
+	assert.Equal(t, []string{"f1"}, p.ByID(id).FlowIDs)
+	assert.Equal(t, []string{"f1"}, p.Pending()[0].FlowIDs)
+}

@@ -37,7 +37,7 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, aux *AuxBudget, 
 			return nil, nil
 		}
 		if !aux.Allow() {
-			s.Log.Log("compact", "self-prune budget exhausted", nil)
+			s.logger().Log("compact", "self-prune budget exhausted", nil)
 			return nil, nil
 		}
 		listing := renderToolEventListing(events)
@@ -60,7 +60,7 @@ func SelfPruneCallback(s *Summarizer) func(ctx context.Context, aux *AuxBudget, 
 				ids = append(ids, id)
 			}
 		}
-		s.Log.Log("compact", "self-prune apply", map[string]any{
+		s.logger().Log("compact", "self-prune apply", map[string]any{
 			"events_total": len(events),
 			"selected":     len(selected),
 			"requested":    len(ids),
@@ -79,14 +79,14 @@ func runSelfPruneSelection(ctx context.Context, s *Summarizer, prompt string, to
 		s.logSelectError(err, raw)
 		return nil, err
 	}
-	s.Log.Log("compact", "self-prune empty response, retrying", nil)
+	s.logger().Log("compact", "self-prune empty response, retrying", nil)
 	retryTemp := selfPruneRetryTemperature
 	selected, raw, err = selfPruneRunOnce(ctx, s, prompt, total, &retryTemp)
 	if err == nil {
 		return selected, nil
 	}
 	if errors.Is(err, ErrEmptyResponse) {
-		s.Log.Log("compact", "self-prune empty after retry — treating as no selections", nil)
+		s.logger().Log("compact", "self-prune empty after retry — treating as no selections", nil)
 		return nil, nil
 	}
 	s.logSelectError(err, raw)
@@ -99,15 +99,23 @@ func selfPruneRunOnce(ctx context.Context, s *Summarizer,
 	raw, err := RunOneShot(ctx, s.Pool, s.Model, selfPruneSystemPrompt, prompt,
 		selfPruneMaxTokens, agent.CompressionReasoningEffort, temp)
 	if err != nil {
-		s.Log.Log("compact", "self-prune select error", map[string]any{"err": err.Error()})
+		s.logger().Log("compact", "self-prune select error", map[string]any{"err": err.Error()})
 		return nil, raw, err
 	}
 	selected, parseErr := parseEventIndexList(raw, total)
 	return selected, raw, parseErr
 }
 
+// logger returns s.Log or a no-op sink when unset.
+func (s *Summarizer) logger() Logger {
+	if s.Log == nil {
+		return NopLogger{}
+	}
+	return s.Log
+}
+
 func (s *Summarizer) logSelectError(err error, raw string) {
-	s.Log.Log("compact", "self-prune select parse error", map[string]any{
+	s.logger().Log("compact", "self-prune select parse error", map[string]any{
 		"err": err.Error(), "raw": util.Truncate(raw, 240),
 	})
 }

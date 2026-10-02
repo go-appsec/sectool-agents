@@ -108,9 +108,15 @@ func (p *CandidatePool) ByID(id string) *FindingCandidate {
 	if c == nil {
 		return nil
 	}
+	cp := cloneCandidate(c)
+	return &cp
+}
+
+// cloneCandidate returns a copy of c with FlowIDs detached from pool state.
+func cloneCandidate(c *FindingCandidate) FindingCandidate {
 	cp := *c
 	cp.FlowIDs = slices.Clone(c.FlowIDs)
-	return &cp
+	return cp
 }
 
 // Pending returns a snapshot of pending candidates in insertion order.
@@ -121,7 +127,7 @@ func (p *CandidatePool) Pending() []FindingCandidate {
 	var out []FindingCandidate
 	for _, id := range p.order {
 		if c := p.byID[id]; c != nil && c.Status == CandidateStatusPending {
-			out = append(out, *c)
+			out = append(out, cloneCandidate(c))
 		}
 	}
 	return out

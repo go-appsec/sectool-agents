@@ -181,6 +181,32 @@ func (h *History) EstimateTokens() int {
 	return h.lastPromptTokens + growth
 }
 
+// Model returns the model scoping the history's token calibration.
+func (h *History) Model() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.model
+}
+
+// NextID returns the HistoryID watermark; messages appended later carry higher IDs.
+func (h *History) NextID() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.nextID
+}
+
+// estimateOne returns the calibrated token estimate for m using the history's
+// model and wire shape. Compaction uses it to track savings locally so passes
+// can early-exit without writing back the live history.
+func (h *History) estimateOne(m Message) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.wireShape != nil {
+		m = h.wireShape([]Message{m})[0]
+	}
+	return int(float64(rawMessageTokens(m)) * Calibration(h.model))
+}
+
 // estimateRangeLocked returns the calibrated token estimate for messages in [start, end).
 func (h *History) estimateRangeLocked(start, end int) int {
 	return int(float64(h.rawEstimateRangeLocked(start, end)) * Calibration(h.model))
@@ -255,17 +281,21 @@ func (h *History) ReplaceAllIfUnchanged(generation uint64, msgs []Message) bool 
 
 func (h *History) replaceAllLocked(msgs []Message) {
 	h.version++
-	h.nextID = 0
+	// mint IDs above every assigned one so zero-ID messages can never collide
+	// with an existing ID and corrupt iteration-boundary tracking
+	next := h.nextID
 	for i := range msgs {
-		if msgs[i].HistoryID == 0 {
-			h.nextID++
-			msgs[i].HistoryID = h.nextID
-			continue
-		}
-		if msgs[i].HistoryID > h.nextID {
-			h.nextID = msgs[i].HistoryID
+		if msgs[i].HistoryID > next {
+			next = msgs[i].HistoryID
 		}
 	}
+	for i := range msgs {
+		if msgs[i].HistoryID == 0 {
+			next++
+			msgs[i].HistoryID = next
+		}
+	}
+	h.nextID = next
 	// keep estimates comparable across the swap: carry the prompt-side overhead
 	// recorded with the last server count onto the replacement messages
 	var prevBase int

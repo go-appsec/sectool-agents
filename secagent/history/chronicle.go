@@ -91,7 +91,7 @@ func (c *Chronicle) Compact(currentIter, keepRecentIters int) (stripped, stubbed
 		if agent.StripAssistantThink(&c.messages[i]) {
 			stripped++
 		}
-		if agent.StubToolResult(&c.messages[i]) {
+		if agent.StubToolResult(&c.messages[i], "") {
 			stubbed++
 		}
 	}

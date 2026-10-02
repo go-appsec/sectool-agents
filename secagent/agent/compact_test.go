@@ -793,7 +793,7 @@ func TestStubToolResult(t *testing.T) {
 			ToolName:   "proxy_poll",
 			Content:    original,
 		}
-		changed := StubToolResult(&m)
+		changed := StubToolResult(&m, "")
 		assert.False(t, changed)
 		assert.Equal(t, original, m.Content)
 	})
@@ -801,7 +801,7 @@ func TestStubToolResult(t *testing.T) {
 	t.Run("preserves_existing_stub", func(t *testing.T) {
 		original := "(compacted: proxy_poll returned ~50 tokens — flow ABC)"
 		m := Message{Role: RoleTool, ToolCallID: "t1", ToolName: "proxy_poll", Content: original}
-		changed := StubToolResult(&m)
+		changed := StubToolResult(&m, "")
 		assert.False(t, changed)
 		assert.Equal(t, original, m.Content)
 	})
@@ -812,8 +812,36 @@ func TestStubToolResult(t *testing.T) {
 			Content:    strings.Repeat("x", 500),
 			Summary120: "summary",
 		}
-		changed := StubToolResult(&m)
+		changed := StubToolResult(&m, "")
 		assert.True(t, changed)
 		assert.True(t, strings.HasPrefix(m.Content, stubPrefix))
 	})
+}
+
+// Regression: a history assembled outside Drain can place tool results after an
+// assistant text message. The turn must swallow the late results together with
+// its assistant instead of orphaning them.
+func TestDropOldestTurn_LateResultsStayPaired(t *testing.T) {
+	t.Parallel()
+
+	msgs := []Message{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1", Function: ToolFunction{Name: "t"}}}},
+		{Role: RoleAssistant, Content: "thinking out loud"},
+		{Role: RoleTool, ToolCallID: "c1", Content: "result 1"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c2", Function: ToolFunction{Name: "t"}}}},
+		{Role: RoleTool, ToolCallID: "c2", Content: "result 2"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c3", Function: ToolFunction{Name: "t"}}}},
+		{Role: RoleTool, ToolCallID: "c3", Content: "result 3"},
+	}
+
+	next, dropped, ok := dropOldestTurn(msgs, 2)
+	require.True(t, ok)
+	// the whole c1 turn (assistant, text, late result) drops as one unit
+	assert.Equal(t, msgs[1:4], dropped)
+	require.Len(t, next, 5)
+	assert.Equal(t, RoleSystem, next[0].Role)
+	assert.Equal(t, "c2", next[1].ToolCalls[0].ID)
+	assert.Equal(t, "c3", next[3].ToolCalls[0].ID)
+	assert.Equal(t, []int{1, 4, 6}, turnStarts(msgs))
 }

@@ -43,7 +43,6 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 			func(c context.Context) (agent.TurnSummary, error) { return verifier.Drain(c) },
 			PhaseRecover{
 				Compact: func() {
-					verifier.Interrupt()
 					// substep 1 directive is the installed compose; substeps 2..N requeue the continue
 					if substep > 1 {
 						verifier.Query(BuildVerifierContinuePrompt(
