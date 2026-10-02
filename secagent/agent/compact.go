@@ -96,7 +96,8 @@ func StubToolResult(m *Message) bool {
 	return true
 }
 
-// ApplyCompactionDefaults fills zero-value fields in opt with package defaults.
+// ApplyCompactionDefaults fills zero-value fields in opt with package defaults and
+// repairs incoherent settings so compaction can always make progress.
 func ApplyCompactionDefaults(opt *CompactionOptions) {
 	if opt.HighWatermark <= 0 {
 		opt.HighWatermark = 0.80
@@ -109,6 +110,10 @@ func ApplyCompactionDefaults(opt *CompactionOptions) {
 	}
 	if opt.RecoveryThreshold <= 0 {
 		opt.RecoveryThreshold = defaultRecoveryThreshold
+	}
+	// target must sit below the trigger or the passes can never satisfy the final check
+	if opt.LowWatermark >= opt.HighWatermark {
+		opt.LowWatermark = opt.HighWatermark / 2
 	}
 }
 
@@ -146,8 +151,11 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	}
 
 	msgs := h.Snapshot()
+	// clamp so the keep window never covers the whole history
+	keep := clampKeepTurns(msgs, opt.KeepTurns)
+
 	// every pass protects the same trailing keep-turn window
-	bound := KeepWindowStart(msgs, opt.KeepTurns)
+	bound := KeepWindowStart(msgs, keep)
 
 	// strip inline think from oldest assistants; trailing window keeps chain-of-thought continuity.
 	// With a wire shape the wire already drops think from assistants outside the keep-think tail,
@@ -239,7 +247,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	// Drop oldest full turn triples until under target or nothing left
 	var droppedTurns int
 	for h.EstimateTokens() > target {
-		newMsgs, dropped := dropOldestTurn(msgs, opt.KeepTurns)
+		newMsgs, dropped := dropOldestTurn(msgs, keep)
 		if !dropped {
 			break
 		}
@@ -337,10 +345,7 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 	if keep < 2 {
 		keep = 2
 	}
-	var floor int
-	if len(msgs) > 0 && msgs[0].Role == "system" {
-		floor = 1
-	}
+	floor := systemFloor(msgs)
 	ceil := KeepWindowStart(msgs, keep)
 	if ceil <= floor {
 		return msgs, false
@@ -373,21 +378,28 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 	return msgs, false
 }
 
-// KeepWindowStart returns the index of the first message in the trailing keep-turn window
-// that compaction must leave untouched. A turn is an assistant message through its paired
-// tool results plus an immediately following text assistant, matching the turn-splitting
-// in dropOldestTurn. When fewer than keep turns exist the whole history minus the system
-// prompt is protected. keep is floored at 1.
-func KeepWindowStart(msgs []Message, keep int) int {
-	if keep < 1 {
-		keep = 1
+// clampKeepTurns caps keep so the protected window leaves at least one turn
+// compactable; an oversized keep would otherwise turn every pass into a no-op.
+func clampKeepTurns(msgs []Message, keep int) int {
+	if n := len(turnStarts(msgs)); n > 1 {
+		return min(keep, n-1)
 	}
-	var floor int
+	return keep
+}
+
+// systemFloor returns the first message index after a leading system prompt.
+func systemFloor(msgs []Message) int {
 	if len(msgs) > 0 && msgs[0].Role == RoleSystem {
-		floor = 1
+		return 1
 	}
+	return 0
+}
+
+// turnStarts returns the start index of every assistant-led turn in msgs,
+// matching the turn-splitting in dropOldestTurn.
+func turnStarts(msgs []Message) []int {
 	var starts []int
-	for i := floor; i < len(msgs); {
+	for i := systemFloor(msgs); i < len(msgs); {
 		if msgs[i].Role != RoleAssistant {
 			i++
 			continue
@@ -401,6 +413,20 @@ func KeepWindowStart(msgs []Message, keep int) int {
 			i++
 		}
 	}
+	return starts
+}
+
+// KeepWindowStart returns the index of the first message in the trailing keep-turn window
+// that compaction must leave untouched. A turn is an assistant message through its paired
+// tool results plus an immediately following text assistant, matching the turn-splitting
+// in dropOldestTurn. When fewer than keep turns exist the whole history minus the system
+// prompt is protected. keep is floored at 1.
+func KeepWindowStart(msgs []Message, keep int) int {
+	if keep < 1 {
+		keep = 1
+	}
+	floor := systemFloor(msgs)
+	starts := turnStarts(msgs)
 	if len(starts) <= keep {
 		return floor
 	}

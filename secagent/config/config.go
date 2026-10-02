@@ -77,6 +77,8 @@ const (
 	MaxWorkers          = 5
 	MaxAutonomousBudget = 20
 	DefaultAutoBudget   = 8
+	MinKeepTurns        = 1
+	MaxKeepTurns        = 32
 )
 
 // Parse parses args against fs and returns a populated Config.
@@ -92,8 +94,8 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.MaxContext, "max-context", 200000, "main-model context window (tokens)")
 	fs.IntVar(&c.LogMaxContext, "log-max-context", 0, "log-model context window; 0 inherits --max-context")
 	fs.IntVar(&c.ToolResultMaxBytes, "tool-result-max-bytes", 8192, "per-tool-result truncation cap")
-	fs.Float64Var(&c.HighWatermark, "compaction-high-watermark", 0.80, "compaction trigger fraction")
-	fs.Float64Var(&c.LowWatermark, "compaction-low-watermark", 0.40, "compaction target fraction")
+	fs.Float64Var(&c.HighWatermark, "compaction-high-watermark", 0.80, "compaction trigger fraction, in (0, 1]")
+	fs.Float64Var(&c.LowWatermark, "compaction-low-watermark", 0.40, "compaction target fraction, must be below --compaction-high-watermark")
 	fs.IntVar(&c.KeepTurns, "compaction-keep-turns", 4, "turns never compacted")
 	fs.IntVar(&c.KeepThinkTurns, "keep-think-turns", 0, "assistant messages to preserve <think> blocks on when replaying history (0 = auto: 4 if max-context ≤ 128k, else 8)")
 
@@ -142,6 +144,14 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	}
 	c.MaxWorkers = min(max(c.MaxWorkers, MinWorkers), MaxWorkers)
 	c.AutonomousBudget = min(max(c.AutonomousBudget, 1), MaxAutonomousBudget)
+	if c.HighWatermark <= 0 || c.HighWatermark > 1 {
+		return nil, fmt.Errorf("--compaction-high-watermark: %g outside (0, 1]", c.HighWatermark)
+	}
+	if c.LowWatermark <= 0 || c.LowWatermark >= c.HighWatermark {
+		return nil, fmt.Errorf("--compaction-low-watermark: %g must be in (0, --compaction-high-watermark) (%g)",
+			c.LowWatermark, c.HighWatermark)
+	}
+	c.KeepTurns = min(max(c.KeepTurns, MinKeepTurns), MaxKeepTurns)
 	if c.LogModel == "" {
 		c.LogModel = c.Model
 	}

@@ -60,6 +60,36 @@ func TestParse(t *testing.T) {
 		assert.Equal(t, 1, c.AutonomousBudget)
 	})
 
+	t.Run("watermark_out_of_range", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"-prompt", "x", "-compaction-high-watermark", "0"},
+			{"-prompt", "x", "-compaction-high-watermark", "1.5"},
+			{"-prompt", "x", "-compaction-low-watermark", "-0.1"},
+		} {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			_, err := Parse(fs, args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "watermark")
+		}
+	})
+
+	t.Run("watermark_inversion_rejected", func(t *testing.T) {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		_, err := Parse(fs, []string{"-prompt", "x", "-compaction-high-watermark", "0.5", "-compaction-low-watermark", "0.9"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "low-watermark")
+	})
+
+	t.Run("keep_turns_clamped", func(t *testing.T) {
+		c := parse(t, "-prompt", "x", "-compaction-keep-turns", "999")
+		assert.Equal(t, MaxKeepTurns, c.KeepTurns)
+
+		c = parse(t, "-prompt", "x", "-compaction-keep-turns", "-3")
+		assert.Equal(t, MinKeepTurns, c.KeepTurns)
+	})
+
 	t.Run("log_model_inherits", func(t *testing.T) {
 		c := parse(t, "-prompt", "x", "-model", "main")
 		assert.Equal(t, "main", c.Model)

@@ -294,6 +294,34 @@ func buildErrorStreakHistory(maxCtx int, n int) *History {
 	return h
 }
 
+func TestApplyCompactionDefaults(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fills_zero_values", func(t *testing.T) {
+		var opt CompactionOptions
+		ApplyCompactionDefaults(&opt)
+		assert.InDelta(t, 0.80, opt.HighWatermark, 0)
+		assert.InDelta(t, 0.40, opt.LowWatermark, 0)
+		assert.Equal(t, 4, opt.KeepTurns)
+		assert.InDelta(t, defaultRecoveryThreshold, opt.RecoveryThreshold, 0)
+	})
+
+	t.Run("preserves_explicit_values", func(t *testing.T) {
+		opt := CompactionOptions{HighWatermark: 0.9, LowWatermark: 0.3, KeepTurns: 6, RecoveryThreshold: 0.5}
+		ApplyCompactionDefaults(&opt)
+		assert.InDelta(t, 0.9, opt.HighWatermark, 0)
+		assert.InDelta(t, 0.3, opt.LowWatermark, 0)
+		assert.Equal(t, 6, opt.KeepTurns)
+		assert.InDelta(t, 0.5, opt.RecoveryThreshold, 0)
+	})
+
+	t.Run("repairs_inverted_watermarks", func(t *testing.T) {
+		opt := CompactionOptions{HighWatermark: 0.5, LowWatermark: 0.9}
+		ApplyCompactionDefaults(&opt)
+		assert.Less(t, opt.LowWatermark, opt.HighWatermark)
+	})
+}
+
 func TestCompactErrorsOnly(t *testing.T) {
 	t.Parallel()
 
@@ -385,6 +413,26 @@ func TestCompactRemainder(t *testing.T) {
 			HardTruncateOnOverflow: false,
 		})
 		require.ErrorContains(t, err, "high watermark")
+	})
+
+	t.Run("oversized_keep_turns_degrades", func(t *testing.T) {
+		big := strings.Repeat("x", 6_000)
+		h := buildFattyHistory(26_000, big)
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 64,
+		})
+		require.NoError(t, err)
+		assert.NotEmpty(t, report.PassesApplied)
+	})
+
+	t.Run("inverted_watermarks_repaired", func(t *testing.T) {
+		big := strings.Repeat("x", 6_000)
+		h := buildFattyHistory(8192, big)
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.90, KeepTurns: 1,
+		})
+		require.NoError(t, err)
+		assert.NotEmpty(t, report.PassesApplied)
 	})
 
 	t.Run("under_target_noop", func(t *testing.T) {
