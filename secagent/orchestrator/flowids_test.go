@@ -10,9 +10,10 @@ func TestExtractFlowIDs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		inputs []any
-		want   []string
+		name      string
+		inputs    []any
+		want      []string
+		unordered bool
 	}{
 		{
 			name:   "plain_text",
@@ -83,9 +84,11 @@ func TestExtractFlowIDs(t *testing.T) {
 			want:   []string{"abc123", "def456"},
 		},
 		{
-			name:   "numeric_map_value",
-			inputs: []any{map[string]any{"flow_id": 123456, "flow_b": int64(123457)}},
-			want:   []string{"123456", "123457"},
+			name: "numeric_map_value",
+			// map iteration order is random, so compare as a set
+			inputs:    []any{map[string]any{"flow_id": 123456, "flow_b": int64(123457)}},
+			want:      []string{"123456", "123457"},
+			unordered: true,
 		},
 		{
 			name:   "rejects_non_string_map_value",
@@ -95,7 +98,12 @@ func TestExtractFlowIDs(t *testing.T) {
 	}
 	for _, c := range tests {
 		t.Run(c.name, func(t *testing.T) {
-			assert.Equal(t, c.want, ExtractFlowIDs(c.inputs...))
+			got := ExtractFlowIDs(c.inputs...)
+			if c.unordered {
+				assert.ElementsMatch(t, c.want, got)
+			} else {
+				assert.Equal(t, c.want, got)
+			}
 		})
 	}
 }

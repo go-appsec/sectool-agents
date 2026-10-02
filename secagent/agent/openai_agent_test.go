@@ -483,7 +483,10 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 
 	t.Run("retry_after_clamped", func(t *testing.T) {
 		// A hostile Retry-After must be clamped to the per-wait ceiling and
-		// reported via OnRetryWaitClamped, never slept in full
+		// reported via OnRetryWaitClamped, never slept in full. The clamped
+		// wait consumes the whole turn-timeout backoff budget, so the turn
+		// ends either as timed out (nil error) or with the rate-limit error
+		// once retries exhaust, depending on which deadline wins the race.
 		apiErr := &openai.APIError{HTTPStatusCode: 429, Message: "retry after 86400 seconds"}
 		client := &fakeChatClient{
 			responses: []ChatResponse{{}, {}},
@@ -500,12 +503,17 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 		})
 		a.Query("go")
 		start := time.Now()
-		_, err := a.Drain(t.Context())
+		sum, err := a.Drain(t.Context())
 		elapsed := time.Since(start)
-		require.Error(t, err)
 		assert.Less(t, elapsed, 2*time.Second)
 		assert.Equal(t, 86400*time.Second, requested)
 		assert.Equal(t, 60*time.Millisecond, effective)
+		if err == nil {
+			assert.True(t, sum.TimedOut)
+			assert.Equal(t, escalationSilent, sum.EscalationReason)
+		} else {
+			assert.ErrorIs(t, err, apiErr)
+		}
 	})
 
 	t.Run("backoff_budget_bounded", func(t *testing.T) {
