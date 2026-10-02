@@ -141,6 +141,18 @@ func (f *OpenAIFactory) callbackErrorCallback(role string) func(error) {
 	}
 }
 
+// retryClampCallback returns a hook that logs Retry-After hints clamped to
+// the per-wait ceiling.
+func (f *OpenAIFactory) retryClampCallback(role string) func(requested, effective time.Duration) {
+	return func(requested, effective time.Duration) {
+		f.Log.Log("agent", "retry-wait-clamped", map[string]any{
+			"role":      role,
+			"requested": requested.String(),
+			"wait":      effective.String(),
+		})
+	}
+}
+
 // compactCallback returns a hook that logs compaction events for role.
 func (f *OpenAIFactory) compactCallback(role string) func(agent.CompactionReport) {
 	return func(r agent.CompactionReport) {
@@ -186,25 +198,26 @@ func (f *OpenAIFactory) buildAgent(
 		compactorOpts.OnDistillResults = history.DistillCallback(f.Summarizer)
 	}
 	cfg := agent.OpenAIAgentConfig{
-		Model:             model,
-		SystemPrompt:      systemPrompt,
-		Pool:              pool,
-		MaxContext:        maxContext,
-		TurnTimeout:       f.Cfg.TurnTimeout,
-		PerToolTimeout:    f.Cfg.PerToolTimeout,
-		MaxParallelTools:  f.Cfg.MaxParallelTools,
-		MaxTurnsPerAgent:  f.Cfg.MaxTurnsPerAgent,
-		KeepThinkTurns:    f.Cfg.EffectiveKeepThinkTurns(maxContext),
-		Reasoning:         reasoning,
-		OnMalformedCall:   f.malformedCallback(model),
-		OnRequestStart:    onReqStart,
-		OnRequestEnd:      onReqEnd,
-		OnToolStart:       onToolStart,
-		OnToolEnd:         onToolEnd,
-		OnFuzzyToolMatch:  f.fuzzyToolMatchCallback(role),
-		OnContextOverflow: onContextOverflow,
-		OnHardTruncate:    f.compactCallback(role),
-		Compactor:         history.NewLayeredCompactor(compactorOpts),
+		Model:              model,
+		SystemPrompt:       systemPrompt,
+		Pool:               pool,
+		MaxContext:         maxContext,
+		TurnTimeout:        f.Cfg.TurnTimeout,
+		PerToolTimeout:     f.Cfg.PerToolTimeout,
+		MaxParallelTools:   f.Cfg.MaxParallelTools,
+		MaxTurnsPerAgent:   f.Cfg.MaxTurnsPerAgent,
+		KeepThinkTurns:     f.Cfg.EffectiveKeepThinkTurns(maxContext),
+		Reasoning:          reasoning,
+		OnMalformedCall:    f.malformedCallback(model),
+		OnRequestStart:     onReqStart,
+		OnRequestEnd:       onReqEnd,
+		OnToolStart:        onToolStart,
+		OnToolEnd:          onToolEnd,
+		OnFuzzyToolMatch:   f.fuzzyToolMatchCallback(role),
+		OnRetryWaitClamped: f.retryClampCallback(role),
+		OnContextOverflow:  onContextOverflow,
+		OnHardTruncate:     f.compactCallback(role),
+		Compactor:          history.NewLayeredCompactor(compactorOpts),
 	}
 	if setFlowExtractor {
 		cfg.FlowIDExtractor = ExtractFlowIDs

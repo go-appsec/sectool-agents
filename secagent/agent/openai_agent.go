@@ -49,6 +49,9 @@ type OpenAIAgentConfig struct {
 	// OnFuzzyToolMatch fires when a tool-name lookup miss was recovered via fuzzy fallback.
 	// received is the model-emitted name; resolved is the registered name that ran.
 	OnFuzzyToolMatch func(received, resolved string)
+	// OnRetryWaitClamped fires when an endpoint Retry-After hint exceeds the
+	// per-wait ceiling and is clamped (optional).
+	OnRetryWaitClamped func(requested, effective time.Duration)
 	// OnRequestStart fires before each chat-completion HTTP call (optional).
 	OnRequestStart func(attempt int)
 	// OnRequestEnd fires after each chat-completion HTTP call (optional).
@@ -621,6 +624,11 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 	var hardTruncated bool
 	var retries int
 
+	// backoff sleeps draw from a fixed budget so a hostile Retry-After
+	// cannot pin the turn well past the per-turn timeout
+	waitCtx, cancelWait := context.WithTimeout(ctx, a.cfg.TurnTimeout)
+	defer cancelWait()
+
 	for attempt := 0; ; attempt++ {
 		resp, err := a.dispatchChatRequest(ctx, attempt, msgs, tools)
 		if err == nil {
@@ -662,8 +670,11 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 			if retries >= a.cfg.DrainRetryMax {
 				return ChatResponse{}, err
 			}
-			wait := BackoffFor(cat, retries, retryAfter, a.cfg.DrainRetryBackoff, a.cfg.Rand)
-			if err := sleepCtx(ctx, wait); err != nil {
+			wait := BackoffFor(cat, retries, retryAfter, a.cfg.DrainRetryBackoff, a.cfg.TurnTimeout, a.cfg.Rand)
+			if retryAfter > wait && a.cfg.OnRetryWaitClamped != nil {
+				a.cfg.OnRetryWaitClamped(retryAfter, wait)
+			}
+			if err := sleepCtx(waitCtx, wait); err != nil {
 				return ChatResponse{}, err
 			}
 			retries++

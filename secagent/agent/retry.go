@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"math"
 	"math/rand"
 	"net"
 	"regexp"
@@ -138,27 +137,41 @@ func parseRetryAfter(message string) time.Duration {
 }
 
 // BackoffFor returns the wait time for retry category cat at the
-// 0-indexed attempt. rng may be nil to use package-level randomness.
-func BackoffFor(cat ErrCategory, attempt int, retryAfter, base time.Duration, rng *rand.Rand) time.Duration {
+// 0-indexed attempt. retryAfter is the endpoint Retry-After hint (0 when
+// absent). maxWait caps the result when positive. rng may be nil to use
+// package-level randomness.
+func BackoffFor(cat ErrCategory, attempt int, retryAfter, base, maxWait time.Duration, rng *rand.Rand) time.Duration {
+	var d time.Duration
 	switch cat {
 	case ErrRateLimit:
 		if retryAfter > 0 {
-			return retryAfter
+			d = retryAfter
+		} else {
+			d = jitter(expBackoff(base, attempt, 60*time.Second), rng)
 		}
-		return jitter(expBackoff(base, attempt, 60*time.Second), rng)
 	case ErrTransientNet:
-		return jitter(expBackoff(base, attempt, 30*time.Second), rng)
-	default:
-		return 0
+		d = jitter(expBackoff(base, attempt, 30*time.Second), rng)
 	}
+	return clampWait(d, maxWait)
+}
+
+// clampWait caps d at maxWait when maxWait is positive.
+func clampWait(d, maxWait time.Duration) time.Duration {
+	if maxWait > 0 && d > maxWait {
+		return maxWait
+	}
+	return d
 }
 
 func expBackoff(base time.Duration, attempt int, cap time.Duration) time.Duration {
 	if base <= 0 {
 		base = 2 * time.Second
 	}
-	d := time.Duration(float64(base) * math.Pow(2, float64(attempt)))
-	if d > cap {
+	d := base
+	for i := 0; i < attempt && d < cap; i++ {
+		d *= 2
+	}
+	if d > cap || d <= 0 { // d <= 0 guards duration overflow
 		return cap
 	}
 	return d

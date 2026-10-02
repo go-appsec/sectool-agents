@@ -481,6 +481,56 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 		assert.Equal(t, 2, int(client.idx))
 	})
 
+	t.Run("retry_after_clamped", func(t *testing.T) {
+		// A hostile Retry-After must be clamped to the per-wait ceiling and
+		// reported via OnRetryWaitClamped, never slept in full
+		apiErr := &openai.APIError{HTTPStatusCode: 429, Message: "retry after 86400 seconds"}
+		client := &fakeChatClient{
+			responses: []ChatResponse{{}, {}},
+			errors:    []error{apiErr, apiErr},
+		}
+		var requested, effective time.Duration
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", Pool: newPoolWith(client),
+			DrainRetryMax: 1, DrainRetryBackoff: time.Microsecond,
+			TurnTimeout: 60 * time.Millisecond,
+			OnRetryWaitClamped: func(req, eff time.Duration) {
+				requested, effective = req, eff
+			},
+		})
+		a.Query("go")
+		start := time.Now()
+		_, err := a.Drain(t.Context())
+		elapsed := time.Since(start)
+		require.Error(t, err)
+		assert.Less(t, elapsed, 2*time.Second)
+		assert.Equal(t, 86400*time.Second, requested)
+		assert.Equal(t, 60*time.Millisecond, effective)
+	})
+
+	t.Run("backoff_budget_bounded", func(t *testing.T) {
+		// Total backoff sleep per sendWithRetry is capped at the turn timeout;
+		// once exhausted, the turn escalates as timed out instead of retrying forever
+		apiErr := &openai.APIError{HTTPStatusCode: 429, Message: "retry after 40 ms"}
+		client := &fakeChatClient{
+			responses: []ChatResponse{{}, {}, {}, {}},
+			errors:    []error{apiErr, apiErr, apiErr, apiErr},
+		}
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", Pool: newPoolWith(client),
+			DrainRetryMax: 5, DrainRetryBackoff: time.Microsecond,
+			TurnTimeout: 100 * time.Millisecond,
+		})
+		a.Query("go")
+		start := time.Now()
+		sum, err := a.Drain(t.Context())
+		elapsed := time.Since(start)
+		require.NoError(t, err)
+		assert.Less(t, elapsed, 2*time.Second)
+		assert.True(t, sum.TimedOut)
+		assert.Equal(t, escalationSilent, sum.EscalationReason)
+	})
+
 	t.Run("exhausted_returns_error", func(t *testing.T) {
 		flaky := &fakeChatClient{
 			responses: []ChatResponse{{}, {}, {}},
