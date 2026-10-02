@@ -106,6 +106,9 @@ var overflowMarkers = []string{
 	"context_length_exceeded",
 	"maximum context length",
 	"context size has been exceeded",
+	// Anthropic Messages API rejections
+	"prompt is too long",
+	"exceed context limit",
 }
 
 // isOverflowMessage reports whether msg carries an explicit context-length rejection.

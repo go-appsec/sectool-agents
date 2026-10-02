@@ -333,16 +333,27 @@ func (f *OpenAIFactory) NewSynthesisDirector() (agent.Agent, error) {
 func (f *OpenAIFactory) Close() error { return nil }
 
 // buildClientPool returns a bounded-concurrency ClientPool of n distinct ChatClient instances against baseURL.
-// httpTimeout caps each HTTP call; 0 disables it.
-func buildClientPool(baseURL, apiKey string, n int, httpTimeout time.Duration) *agent.ClientPool {
+// httpTimeout caps each HTTP call; 0 disables it. The wire API is auto-detected
+// for model unless forceAnthropic is set.
+func buildClientPool(baseURL, apiKey, model string, n int, httpTimeout time.Duration,
+	anthropicMaxTokens int, forceAnthropic bool) *agent.ClientPool {
 	if n < 1 {
 		n = 1
 	}
 	clients := make([]agent.ChatClient, 0, n)
 	for i := 0; i < n; i++ {
-		clients = append(clients, agent.NewOpenAIChatClient(baseURL, apiKey, httpTimeout))
+		clients = append(clients, newChatClient(baseURL, apiKey, model, httpTimeout, anthropicMaxTokens, forceAnthropic))
 	}
 	return agent.NewClientPoolWithClients(clients)
+}
+
+// newChatClient returns the ChatClient matching the detected wire API.
+func newChatClient(baseURL, apiKey, model string, httpTimeout time.Duration,
+	anthropicMaxTokens int, forceAnthropic bool) agent.ChatClient {
+	if agent.DetectChatFormat(baseURL, model, forceAnthropic) == agent.ChatFormatAnthropic {
+		return agent.NewAnthropicChatClient(baseURL, apiKey, httpTimeout, anthropicMaxTokens)
+	}
+	return agent.NewOpenAIChatClient(baseURL, apiKey, httpTimeout)
 }
 
 // resolveFormat returns the reasoning format for (baseURL, model) via cache, probing through client on cache miss.
@@ -446,8 +457,9 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	mcpURL := srv.URL
 
 	log.Log("server", "models", map[string]any{
-		"model":     cfg.Model,
-		"log_model": cfg.LogModel,
+		"model":      cfg.Model,
+		"log_model":  cfg.LogModel,
+		"api_format": string(agent.DetectChatFormat(cfg.BaseURL, cfg.Model, cfg.AnthropicMessages)),
 	})
 	if cfg.AllowBash {
 		log.Log("server", "bash enabled (--allow-bash)", map[string]any{
@@ -458,9 +470,11 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 
 	// 2m headroom keeps context cancellation as the normal termination path
 	httpTimeout := cfg.TurnTimeout + 2*time.Minute
-	pool := buildClientPool(cfg.BaseURL, cfg.APIKey, cfg.AgentPoolSize, httpTimeout)
+	pool := buildClientPool(cfg.BaseURL, cfg.APIKey, cfg.Model, cfg.AgentPoolSize, httpTimeout,
+		cfg.AnthropicMaxTokens, cfg.AnthropicMessages)
 	// dedicated log pool isolates narrator from main-pool contention
-	logPool := buildClientPool(cfg.BaseURL, cfg.APIKey, cfg.LogPoolSize(), httpTimeout)
+	logPool := buildClientPool(cfg.BaseURL, cfg.APIKey, cfg.LogModel, cfg.LogPoolSize(), httpTimeout,
+		cfg.AnthropicMaxTokens, cfg.AnthropicMessages)
 	mainReasoning, logReasoning := probeReasoningHandlers(ctx, cfg, pool, logPool, log)
 
 	malformed := NewMalformedCounter(log)

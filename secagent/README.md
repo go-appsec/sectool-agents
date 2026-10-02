@@ -91,6 +91,8 @@ bin/secagent \
 | `--model` | - | Main model ID (workers, verifier, director, boundary-summarize) |
 | `--log-model` | (= `--model`) | Model ID for the narrator |
 | `--agent-pool-size` | `4` | Concurrent model-request bound (shared pool) |
+| `--anthropic-messages` | `false` | Force the Anthropic Messages API (default: auto-detect from base URL and model) |
+| `--anthropic-max-tokens` | `40000` | Default `max_tokens` for Anthropic Messages requests |
 
 **Context / compaction**
 

@@ -19,6 +19,10 @@ type Config struct {
 	LogModel      string // narrator; defaults to Model
 	AgentPoolSize int    // shared pool size
 
+	// API format
+	AnthropicMessages  bool // force the Anthropic Messages API; off = auto-detect
+	AnthropicMaxTokens int  // default max_tokens for Messages API requests
+
 	// Context / compaction
 	MaxContext         int // workers, verifier, director context window
 	LogMaxContext      int // log-model context window; defaults to MaxContext
@@ -91,6 +95,11 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.LogModel, "log-model", "", "model ID for the narrator; defaults to --model")
 	fs.IntVar(&c.AgentPoolSize, "agent-pool-size", 4, "concurrent model request bound (shared pool)")
 
+	fs.BoolVar(&c.AnthropicMessages, "anthropic-messages", false,
+		"force the Anthropic Messages API (default: auto-detect from base URL and model)")
+	fs.IntVar(&c.AnthropicMaxTokens, "anthropic-max-tokens", 0,
+		"default max_tokens for Anthropic Messages requests (0 = 40000)")
+
 	fs.IntVar(&c.MaxContext, "max-context", 200000, "main-model context window (tokens)")
 	fs.IntVar(&c.LogMaxContext, "log-max-context", 0, "log-model context window; 0 inherits --max-context")
 	fs.IntVar(&c.ToolResultMaxBytes, "tool-result-max-bytes", 8192, "per-tool-result truncation cap")
@@ -157,6 +166,9 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	}
 	if c.LogMaxContext <= 0 {
 		c.LogMaxContext = c.MaxContext
+	}
+	if c.AnthropicMaxTokens < 0 {
+		return nil, fmt.Errorf("--anthropic-max-tokens: %d must be >= 0", c.AnthropicMaxTokens)
 	}
 	return c, nil
 }
