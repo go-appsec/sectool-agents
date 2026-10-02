@@ -259,7 +259,7 @@ Per iteration the director receives the verification summary, every worker's aut
 | `possible-finding` | Verifier filed a finding that heuristically matches one of this worker's candidates (title+endpoint tier match) but didn't explicitly link it. The director should follow up rather than assume coverage — a finding outcome should be explicit. |
 | `dismissed` | Verifier dismissed a candidate from this worker. |
 | `candidate` | Worker reported a candidate that's still pending at iter end. |
-| `silent` / `error` / `budget` | Escalation reason from a worker that didn't produce a candidate. |
+| `silent` / `error` / `budget` / `context_exhausted` | Escalation reason from a worker that didn't produce a candidate. `context_exhausted` means compaction could not bring the history under the high watermark, so the director should stop or recompose the worker rather than continue it. |
 
 The director's system prompt also defines an **angle exhaustion** rule: when a worker's history shows the same or near-identical angle across 2+ iterations with no finding filed, treat it as exhausted and pivot or stop — don't re-issue a lightly-reworded variant.
 

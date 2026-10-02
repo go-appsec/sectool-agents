@@ -396,7 +396,7 @@ func TestCompactRemainder(t *testing.T) {
 		report, err := CompactRemainder(h, CompactionOptions{
 			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
 		})
-		require.Error(t, err)
+		require.ErrorIs(t, err, ErrContextExhausted)
 		assert.Contains(t, report.PassesApplied, "turn-drop")
 	})
 
@@ -623,6 +623,93 @@ func TestCompactRemainder(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.NotEmpty(t, report.PassesApplied)
+	})
+
+	// Regression: when the protected tail alone exceeds the high watermark every
+	// drop pass is a no-op and the agent wedged on repeated terminal errors. The
+	// last-resort tail-stub pass must stub tail tool results (pairing preserved).
+	t.Run("tail_stub_rescues_protected_tail", func(t *testing.T) {
+		big := strings.Repeat("x", 6_000)
+		h := NewHistory(1024)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{
+			Role:      RoleAssistant,
+			Content:   "probe done",
+			ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+		})
+		h.Append(Message{
+			Role: RoleTool, ToolCallID: "t1", ToolName: "t",
+			Content: big, Summary120: "summary",
+		})
+
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 4,
+			HardTruncateOnOverflow: true,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, report.PassesApplied, "tail-stub")
+		assert.Less(t, report.After, report.Before)
+
+		snap := h.Snapshot()
+		assertToolPairing(t, snap)
+		assert.Equal(t, "probe done", snap[1].Content)
+		assert.True(t, IsCompactionStub(snap[2].Content))
+	})
+
+	// Regression: turn-drop only starts on assistants, so a history dominated by
+	// large user directives (installed via ReplaceHistory) could never shrink.
+	t.Run("user_drop_unblocks_directive_views", func(t *testing.T) {
+		big := strings.Repeat("u", 8_000)
+		h := NewHistory(4096)
+		h.Append(Message{Role: RoleSystem, Content: "sys prompt"})
+		h.Append(Message{Role: RoleUser, Content: big})
+		for i := range 3 {
+			id := strconv.Itoa(i)
+			h.Append(Message{
+				Role:      RoleAssistant,
+				Content:   "step " + id + ".",
+				ToolCalls: []ToolCall{{ID: id, Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: RoleTool, ToolCallID: id, ToolName: "t",
+				Content: "ok", Summary120: "ok",
+			})
+		}
+
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 4,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, report.PassesApplied, "user-drop")
+		assert.Positive(t, report.DroppedUsers)
+
+		snap := h.Snapshot()
+		assert.Equal(t, "sys prompt", snap[0].Content)
+		for _, m := range snap[1:] {
+			assert.NotEqual(t, RoleUser, m.Role)
+		}
+	})
+
+	// The tail-stub rescue is part of the hard-truncate fallback family; the
+	// fail-fast option must keep returning the overflow error.
+	t.Run("fail_fast_skips_tail_stub", func(t *testing.T) {
+		big := strings.Repeat("x", 6_000)
+		h := NewHistory(1024)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		h.Append(Message{
+			Role:      RoleAssistant,
+			Content:   "probe done",
+			ToolCalls: []ToolCall{{ID: "t1", Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+		})
+		h.Append(Message{
+			Role: RoleTool, ToolCallID: "t1", ToolName: "t",
+			Content: big, Summary120: "summary",
+		})
+		_, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 4,
+			HardTruncateOnOverflow: false,
+		})
+		require.ErrorIs(t, err, ErrContextExhausted)
 	})
 
 	t.Run("hard_truncate_on_overflow", func(t *testing.T) {

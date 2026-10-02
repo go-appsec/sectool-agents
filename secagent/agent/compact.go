@@ -13,8 +13,9 @@ type CompactionOptions struct {
 	HighWatermark float64 // e.g. 0.80
 	LowWatermark  float64 // e.g. 0.40
 	KeepTurns     int     // e.g. 4
-	// HardTruncateOnOverflow controls the final fallback. When true (default),
-	// drops turns down to a 2-turn window. When false, returns the overflow error.
+	// HardTruncateOnOverflow controls the final fallbacks. When true (default),
+	// drops turns down to a 2-turn window and, as a last resort, stubs tool
+	// results inside the protected tail. When false, returns the overflow error.
 	HardTruncateOnOverflow bool
 	// RecoveryThreshold is the fraction of EffectiveMaxContext that one compaction step must
 	// free to skip later, more expensive ones. 0 falls back to defaultRecoveryThreshold.
@@ -38,6 +39,7 @@ type CompactionReport struct {
 	SelfPrunedCalls  int // tool calls dropped by the self-prune callback
 	DistilledResults int // tool results replaced with distilled prose
 	AuxCallsSkipped  int // aux LLM calls denied by the per-pass aux call budget
+	DroppedUsers     int // stale user messages dropped outside the keep window
 }
 
 // StripAssistantThink removes inline `<think>...</think>` blocks from m's Content.
@@ -260,6 +262,23 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 		report.DroppedTurns = droppedTurns
 	}
 
+	// drop stale user messages; turn-drop only starts on assistants, so a history
+	// dominated by installed user directives would otherwise be uncompactable
+	var droppedUsers int
+	for h.EstimateTokens() > target {
+		next, dropped := dropOldestUser(msgs, keep)
+		if !dropped {
+			break
+		}
+		msgs = next
+		droppedUsers++
+		h.ReplaceAll(msgs)
+	}
+	if droppedUsers > 0 {
+		report.PassesApplied = append(report.PassesApplied, "user-drop")
+		report.DroppedUsers = droppedUsers
+	}
+
 	// hard truncate: a single huge tool result can survive turn-drop;
 	// shrink keep window to 2 to drop more while preserving tool pairing
 	if opt.HardTruncateOnOverflow && h.EstimateTokens() > high {
@@ -279,12 +298,31 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 		}
 	}
 
+	// last resort: the protected tail alone exceeds the high watermark; stub tool
+	// results inside it (pairing preserved) rather than wedging the agent
+	if opt.HardTruncateOnOverflow && h.EstimateTokens() > high {
+		var tailStubbed int
+		for i := systemFloor(msgs); i < len(msgs); i++ {
+			if msgs[i].IsRepairError {
+				continue
+			}
+			if StubToolResult(&msgs[i]) {
+				tailStubbed++
+			}
+		}
+		if tailStubbed > 0 {
+			h.ReplaceAll(slices.Clone(msgs))
+			report.PassesApplied = append(report.PassesApplied, "tail-stub")
+			report.StubbedResults += tailStubbed
+		}
+	}
+
 	after := h.EstimateTokens()
 	report.After = after
 	if after > high {
 		return report, fmt.Errorf(
-			"compaction could not reduce context below high watermark: %d > %d",
-			after, high,
+			"%w: compaction could not reduce context below high watermark: %d > %d",
+			ErrContextExhausted, after, high,
 		)
 	}
 	return report, nil
@@ -310,6 +348,7 @@ func MergeReports(a, b CompactionReport) CompactionReport {
 		SelfPrunedCalls:  a.SelfPrunedCalls + b.SelfPrunedCalls,
 		DistilledResults: a.DistilledResults + b.DistilledResults,
 		AuxCallsSkipped:  a.AuxCallsSkipped + b.AuxCallsSkipped,
+		DroppedUsers:     a.DroppedUsers + b.DroppedUsers,
 	}
 }
 
@@ -373,6 +412,23 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 		out := make([]Message, 0, len(msgs)-(end-i))
 		out = append(out, msgs[:i]...)
 		out = append(out, msgs[end:]...)
+		return out, true
+	}
+	return msgs, false
+}
+
+// dropOldestUser removes the oldest user message outside the trailing keep-turn
+// window. User messages never join tool pairing, so removal is wire-safe. Returns
+// the new slice and whether a user message was dropped.
+func dropOldestUser(msgs []Message, keep int) ([]Message, bool) {
+	bound := KeepWindowStart(msgs, clampKeepTurns(msgs, keep))
+	for i := systemFloor(msgs); i < bound; i++ {
+		if msgs[i].Role != RoleUser {
+			continue
+		}
+		out := make([]Message, 0, len(msgs)-1)
+		out = append(out, msgs[:i]...)
+		out = append(out, msgs[i+1:]...)
 		return out, true
 	}
 	return msgs, false

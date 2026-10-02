@@ -305,3 +305,19 @@ func TestCompactor_RetireOnPressureSkipsBelowWatermark(t *testing.T) {
 	})
 	require.NoError(t, c.MaybeCompact(t.Context(), h))
 }
+
+// An uncompactible history (one oversized assistant turn, nothing droppable) must
+// surface the terminal sentinel instead of a plain error.
+func TestCompactor_ContextExhaustedPropagates(t *testing.T) {
+	t.Parallel()
+
+	h := agent.NewHistory(200)
+	h.Append(agent.Message{Role: agent.RoleSystem, Content: "sys"})
+	h.Append(agent.Message{Role: agent.RoleAssistant, Content: strings.Repeat("x", 600)})
+
+	c := history.NewLayeredCompactor(history.CompactorOptions{
+		Compaction: agent.CompactionOptions{HighWatermark: 0.5, KeepTurns: 2},
+	})
+	err := c.MaybeCompact(t.Context(), h)
+	assert.ErrorIs(t, err, agent.ErrContextExhausted)
+}

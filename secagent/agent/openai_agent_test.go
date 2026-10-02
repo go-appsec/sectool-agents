@@ -1154,6 +1154,20 @@ func TestOpenAIAgent_DrainCompactor(t *testing.T) {
 		assert.Empty(t, client.calls)
 	})
 
+	t.Run("propagates_context_exhausted", func(t *testing.T) {
+		client := &fakeChatClient{}
+		a := NewOpenAIAgent(OpenAIAgentConfig{
+			Model: "m", SystemPrompt: "sys",
+			Pool:      newPoolWith(client),
+			Compactor: &stubCompactor{err: ErrContextExhausted},
+		})
+		a.Query("go")
+		sum, err := a.Drain(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, escalationContextExhausted, sum.EscalationReason)
+		assert.Empty(t, client.calls)
+	})
+
 	t.Run("nil_runs_normally", func(t *testing.T) {
 		client := &fakeChatClient{responses: []ChatResponse{{Content: "done"}}}
 		c := &stubCompactor{}

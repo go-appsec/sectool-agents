@@ -323,11 +323,15 @@ func (a *OpenAIAgent) DrainBounded(ctx context.Context, maxRounds int) (TurnSumm
 		}
 		if c := a.cfg.Compactor; c != nil {
 			if err := c.MaybeCompact(inner, a.history); err != nil {
-				if errors.Is(err, ErrRetireOnPressure) {
+				if errors.Is(err, ErrRetireOnPressure) || errors.Is(err, ErrContextExhausted) {
 					// RetireOnPressure agents (currently: recon worker) hit the high-watermark and
 					// stop cleanly so the controller can retire and summarize the full chronicle.
-					// This is a successful end-of-work signal, not a failure. Return nil error so
-					// the autonomous loop treats it like any other turn boundary.
+					// This is a successful end-of-work signal, not a failure. ErrContextExhausted
+					// means the protected tail alone exceeds the watermark; every later drain
+					// would fail identically, so escalate instead of silently retrying and let
+					// the orchestrator retire or recompose the agent. Both are turn boundaries,
+					// not failures: return nil error so the autonomous loop treats them like
+					// any other turn boundary.
 					summary.EscalationReason = escalationContextExhausted
 					return summary, nil
 				}
