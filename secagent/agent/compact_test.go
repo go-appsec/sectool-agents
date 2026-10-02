@@ -92,12 +92,13 @@ func TestMergeReports(t *testing.T) {
 	})
 
 	t.Run("counters_sum", func(t *testing.T) {
-		a := CompactionReport{StubbedResults: 1, DroppedTurns: 2, SelfPrunedCalls: 3}
-		b := CompactionReport{StubbedResults: 4, DroppedTurns: 5, SelfPrunedCalls: 6}
+		a := CompactionReport{StubbedResults: 1, DroppedTurns: 2, SelfPrunedCalls: 3, AuxCallsSkipped: 7}
+		b := CompactionReport{StubbedResults: 4, DroppedTurns: 5, SelfPrunedCalls: 6, AuxCallsSkipped: 8}
 		got := MergeReports(a, b)
 		assert.Equal(t, 5, got.StubbedResults)
 		assert.Equal(t, 7, got.DroppedTurns)
 		assert.Equal(t, 9, got.SelfPrunedCalls)
+		assert.Equal(t, 15, got.AuxCallsSkipped)
 	})
 }
 

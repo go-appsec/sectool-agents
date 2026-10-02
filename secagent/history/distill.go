@@ -22,8 +22,8 @@ const (
 )
 
 // DistillCallback returns an OnDistillResults callback; nil if s is unconfigured.
-func DistillCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.Message) ([]agent.Message, error) {
-	return func(ctx context.Context, snapshot []agent.Message) ([]agent.Message, error) {
+func DistillCallback(s *Summarizer) func(ctx context.Context, aux *AuxBudget, snapshot []agent.Message) ([]agent.Message, error) {
+	return func(ctx context.Context, aux *AuxBudget, snapshot []agent.Message) ([]agent.Message, error) {
 		if s == nil || s.Pool == nil || s.Model == "" {
 			return nil, nil
 		}
@@ -34,6 +34,12 @@ func DistillCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.M
 		out := slices.Clone(snapshot)
 		var distilledBatches, distilledMsgs int
 		for batchIdx, b := range batches {
+			if !aux.Allow() {
+				s.Log.Log("compact", "distill budget exhausted", map[string]any{
+					"batches_total": len(batches), "batches_run": batchIdx,
+				})
+				break
+			}
 			prose, err := runDistillBatch(ctx, s, b)
 			if err != nil {
 				s.Log.Log("compact", "distill batch error", map[string]any{

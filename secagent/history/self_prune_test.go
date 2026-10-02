@@ -84,7 +84,7 @@ func TestSelfPruneCallback(t *testing.T) {
 		cb := SelfPruneCallback(s)
 		snap := buildSelfPruneSnapshot(8)
 
-		dropIDs, err := cb(t.Context(), snap)
+		dropIDs, err := cb(t.Context(), nil, snap)
 		require.NoError(t, err)
 		require.Len(t, dropIDs, 3)
 		assert.Contains(t, dropIDs, "cA")
@@ -103,7 +103,7 @@ func TestSelfPruneCallback(t *testing.T) {
 		s := &Summarizer{Pool: poolOf(client), Model: "m", Log: NopLogger{}}
 		cb := SelfPruneCallback(s)
 
-		dropIDs, err := cb(t.Context(), buildSelfPruneSnapshot(8))
+		dropIDs, err := cb(t.Context(), nil, buildSelfPruneSnapshot(8))
 		require.NoError(t, err)
 		assert.Empty(t, dropIDs)
 		assert.Equal(t, 1, client.callCount())
@@ -118,7 +118,7 @@ func TestSelfPruneCallback(t *testing.T) {
 		s := &Summarizer{Pool: poolOf(client), Model: "m", Log: NopLogger{}}
 		cb := SelfPruneCallback(s)
 
-		dropIDs, err := cb(t.Context(), buildSelfPruneSnapshot(3))
+		dropIDs, err := cb(t.Context(), nil, buildSelfPruneSnapshot(3))
 		require.NoError(t, err)
 		assert.Empty(t, dropIDs)
 		assert.Equal(t, 0, client.callCount())
@@ -126,7 +126,7 @@ func TestSelfPruneCallback(t *testing.T) {
 
 	t.Run("nil_summarizer_no_calls", func(t *testing.T) {
 		cb := SelfPruneCallback(nil)
-		dropIDs, err := cb(t.Context(), buildSelfPruneSnapshot(8))
+		dropIDs, err := cb(t.Context(), nil, buildSelfPruneSnapshot(8))
 		require.NoError(t, err)
 		assert.Empty(t, dropIDs)
 	})
@@ -140,7 +140,7 @@ func TestSelfPruneCallback(t *testing.T) {
 		s := &Summarizer{Pool: poolOf(client), Model: "m", Log: NopLogger{}}
 		cb := SelfPruneCallback(s)
 
-		dropIDs, err := cb(t.Context(), buildSelfPruneSnapshot(8))
+		dropIDs, err := cb(t.Context(), nil, buildSelfPruneSnapshot(8))
 		require.Error(t, err)
 		assert.Empty(t, dropIDs)
 	})
@@ -155,7 +155,7 @@ func TestSelfPruneCallback(t *testing.T) {
 		s := &Summarizer{Pool: poolOf(client), Model: "m", Log: NopLogger{}}
 		cb := SelfPruneCallback(s)
 
-		dropIDs, err := cb(t.Context(), buildSelfPruneSnapshot(8))
+		dropIDs, err := cb(t.Context(), nil, buildSelfPruneSnapshot(8))
 		require.NoError(t, err)
 		require.Len(t, dropIDs, 2)
 		assert.Contains(t, dropIDs, "cA")
@@ -177,7 +177,7 @@ func TestSelfPruneCallback(t *testing.T) {
 		s := &Summarizer{Pool: poolOf(client), Model: "m", Log: NopLogger{}}
 		cb := SelfPruneCallback(s)
 
-		dropIDs, err := cb(t.Context(), buildSelfPruneSnapshot(8))
+		dropIDs, err := cb(t.Context(), nil, buildSelfPruneSnapshot(8))
 		require.NoError(t, err)
 		assert.Empty(t, dropIDs)
 		assert.Equal(t, 2, client.callCount())
@@ -277,7 +277,7 @@ func TestSelfPruneCallbackSkipsRepairErrors(t *testing.T) {
 	s := &Summarizer{Pool: poolOf(client), Model: "m", Log: NopLogger{}}
 	cb := SelfPruneCallback(s)
 
-	dropIDs, err := cb(t.Context(), snap)
+	dropIDs, err := cb(t.Context(), nil, snap)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"cD"}, dropIDs)
 }

@@ -75,7 +75,7 @@ func TestDistillCallback(t *testing.T) {
 		// 6 eligible events x 1KB each, trailing=4 fills keepWindow exactly
 		snap := buildDistillSnapshot(6, 1024, 4)
 
-		out, err := cb(t.Context(), snap)
+		out, err := cb(t.Context(), nil, snap)
 		require.NoError(t, err)
 		require.NotNil(t, out)
 		require.Len(t, out, len(snap))
@@ -99,7 +99,7 @@ func TestDistillCallback(t *testing.T) {
 		// keepWindow tight so trailing events don't bleed into the eligible range
 		snap := buildDistillSnapshot(2, 4096, 4)
 
-		out, err := cb(t.Context(), snap)
+		out, err := cb(t.Context(), nil, snap)
 		require.NoError(t, err)
 		assert.Nil(t, out)
 		assert.Equal(t, 0, client.callCount())
@@ -112,7 +112,7 @@ func TestDistillCallback(t *testing.T) {
 		// 4 eligible events x 50 bytes = 200 bytes < distillMinBatchBytes (2048)
 		snap := buildDistillSnapshot(4, 50, 4)
 
-		out, err := cb(t.Context(), snap)
+		out, err := cb(t.Context(), nil, snap)
 		require.NoError(t, err)
 		assert.Nil(t, out)
 		assert.Equal(t, 0, client.callCount())
@@ -127,7 +127,7 @@ func TestDistillCallback(t *testing.T) {
 		cb := DistillCallback(s)
 		snap := buildDistillSnapshot(6, 1024, 4)
 
-		out, err := cb(t.Context(), snap)
+		out, err := cb(t.Context(), nil, snap)
 		// Callback errors are absorbed per the contract: failed batches stay raw.
 		// With only one batch and it failed, no successful batches means nil
 		// replacement so maybeCompact knows nothing changed.
@@ -137,7 +137,7 @@ func TestDistillCallback(t *testing.T) {
 
 	t.Run("nil_summarizer_no_calls", func(t *testing.T) {
 		cb := DistillCallback(nil)
-		out, err := cb(t.Context(), buildDistillSnapshot(6, 1024, 4))
+		out, err := cb(t.Context(), nil, buildDistillSnapshot(6, 1024, 4))
 		require.NoError(t, err)
 		assert.Nil(t, out)
 	})
@@ -152,7 +152,7 @@ func TestDistillCallback(t *testing.T) {
 				snap[i].Content = agent.DistillPrefix + "1: prior summary)"
 			}
 		}
-		out, err := cb(t.Context(), snap)
+		out, err := cb(t.Context(), nil, snap)
 		require.NoError(t, err)
 		assert.Nil(t, out)
 		assert.Equal(t, 0, client.callCount())
@@ -170,7 +170,7 @@ func TestDistillCallback(t *testing.T) {
 		cb := DistillCallback(s)
 		snap := buildDistillSnapshot(12, 1024, 4)
 
-		out, err := cb(t.Context(), snap)
+		out, err := cb(t.Context(), nil, snap)
 		require.NoError(t, err)
 		require.NotNil(t, out)
 		assert.Equal(t, 2, client.callCount())
@@ -184,6 +184,41 @@ func TestDistillCallback(t *testing.T) {
 		}
 		assert.Contains(t, joined.String(), "Batch 1 prose.")
 		assert.Contains(t, joined.String(), "Batch 2 prose.")
+	})
+
+	t.Run("budget_stops_batch_processing", func(t *testing.T) {
+		client := &sequenceClient{
+			responses: []agent.ChatResponse{
+				{Content: "Batch 1 prose."},
+			},
+		}
+		s := &Summarizer{Pool: poolOf(client), Model: "m", Log: NopLogger{}}
+		cb := DistillCallback(s)
+		aux := newAuxBudget(1)
+		// 12 eligible events at distillMaxBatchEvents=6 each, 2 batches
+		snap := buildDistillSnapshot(12, 1024, 4)
+
+		out, err := cb(t.Context(), aux, snap)
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		assert.Equal(t, 1, client.callCount())
+		assert.Equal(t, 1, aux.Skipped())
+
+		// only the first batch was distilled; the second batch plus the
+		// trailing window stay raw
+		var distilled, raw int
+		for _, m := range out {
+			if m.Role != agent.RoleTool {
+				continue
+			}
+			if strings.HasPrefix(m.Content, agent.DistillPrefix) {
+				distilled++
+			} else {
+				raw++
+			}
+		}
+		assert.Equal(t, 6, distilled)
+		assert.Equal(t, 10, raw)
 	})
 }
 

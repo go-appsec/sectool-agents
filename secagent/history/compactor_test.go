@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,11 +64,11 @@ func TestCompactor_TieredFlow(t *testing.T) {
 				RecoveryThreshold:      0.01,
 				HardTruncateOnOverflow: true,
 			},
-			OnSelfPruneCandidates: func(_ context.Context, _ []agent.Message) ([]string, error) {
+			OnSelfPruneCandidates: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]string, error) {
 				bCalls++
 				return nil, nil
 			},
-			OnDistillResults: func(_ context.Context, _ []agent.Message) ([]agent.Message, error) {
+			OnDistillResults: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]agent.Message, error) {
 				cCalls++
 				return nil, nil
 			},
@@ -86,12 +87,12 @@ func TestCompactor_TieredFlow(t *testing.T) {
 				RecoveryThreshold:      0.99,
 				HardTruncateOnOverflow: true,
 			},
-			OnSelfPruneCandidates: func(_ context.Context, snap []agent.Message) ([]string, error) {
+			OnSelfPruneCandidates: func(_ context.Context, _ *history.AuxBudget, snap []agent.Message) ([]string, error) {
 				bCalls++
 				bSnapshotLen = len(snap)
 				return []string{"t0", "t1", "t2", "t3"}, nil
 			},
-			OnDistillResults: func(_ context.Context, _ []agent.Message) ([]agent.Message, error) {
+			OnDistillResults: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]agent.Message, error) {
 				cCalls++
 				return nil, nil
 			},
@@ -110,11 +111,11 @@ func TestCompactor_TieredFlow(t *testing.T) {
 				RecoveryThreshold:      0.99,
 				HardTruncateOnOverflow: true,
 			},
-			OnSelfPruneCandidates: func(_ context.Context, _ []agent.Message) ([]string, error) {
+			OnSelfPruneCandidates: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]string, error) {
 				bCalls++
 				return nil, nil
 			},
-			OnDistillResults: func(_ context.Context, snap []agent.Message) ([]agent.Message, error) {
+			OnDistillResults: func(_ context.Context, _ *history.AuxBudget, snap []agent.Message) ([]agent.Message, error) {
 				cCalls++
 				out := make([]agent.Message, len(snap))
 				copy(out, snap)
@@ -152,7 +153,7 @@ func TestCompactor_TieredFlow(t *testing.T) {
 				RecoveryThreshold:      0.99,
 				HardTruncateOnOverflow: true,
 			},
-			OnSelfPruneCandidates: func(_ context.Context, _ []agent.Message) ([]string, error) {
+			OnSelfPruneCandidates: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]string, error) {
 				return nil, errors.New("boom")
 			},
 			OnCallbackError: func(_ error) { summarizeErrs++ },
@@ -171,7 +172,7 @@ func TestCompactor_TieredFlow(t *testing.T) {
 				RecoveryThreshold:      0.99,
 				HardTruncateOnOverflow: true,
 			},
-			OnSelfPruneCandidates: func(_ context.Context, _ []agent.Message) ([]string, error) {
+			OnSelfPruneCandidates: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]string, error) {
 				return []string{"t0", "t1", "t2", "t3"}, nil
 			},
 			OnSelfPruneApplied: func(ids []string) {
@@ -193,7 +194,7 @@ func TestCompactor_TieredFlow(t *testing.T) {
 				RecoveryThreshold:      0.99,
 				HardTruncateOnOverflow: true,
 			},
-			OnSelfPruneCandidates: func(_ context.Context, _ []agent.Message) ([]string, error) {
+			OnSelfPruneCandidates: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]string, error) {
 				return nil, nil
 			},
 			OnSelfPruneApplied: func(_ []string) {
@@ -213,7 +214,7 @@ func TestCompactor_TieredFlow(t *testing.T) {
 				RecoveryThreshold:      0.99,
 				HardTruncateOnOverflow: true,
 			},
-			OnSelfPruneCandidates: func(_ context.Context, _ []agent.Message) ([]string, error) {
+			OnSelfPruneCandidates: func(_ context.Context, _ *history.AuxBudget, _ []agent.Message) ([]string, error) {
 				// "not-present" was already pruned by an earlier pass
 				return []string{"t0", "not-present", "t2"}, nil
 			},
@@ -223,6 +224,56 @@ func TestCompactor_TieredFlow(t *testing.T) {
 		})
 		_ = c.MaybeCompact(t.Context(), h)
 		assert.ElementsMatch(t, []string{"t0", "t2"}, appliedIDs)
+	})
+
+	t.Run("aux_callbacks_run_with_deadline", func(t *testing.T) {
+		var bHasDeadline, cHasDeadline bool
+		h := buildBigHistory(4096, false)
+		c := history.NewLayeredCompactor(history.CompactorOptions{
+			Compaction: agent.CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				RecoveryThreshold:      0.99,
+				HardTruncateOnOverflow: true,
+			},
+			AuxTimeout: time.Minute,
+			OnSelfPruneCandidates: func(ctx context.Context, _ *history.AuxBudget, _ []agent.Message) ([]string, error) {
+				_, bHasDeadline = ctx.Deadline()
+				return nil, nil
+			},
+			OnDistillResults: func(ctx context.Context, _ *history.AuxBudget, _ []agent.Message) ([]agent.Message, error) {
+				_, cHasDeadline = ctx.Deadline()
+				return nil, nil
+			},
+		})
+		require.NoError(t, c.MaybeCompact(t.Context(), h))
+		assert.True(t, bHasDeadline)
+		assert.True(t, cHasDeadline)
+	})
+
+	t.Run("aux_budget_skips_recorded", func(t *testing.T) {
+		var report agent.CompactionReport
+		h := buildBigHistory(4096, false)
+		c := history.NewLayeredCompactor(history.CompactorOptions{
+			Compaction: agent.CompactionOptions{
+				HighWatermark: 0.20, LowWatermark: 0.05, KeepTurns: 1,
+				RecoveryThreshold:      0.99,
+				HardTruncateOnOverflow: true,
+			},
+			AuxCallBudget: 1,
+			OnSelfPruneCandidates: func(_ context.Context, aux *history.AuxBudget, _ []agent.Message) ([]string, error) {
+				aux.Allow()
+				// free only one result so the distill pass still engages
+				return []string{"t0"}, nil
+			},
+			OnDistillResults: func(_ context.Context, aux *history.AuxBudget, _ []agent.Message) ([]agent.Message, error) {
+				aux.Allow()
+				aux.Allow()
+				return nil, nil
+			},
+			OnCompact: func(r agent.CompactionReport) { report = r },
+		})
+		require.NoError(t, c.MaybeCompact(t.Context(), h))
+		assert.Equal(t, 2, report.AuxCallsSkipped)
 	})
 }
 

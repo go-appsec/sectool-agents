@@ -3,16 +3,23 @@ package history
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/go-appsec/sectool-agents/secagent/agent"
 )
 
 // CompactorOptions configures a LayeredCompactor.
 type CompactorOptions struct {
-	Compaction            agent.CompactionOptions
-	RetireOnPressure      bool
-	OnSelfPruneCandidates func(context.Context, []agent.Message) ([]string, error)
-	OnDistillResults      func(context.Context, []agent.Message) ([]agent.Message, error)
+	Compaction       agent.CompactionOptions
+	RetireOnPressure bool
+	// AuxTimeout bounds each aux callback (self-prune, distill); 0 falls back
+	// to defaultAuxTimeout.
+	AuxTimeout time.Duration
+	// AuxCallBudget caps aux LLM calls per compaction pass; 0 falls back to
+	// defaultAuxCallBudget.
+	AuxCallBudget         int
+	OnSelfPruneCandidates func(context.Context, *AuxBudget, []agent.Message) ([]string, error)
+	OnDistillResults      func(context.Context, *AuxBudget, []agent.Message) ([]agent.Message, error)
 	OnSelfPruneApplied    func([]string)
 	// OnCallbackError logs failures from aux passes.
 	OnCallbackError func(error)
@@ -61,6 +68,7 @@ func (c *LayeredCompactor) MaybeCompact(ctx context.Context, h *agent.History) e
 
 	recoveryGoal := int(float64(maxCtx) * opts.Compaction.RecoveryThreshold)
 	startTokens := h.EstimateTokens()
+	aux := newAuxBudget(opts.AuxCallBudget)
 
 	aggregate := agent.CompactionReport{Before: startTokens}
 	defer func() {
@@ -77,7 +85,7 @@ func (c *LayeredCompactor) MaybeCompact(ctx context.Context, h *agent.History) e
 	}
 
 	if startTokens-h.EstimateTokens() < recoveryGoal && opts.OnSelfPruneCandidates != nil {
-		rB := c.runSelfPrune(ctx, h, opts)
+		rB := c.runSelfPrune(ctx, h, opts, aux)
 		aggregate = agent.MergeReports(aggregate, rB)
 		if h.EstimateTokens() < high {
 			return nil
@@ -85,7 +93,7 @@ func (c *LayeredCompactor) MaybeCompact(ctx context.Context, h *agent.History) e
 	}
 
 	if startTokens-h.EstimateTokens() < recoveryGoal && opts.OnDistillResults != nil {
-		rC := runDistill(ctx, h, opts)
+		rC := runDistill(ctx, h, opts, aux)
 		aggregate = agent.MergeReports(aggregate, rC)
 		if h.EstimateTokens() < high {
 			return nil
@@ -98,11 +106,16 @@ func (c *LayeredCompactor) MaybeCompact(ctx context.Context, h *agent.History) e
 }
 
 // runSelfPrune applies self-prune drops; fails open on callback errors.
-func (c *LayeredCompactor) runSelfPrune(ctx context.Context, h *agent.History, opts CompactorOptions) agent.CompactionReport {
+func (c *LayeredCompactor) runSelfPrune(ctx context.Context, h *agent.History,
+	opts CompactorOptions, aux *AuxBudget) agent.CompactionReport {
 	before := h.EstimateTokens()
 	report := agent.CompactionReport{Before: before, After: before}
+	ctx, cancel := auxContext(ctx, opts.AuxTimeout)
+	defer cancel()
+	skippedBefore := aux.Skipped()
 	snap := h.Snapshot()
-	dropIDs, err := opts.OnSelfPruneCandidates(ctx, snap)
+	dropIDs, err := opts.OnSelfPruneCandidates(ctx, aux, snap)
+	report.AuxCallsSkipped = aux.Skipped() - skippedBefore
 	if err != nil {
 		if opts.OnCallbackError != nil {
 			opts.OnCallbackError(err)
@@ -135,11 +148,15 @@ func (c *LayeredCompactor) runSelfPrune(ctx context.Context, h *agent.History, o
 }
 
 // runDistill applies distill replacement; fails open on callback errors.
-func runDistill(ctx context.Context, h *agent.History, opts CompactorOptions) agent.CompactionReport {
+func runDistill(ctx context.Context, h *agent.History, opts CompactorOptions, aux *AuxBudget) agent.CompactionReport {
 	before := h.EstimateTokens()
 	report := agent.CompactionReport{Before: before, After: before}
+	ctx, cancel := auxContext(ctx, opts.AuxTimeout)
+	defer cancel()
+	skippedBefore := aux.Skipped()
 	snap := h.Snapshot()
-	replacement, err := opts.OnDistillResults(ctx, snap)
+	replacement, err := opts.OnDistillResults(ctx, aux, snap)
+	report.AuxCallsSkipped = aux.Skipped() - skippedBefore
 	if err != nil {
 		if opts.OnCallbackError != nil {
 			opts.OnCallbackError(err)

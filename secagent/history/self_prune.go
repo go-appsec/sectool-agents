@@ -26,14 +26,18 @@ const selfPruneRetryTemperature float32 = 1.2
 var ErrEmptyResponse = errors.New("empty response")
 
 // SelfPruneCallback returns an OnSelfPruneCandidates callback; nil if s is unconfigured.
-func SelfPruneCallback(s *Summarizer) func(ctx context.Context, snapshot []agent.Message) ([]string, error) {
-	return func(ctx context.Context, snapshot []agent.Message) ([]string, error) {
+func SelfPruneCallback(s *Summarizer) func(ctx context.Context, aux *AuxBudget, snapshot []agent.Message) ([]string, error) {
+	return func(ctx context.Context, aux *AuxBudget, snapshot []agent.Message) ([]string, error) {
 		if s == nil || s.Pool == nil || s.Model == "" {
 			return nil, nil
 		}
 
 		events := buildToolEvents(snapshot)
 		if len(events) < selfPruneMinEvents {
+			return nil, nil
+		}
+		if !aux.Allow() {
+			s.Log.Log("compact", "self-prune budget exhausted", nil)
 			return nil, nil
 		}
 		listing := renderToolEventListing(events)

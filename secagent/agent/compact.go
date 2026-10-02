@@ -37,6 +37,7 @@ type CompactionReport struct {
 	CollapsedErrors  int // redundant same-tool errors dropped
 	SelfPrunedCalls  int // tool calls dropped by the self-prune callback
 	DistilledResults int // tool results replaced with distilled prose
+	AuxCallsSkipped  int // aux LLM calls denied by the per-pass aux call budget
 }
 
 // StripAssistantThink removes inline `<think>...</think>` blocks from m's Content.
@@ -296,6 +297,7 @@ func MergeReports(a, b CompactionReport) CompactionReport {
 		CollapsedErrors:  a.CollapsedErrors + b.CollapsedErrors,
 		SelfPrunedCalls:  a.SelfPrunedCalls + b.SelfPrunedCalls,
 		DistilledResults: a.DistilledResults + b.DistilledResults,
+		AuxCallsSkipped:  a.AuxCallsSkipped + b.AuxCallsSkipped,
 	}
 }
 
