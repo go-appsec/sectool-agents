@@ -1132,13 +1132,14 @@ func snapshotIterationStart(alive []*WorkerState) (angleAt map[int]string, alive
 func extractWorkerChroniclesAtIterEnd(alive []*WorkerState, iteration int, log *Logger) {
 	for _, w := range alive {
 		w.Chronicle.ExtractAndAppend(w.Agent, iteration)
-		stripped, stubbed := w.Chronicle.Compact(iteration, history.ChronicleKeepRecentIters)
+		stripped, stubbed, repaired := w.Chronicle.Compact(iteration, history.ChronicleKeepRecentIters)
 		log.Log("chronicle", "extract", map[string]any{
 			"worker_id":      w.ID,
 			"iter":           iteration,
 			"chronicle_msgs": w.Chronicle.Len(),
 			"think_stripped": stripped,
 			"tool_stubbed":   stubbed,
+			"iters_repaired": repaired,
 		})
 	}
 }

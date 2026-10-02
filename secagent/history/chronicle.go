@@ -54,7 +54,8 @@ func SnapshotSinceBoundary(a agent.Agent) []agent.Message {
 	return slices.Clone(tail)
 }
 
-// snapshotSinceBoundary returns a's history above the iter watermark (uncloned).
+// snapshotSinceBoundary returns a's history above the iter watermark
+// (uncloned), excluding system messages.
 func snapshotSinceBoundary(a agent.Agent) []agent.Message {
 	full := a.Snapshot()
 	watermark := a.IterationBoundaryID()
@@ -62,7 +63,7 @@ func snapshotSinceBoundary(a agent.Agent) []agent.Message {
 	if idx < 0 {
 		return nil
 	}
-	return full[idx:]
+	return bulk.SliceFilter(func(m agent.Message) bool { return m.Role != agent.RoleSystem }, full[idx:])
 }
 
 // ExtractAndAppend appends a's iter messages onto the chronicle, tagged with iter.
@@ -75,16 +76,16 @@ func (c *Chronicle) ExtractAndAppend(a agent.Agent, iter int) {
 	c.iters = append(c.iters, slices.Repeat([]int{iter}, len(newMsgs))...)
 }
 
-// Compact strips and stubs messages older than keepRecentIters; returns counts.
-func (c *Chronicle) Compact(currentIter, keepRecentIters int) (stripped, stubbed int) {
+// Compact repairs any iters/messages desync, then strips and stubs messages
+// older than keepRecentIters; returns stripped, stubbed, and repaired counts.
+func (c *Chronicle) Compact(currentIter, keepRecentIters int) (stripped, stubbed, repaired int) {
 	if c == nil || len(c.messages) == 0 || keepRecentIters < 1 {
-		return 0, 0
+		return 0, 0, 0
 	}
+	repaired = c.syncIters()
 	cutoff := currentIter - keepRecentIters + 1
 	for i := range c.messages {
-		if i >= len(c.iters) {
-			break
-		} else if c.iters[i] >= cutoff {
+		if c.iters[i] >= cutoff {
 			continue
 		}
 		if agent.StripAssistantThink(&c.messages[i]) {
@@ -94,10 +95,27 @@ func (c *Chronicle) Compact(currentIter, keepRecentIters int) (stripped, stubbed
 			stubbed++
 		}
 	}
-	return stripped, stubbed
+	return stripped, stubbed, repaired
 }
 
-// ApplySelfPrune drops tool-call IDs from the chronicle; returns dropped count.
+// syncIters repairs iters/messages desync in place: missing entries are
+// padded with 0 so the tail lands in the compacted bucket, extras are
+// truncated. Returns the number of entries added or removed.
+func (c *Chronicle) syncIters() int {
+	delta := len(c.messages) - len(c.iters)
+	if delta == 0 {
+		return 0
+	}
+	if delta < 0 {
+		c.iters = c.iters[:len(c.messages)]
+		return -delta
+	}
+	c.iters = append(c.iters, slices.Repeat([]int{0}, delta)...)
+	return delta
+}
+
+// ApplySelfPrune repairs any iters/messages desync, then drops tool-call IDs
+// from the chronicle; returns dropped count.
 func (c *Chronicle) ApplySelfPrune(dropIDs []string) int {
 	if c == nil || len(dropIDs) == 0 || len(c.messages) == 0 {
 		return 0
@@ -106,12 +124,11 @@ func (c *Chronicle) ApplySelfPrune(dropIDs []string) int {
 	if len(dropSet) == 0 {
 		return 0
 	}
+	c.syncIters()
 	keptMsgs, keptIndices, dropped := PruneToolResults(c.messages, dropSet, nil)
 	keptIters := make([]int, 0, len(keptIndices))
 	for _, i := range keptIndices {
-		if i < len(c.iters) {
-			keptIters = append(keptIters, c.iters[i])
-		}
+		keptIters = append(keptIters, c.iters[i])
 	}
 	c.messages = keptMsgs
 	c.iters = keptIters

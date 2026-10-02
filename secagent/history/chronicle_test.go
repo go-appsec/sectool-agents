@@ -87,7 +87,7 @@ func TestChronicle_Compact(t *testing.T) {
 			},
 			iters: []int{1, 1, 2, 2, 2},
 		}
-		stripped, stubbed := c.Compact(3, 2)
+		stripped, stubbed, _ := c.Compact(3, 2)
 		assert.Equal(t, 1, stripped)
 		assert.Equal(t, 1, stubbed)
 		assert.NotContains(t, c.messages[0].Content, "<think>")
@@ -105,10 +105,10 @@ func TestChronicle_Compact(t *testing.T) {
 			},
 			iters: []int{1, 1},
 		}
-		stripped1, stubbed1 := c.Compact(5, 2)
+		stripped1, stubbed1, _ := c.Compact(5, 2)
 		require.Equal(t, 1, stripped1)
 		require.Equal(t, 1, stubbed1)
-		stripped2, stubbed2 := c.Compact(5, 2)
+		stripped2, stubbed2, _ := c.Compact(5, 2)
 		assert.Equal(t, 0, stripped2)
 		assert.Equal(t, 0, stubbed2)
 	})
@@ -137,10 +137,41 @@ func TestChronicle_Compact(t *testing.T) {
 			},
 			iters: []int{5},
 		}
-		stripped, stubbed := c.Compact(5, 2)
+		stripped, stubbed, _ := c.Compact(5, 2)
 		assert.Equal(t, 0, stripped)
 		assert.Equal(t, 0, stubbed)
 		assert.Equal(t, "<think>x</think>recent", c.messages[0].Content)
+	})
+
+	t.Run("repairs_short_iters", func(t *testing.T) {
+		// Desynced tail must land in the compacted bucket, not grow unbounded.
+		c := Chronicle{
+			messages: []agent.Message{
+				{Role: "assistant", Content: "< think>old< /think>done"},
+				{Role: "tool", ToolName: "proxy_poll", Content: "long result"},
+				{Role: "assistant", Content: "untagged tail"},
+			},
+			iters: []int{1, 1}, // no entry for the tail
+		}
+		stripped, stubbed, repaired := c.Compact(5, 2)
+		assert.Equal(t, 1, stripped)
+		assert.Equal(t, 1, stubbed)
+		assert.Equal(t, 1, repaired)
+		assert.Equal(t, []int{1, 1, 0}, c.iters)
+		assert.NotContains(t, c.messages[0].Content, "< think>")
+		assert.Contains(t, c.messages[1].Content, "compacted:")
+		assert.Equal(t, "untagged tail", c.messages[2].Content)
+	})
+
+	t.Run("repairs_long_iters", func(t *testing.T) {
+		c := Chronicle{
+			messages: []agent.Message{{Role: "assistant", Content: "only msg"}},
+			iters:    []int{1, 2, 3},
+		}
+		_, _, repaired := c.Compact(5, 2)
+		assert.Equal(t, 2, repaired)
+		assert.Equal(t, []int{1}, c.iters)
+		assert.Equal(t, "only msg", c.messages[0].Content)
 	})
 
 	t.Run("repair_errors_protected", func(t *testing.T) {
@@ -151,7 +182,7 @@ func TestChronicle_Compact(t *testing.T) {
 			},
 			iters: []int{1},
 		}
-		_, stubbed := c.Compact(5, 2)
+		_, stubbed, _ := c.Compact(5, 2)
 		assert.Equal(t, 0, stubbed)
 		assert.Contains(t, c.messages[0].Content, "did not parse")
 	})
@@ -222,8 +253,8 @@ func TestChronicle_ApplySelfPrune(t *testing.T) {
 	})
 
 	t.Run("iters_shorter_than_messages", func(t *testing.T) {
-		// Mirrors the chronicle invariant Compact tolerates: iters may be shorter than messages.
-		// Drops still happen; the missing-iters tail is silently skipped.
+		// Desync is repaired before pruning; the untagged tail gets a
+		// compacted-bucket iter instead of being silently skipped.
 		c := &Chronicle{
 			messages: []agent.Message{
 				{
@@ -240,7 +271,7 @@ func TestChronicle_ApplySelfPrune(t *testing.T) {
 		// Empty assistant shell + its tool result both gone; trailing remains
 		require.Len(t, c.messages, 1)
 		assert.Equal(t, "trailing", c.messages[0].Content)
-		assert.Empty(t, c.iters)
+		assert.Equal(t, []int{0}, c.iters)
 	})
 
 	t.Run("empty_inputs_noop", func(t *testing.T) {
@@ -338,5 +369,31 @@ func TestSnapshotSinceBoundary(t *testing.T) {
 		}
 		out := SnapshotSinceBoundary(fake)
 		require.Len(t, out, 2)
+	})
+
+	t.Run("filters_system_messages", func(t *testing.T) {
+		// Mid-iteration system reminders must never become chronicle content.
+		fake := &agent.FakeAgent{
+			LastBoundaryID: 1,
+			SnapshotMessages: []agent.Message{
+				{Role: "user", Content: "directive"},
+				{Role: agent.RoleSystem, Content: "reminder"},
+				{Role: "assistant", Content: "ack"},
+			},
+		}
+		out := SnapshotSinceBoundary(fake)
+		require.Len(t, out, 1)
+		assert.Equal(t, "assistant", out[0].Role)
+	})
+
+	t.Run("all_system_tail_returns_empty", func(t *testing.T) {
+		fake := &agent.FakeAgent{
+			LastBoundaryID: 1,
+			SnapshotMessages: []agent.Message{
+				{Role: "user", Content: "directive"},
+				{Role: agent.RoleSystem, Content: "reminder"},
+			},
+		}
+		assert.Empty(t, SnapshotSinceBoundary(fake))
 	})
 }
