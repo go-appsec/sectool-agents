@@ -446,7 +446,7 @@ func TestCompactRemainder(t *testing.T) {
 		assert.Zero(t, stubbedNonRepairs)
 	})
 
-	t.Run("think_strip_breaks_early", func(t *testing.T) {
+	t.Run("think_strip_batched", func(t *testing.T) {
 		think := "<think>" + strings.Repeat("r", 2_000) + "</think>"
 		h := NewHistory(4096)
 		h.Append(Message{Role: RoleSystem, Content: "sys"})
@@ -465,8 +465,85 @@ func TestCompactRemainder(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Contains(t, report.PassesApplied, "think-strip")
-		assert.Positive(t, report.ThinkStripped)
-		assert.Less(t, report.ThinkStripped, 4)
+		// every think-carrying assistant outside the keep window is stripped in one pass
+		assert.Equal(t, 4, report.ThinkStripped)
+		assert.Less(t, report.After, report.Before)
+	})
+
+	// Regression: with the production wire shape the estimate already excludes think on
+	// assistants outside the keep-think tail, so stripping stored content there destroys
+	// chain-of-thought without saving any tokens.
+	t.Run("wire_shape_skips_stale_strip", func(t *testing.T) {
+		const model = "compact-wire-stale"
+		big := strings.Repeat("x", 6_000)
+		h := NewHistoryForModel(8192, model, func(msgs []Message) []Message {
+			return inlineHandler{}.Replay(msgs, 1)
+		})
+		h.Append(Message{Role: RoleSystem, Content: "sys prompt"})
+		for i := range 5 {
+			id := strconv.Itoa(i)
+			h.Append(Message{
+				Role:      RoleAssistant,
+				Content:   "< think>deliberation " + id + "< /think>step " + id + " done",
+				ToolCalls: []ToolCall{{ID: id, Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: RoleTool, ToolCallID: id, ToolName: "t",
+				Content: big, Summary120: Summarize120(big),
+			})
+		}
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.50, LowWatermark: 0.20, KeepTurns: 1,
+		})
+		require.NoError(t, err)
+		// the wire already strips these assistants, so the pass must not fire
+		assert.NotContains(t, report.PassesApplied, "think-strip")
+		assert.Contains(t, report.PassesApplied, "tool-stub")
+		for i, m := range h.Snapshot() {
+			if m.Role == RoleAssistant {
+				assert.Contains(t, m.Content, "< think>", "assistant %d lost stored think", i)
+			}
+		}
+	})
+
+	// Assistants the wire still carries think on but that fall outside the keep window
+	// (tool-heavy turns shrink the message window below the think tail) are legitimate
+	// strip targets.
+	t.Run("wire_shape_strips_live_think", func(t *testing.T) {
+		const model = "compact-wire-live"
+		think := "< think>" + strings.Repeat("r", 6_000) + "< /think>answer"
+		h := NewHistoryForModel(4096, model, func(msgs []Message) []Message {
+			return inlineHandler{}.Replay(msgs, 2)
+		})
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		for i := range 3 {
+			id := strconv.Itoa(i)
+			content := "plain reply"
+			if i > 0 {
+				content = think
+			}
+			h.Append(Message{
+				Role:      RoleAssistant,
+				Content:   content,
+				ToolCalls: []ToolCall{{ID: id, Function: ToolFunction{Name: "t", Arguments: "{}"}}},
+			})
+			h.Append(Message{
+				Role: RoleTool, ToolCallID: id, ToolName: "t",
+				Content: "ok", Summary120: "ok",
+			})
+		}
+		report, err := CompactRemainder(h, CompactionOptions{
+			HighWatermark: 0.80, LowWatermark: 0.40, KeepTurns: 1,
+		})
+		require.NoError(t, err)
+		// only the middle assistant is both wire-retained and outside the keep window
+		assert.Equal(t, []string{"think-strip"}, report.PassesApplied)
+		assert.Equal(t, 1, report.ThinkStripped)
+
+		snap := h.Snapshot()
+		assert.Contains(t, snap[1].Content, "plain reply")
+		assert.NotContains(t, snap[3].Content, "< think>")
+		assert.Contains(t, snap[5].Content, "< think>")
 	})
 
 	t.Run("uses_effective_max_context", func(t *testing.T) {

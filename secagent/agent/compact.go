@@ -149,20 +149,23 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	// every pass protects the same trailing keep-turn window
 	bound := KeepWindowStart(msgs, opt.KeepTurns)
 
-	// strip inline think from oldest assistants; trailing window keeps chain-of-thought continuity
+	// strip inline think from oldest assistants; trailing window keeps chain-of-thought continuity.
+	// With a wire shape the wire already drops think from assistants outside the keep-think tail,
+	// so only strip where the wire still carries it and the strip saves real tokens. One batched
+	// write per pass keeps this O(n) instead of a clone + re-estimate per message.
 	var thinkCount int
-	for i := 0; i < bound; i++ {
-		if !StripAssistantThink(&msgs[i]) {
+	wire := h.WireView(msgs)
+	for i := 0; i < bound && i < len(wire); i++ {
+		if msgs[i].Role != RoleAssistant || !HasInlineThink(wire[i].Content) {
 			continue
 		}
-
-		thinkCount++
-		h.ReplaceAll(slices.Clone(msgs))
-		if h.EstimateTokens() <= target {
-			break
+		if StripAssistantThink(&msgs[i]) {
+			thinkCount++
 		}
 	}
 	if thinkCount > 0 {
+		// clone so later in-place passes never alias the live history
+		h.ReplaceAll(slices.Clone(msgs))
 		report.PassesApplied = append(report.PassesApplied, "think-strip")
 		report.ThinkStripped = thinkCount
 	}

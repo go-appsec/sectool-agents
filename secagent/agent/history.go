@@ -209,6 +209,15 @@ func (h *History) Snapshot() []Message {
 	return slices.Clone(h.messages)
 }
 
+// WireView maps msgs to the shape sent on the wire. Returns msgs unchanged when
+// no wire shape is configured.
+func (h *History) WireView(msgs []Message) []Message {
+	if h.wireShape == nil {
+		return msgs
+	}
+	return h.wireShape(msgs)
+}
+
 // ReplaceAll replaces the message slice with msgs and re-bases the token anchor onto the
 // replacement, so estimates stay on one accounting basis across the swap. Preserves the
 // iteration watermark; use ResetIterationBoundary when the swap should also end the current
