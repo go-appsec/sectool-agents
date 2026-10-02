@@ -828,6 +828,14 @@ def _orch_tool_turn(tool_name: str, tool_input: dict, cost: float = 0.01) -> lis
     ]
 
 
+def _prose_turn(text: str, cost: float = 0.01) -> list:
+    """Produce an orchestrator turn with assistant text only (no tool calls)."""
+    return [
+        AssistantMessage(content=[TextBlock(text=text)], model="test"),
+        _orch_result(cost),
+    ]
+
+
 class _OrchSideEffectClient(FakeSDKClient):
     """FakeSDKClient that invokes `decisions.<method>` before yielding messages.
 
@@ -1069,6 +1077,89 @@ class TestVerificationPhase(unittest.TestCase):
         self.assertEqual(client.queries, [])
         self.assertIn("No pending candidates", summary)
 
+    def test_idle_drains_do_not_consume_cap(self):
+        """Prose-only drains are re-prompted for free; the productive turn still lands."""
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="XSS", severity="high", endpoint="/s",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="v", supersedes_candidate_ids=[cid],
+            ))
+            d.set_verification_done("filed after idle")
+
+        client = _OrchSideEffectClient(
+            [_prose_turn("thinking"), _prose_turn("still thinking"),
+             _orch_tool_turn("verification_done", {"summary": "x"})],
+            decisions, [None, None, action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, summary = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(len(client.queries), 3)  # initial compose + one nudge per idle drain
+        for q in client.queries[1:]:
+            self.assertIn("no tool calls", q)
+        self.assertEqual(fw.count, 1)
+        self.assertEqual(pool.get(cid).status, "verified")
+        self.assertEqual(summary, "filed after idle")
+
+    def test_idle_retry_limit_ends_phase(self):
+        """A fully idle phase gives up after the bounded retries, candidate stays pending."""
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        decisions = DecisionQueue()
+
+        client = _OrchSideEffectClient(
+            [_prose_turn("...") for _ in range(controller.VERIFICATION_IDLE_RETRIES)],
+            decisions, [None] * controller.VERIFICATION_IDLE_RETRIES,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, summary = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(len(client.queries), controller.VERIFICATION_IDLE_RETRIES)
+        self.assertEqual(pool.get(cid).status, "pending")
+        self.assertIn("1 still pending", summary)
+
+    def test_idle_streak_resets_after_productive(self):
+        """Each productive substep renews the idle budget."""
+        pool = CandidatePool()
+        c1 = pool.add(worker_id=1, title="Resolved mid-phase", severity="high",
+                      endpoint="/one", flow_ids=["fl0w01"], summary="",
+                      evidence_notes="", reproduction_hint="")
+        c2 = pool.add(worker_id=1, title="Left unresolved", severity="high",
+                      endpoint="/two", flow_ids=["fl0w02"], summary="",
+                      evidence_notes="", reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_dismissal(c1, "fp")
+
+        client = _OrchSideEffectClient(
+            [_prose_turn("..."), _prose_turn("..."),
+             _orch_tool_turn("dismiss_candidate", {"candidate_id": c1, "reason": "fp"}),
+             _prose_turn("..."), _prose_turn("..."), _prose_turn("...")],
+            decisions, [None, None, action, None, None, None],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, summary = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        # two idle + one productive + three idle (renewed streak) = cap never reached
+        self.assertEqual(len(client.queries), 6)
+        self.assertEqual(pool.get(c1).status, "dismissed")
+        self.assertEqual(pool.get(c2).status, "pending")
+        self.assertIn("1 still pending", summary)
 
     def test_aborts_when_abort_event_set_before_loop(self):
         """If abort_event is already set entering the phase, the substep loop

@@ -284,7 +284,7 @@ Each file has Title, Severity, Affected Endpoint, Description, Reproduction Step
 
 - **Max iterations**: `--max-iterations` caps the outer loop (default 30). Each iteration runs one autonomous worker phase + verification + direction, so an iteration involves many underlying model turns.
 - **Autonomous budget per worker**: 1–20 turns, default 8, settable per worker by the director via `decide_worker(autonomous_budget=...)`.
-- **Phase substep caps**: `VerificationMaxSubsteps=6`; per-worker `decide_worker` drain capped at `decisionDrainMaxRounds=4`.
+- **Phase substep caps**: `VerificationMaxSubsteps=6` (a verifier substep that dispatches no tool calls and records no decisions is re-prompted instead of consuming the cap, bounded by 3 idle retries); per-worker `decide_worker` drain capped at `decisionDrainMaxRounds=4`.
 - **Per-agent turn cap**: `--max-turns-per-agent` (default 100) bounds any single Drain chain.
 - **Stall detection**: configurable via `--stall-warn-after` / `--stall-stop-after`.
 - **Per-turn timeout**: `--turn-timeout` (default 10m) bounds each model call. `--per-tool-timeout` (default 5m) bounds each tool dispatch.

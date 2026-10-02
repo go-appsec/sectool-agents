@@ -310,9 +310,10 @@ class TestRateLimitGate(unittest.TestCase):
                 verbose=False,
             )
 
-        ok, cost = _run(go())
+        ok, cost, saw_tool = _run(go())
         self.assertTrue(ok)
         self.assertEqual(cost, 0.01)
+        self.assertFalse(saw_tool)
         self.assertEqual(len(client.queries), 2)
         # Second submit reuses the same prompt.
         self.assertEqual(client.queries[0], client.queries[1])

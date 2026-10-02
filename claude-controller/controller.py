@@ -26,6 +26,7 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ResultMessage,
     TextBlock,
+    ToolUseBlock,
 )
 
 from config import Config, parse_args
@@ -91,6 +92,10 @@ STALL_STOP_AFTER = 4
 # Phase substep caps.
 VERIFICATION_MAX_SUBSTEPS = 6
 DIRECTION_MAX_SUBSTEPS = 4
+
+# Consecutive no-op verifier drains re-prompted before the phase gives up;
+# idle retries don't consume VERIFICATION_MAX_SUBSTEPS.
+VERIFICATION_IDLE_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +349,16 @@ def _build_verifier_continue_prompt(
     return "\n".join(parts)
 
 
+def _build_verifier_idle_nudge(retries_left: int) -> str:
+    """Re-prompt guidance after a verifier drain with no tool calls or decisions."""
+    return (
+        "Your last response contained no tool calls and no verification decision. "
+        "You must act now: reproduce a pending candidate with sectool tools, then "
+        "`file_finding` or `dismiss_candidate`, or call `verification_done(summary)`. "
+        f"Idle retries remaining: {retries_left}."
+    )
+
+
 def _format_follow_up_hints(
     findings: list[FindingFiled],
     merges: list[FindingMerged],
@@ -521,12 +536,12 @@ async def run_phase_substep(
     iteration: int,
     substep: int,
     verbose: bool,  # noqa: ARG001 — kept for API stability
-) -> tuple[bool, float | None]:
+) -> tuple[bool, float | None, bool]:
     """Send a substep message and drain, streaming assistant text live.
 
-    Returns (ok, cost). On error ok=False. Tool calls are silent — the user
-    sees the verifier/director's reasoning text as it arrives, with a
-    closing line carrying the substep cost.
+    Returns (ok, cost, saw_tool). On error ok=False. Tool calls are silent —
+    the user sees the verifier/director's reasoning text as it arrives, with
+    a closing line carrying the substep cost.
     """
     label = "Verifier" if phase == PHASE_VERIFICATION else "Director"
     tag = _phase_tag(phase)
@@ -534,6 +549,7 @@ async def run_phase_substep(
     print(f"=== {label} (iter {iteration}, substep {substep}) ===", flush=True)
     cost: float | None = None
     saw_text = False
+    saw_tool = False
     # Retry on rate_limit: submit_query at the top blocks on the gate, so
     # after engage_rate_limit_pause clears it (manual spacebar resume), the
     # next loop iteration re-issues the same prompt. Other errors fall through
@@ -557,6 +573,8 @@ async def run_phase_substep(
                                         print(_short(lines[0], 200), flush=True)
                                         print(f"  ... ({len(lines) - 1} more lines)", flush=True)
                                     saw_text = True
+                            elif isinstance(block, ToolUseBlock):
+                                saw_tool = True
                         if msg.error == "rate_limit":
                             saw_rate_limit = True
                             text = "".join(
@@ -568,7 +586,7 @@ async def run_phase_substep(
                         break
         except Exception as exc:
             log(tag, f"Substep error iter {iteration} sub {substep}: {exc}")
-            return False, None
+            return False, None, False
         if not saw_rate_limit:
             break
 
@@ -577,7 +595,7 @@ async def run_phase_substep(
     cost_str = f" cost=${cost:.4f}" if cost is not None else ""
     print(f"=== end {label} substep{cost_str} ===", flush=True)
     print(flush=True)
-    return True, cost
+    return True, cost, saw_tool
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +619,9 @@ async def run_verification_phase(
     """Drive the verifier over up to VERIFICATION_MAX_SUBSTEPS substeps.
 
     Applies findings/dismissals incrementally so each substep's prompt
-    reflects the current state. Exits when the verifier calls
+    reflects the current state. A substep with no tool calls and no recorded
+    decisions is re-prompted (bounded by VERIFICATION_IDLE_RETRIES) instead
+    of consuming the cap. Exits when the verifier calls
     `verification_done`, when no pending candidates remain, or at the cap.
 
     Resets the verifier client before iteration ≥ 2 to drop the prior
@@ -634,7 +654,9 @@ async def run_verification_phase(
     processed_merges = 0
     successful_merges: list[FindingMerged] = []
 
-    for substep in range(1, VERIFICATION_MAX_SUBSTEPS + 1):
+    idle_streak = 0
+    substep = 1
+    while substep <= VERIFICATION_MAX_SUBSTEPS:
         if abort_event is not None and abort_event.is_set():
             log("verify",
                 f"Aborted by user at substep {substep}; "
@@ -645,16 +667,7 @@ async def run_verification_phase(
         if not pending:
             break
 
-        if substep == 1:
-            user_content = _build_verifier_prompt(
-                pending=pending,
-                findings_summary=finding_writer.summary_for_verifier(),
-                iteration=iteration, max_iter=max_iter,
-                total_cost=total_cost + phase_cost,
-                max_cost=max_cost,
-                findings_count=finding_writer.count,
-            )
-        else:
+        if substep > 1:
             user_content = _build_verifier_continue_prompt(
                 pending=pending,
                 filed_this_phase=decisions.findings[:applied_findings],
@@ -663,6 +676,25 @@ async def run_verification_phase(
                 substep=substep,
                 max_substeps=VERIFICATION_MAX_SUBSTEPS,
             )
+            if idle_streak > 0:
+                user_content += "\n\n" + _build_verifier_idle_nudge(
+                    VERIFICATION_IDLE_RETRIES - idle_streak)
+        elif idle_streak > 0:
+            # initial compose is already installed; nudge only
+            user_content = _build_verifier_idle_nudge(
+                VERIFICATION_IDLE_RETRIES - idle_streak)
+        else:
+            user_content = _build_verifier_prompt(
+                pending=pending,
+                findings_summary=finding_writer.summary_for_verifier(),
+                iteration=iteration, max_iter=max_iter,
+                total_cost=total_cost + phase_cost,
+                max_cost=max_cost,
+                findings_count=finding_writer.count,
+            )
+
+        decisions_before = (
+            len(decisions.findings) + len(decisions.dismissals) + len(decisions.merges))
 
         result, aborted = await _race_with_abort(
             run_phase_substep(
@@ -673,7 +705,7 @@ async def run_verification_phase(
         if aborted:
             log("verify", f"Substep {substep} aborted by user mid-flight.")
             break
-        ok, cost = result
+        ok, cost, saw_tool = result
         if not ok:
             new_managed = await attempt_client_recovery(managed, options, "verify")
             if new_managed is not None:
@@ -757,6 +789,24 @@ async def run_verification_phase(
         processed_merges = len(decisions.merges)
 
         if decisions.verification_done_summary is not None:
+            break
+
+        # only substeps that changed observable state consume the substep cap
+        decisions_after = (
+            len(decisions.findings) + len(decisions.dismissals) + len(decisions.merges))
+        if (saw_tool or decisions_after > decisions_before
+                or len(candidates.pending()) != len(pending)):
+            idle_streak = 0
+            substep += 1
+            continue
+
+        # idle drain: re-prompt without advancing the substep
+        idle_streak += 1
+        log("verify", f"Idle verifier drain at substep {substep} "
+            f"(streak {idle_streak}/{VERIFICATION_IDLE_RETRIES}).")
+        if idle_streak >= VERIFICATION_IDLE_RETRIES:
+            log("verify", "Idle drain limit reached; ending verification phase "
+                f"with {len(candidates.pending())} candidate(s) still pending.")
             break
 
     summary = (
@@ -854,7 +904,7 @@ async def run_direction_phase(
             log("direct", f"Substep {substep} aborted by user mid-flight.")
             aborted = True
             break
-        ok, cost = result
+        ok, cost, _ = result
         if not ok:
             new_managed = await attempt_client_recovery(managed, options, "direct")
             if new_managed is not None:
@@ -892,7 +942,7 @@ async def run_direction_phase(
     # Mandatory self-review substep unless the director already ended the run
     # or the phase aborted from a connection error.
     if not aborted and decisions.done_summary is None:
-        ok, cost = await run_phase_substep(
+        ok, cost, _ = await run_phase_substep(
             managed.client, _build_director_self_review_prompt(),
             PHASE_DIRECTION, iteration, DIRECTION_MAX_SUBSTEPS + 1, verbose,
         )

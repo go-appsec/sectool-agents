@@ -12,9 +12,15 @@ import (
 // VerificationMaxSubsteps is the hard cap on verifier substeps per iteration.
 const VerificationMaxSubsteps = 6
 
+// verificationIdleRetries bounds consecutive no-op verifier drains; idle
+// re-prompts don't consume the VerificationMaxSubsteps cap.
+const verificationIdleRetries = 3
+
 // RunVerificationPhase drives the verifier and returns the summary for the
 // director prompt. dedupReviewer may be nil to disable agent-mediated dedup.
-// Findings recorded before a failed substep drain are still written.
+// Findings recorded before a failed substep drain are still written. Idle
+// drains (no tool calls, no decisions) are re-prompted without consuming
+// the substep cap, bounded by verificationIdleRetries.
 func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 	decisions *DecisionQueue, candidates *CandidatePool, writer *FindingWriter,
 	dedupReviewer DedupReviewer, log *Logger) string {
@@ -24,7 +30,8 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 		return "No pending candidates this iteration."
 	}
 	var appliedFindings, appliedDismissals, filedCount, dismissedCount int
-	for substep := 1; substep <= VerificationMaxSubsteps; substep++ {
+	idleStreak := 0
+	for substep := 1; substep <= VerificationMaxSubsteps; {
 		pending := candidates.Pending()
 		if len(pending) == 0 {
 			break
@@ -37,9 +44,16 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 				decisions.Dismissals[:appliedDismissals],
 				substep, VerificationMaxSubsteps,
 			)
+			if idleStreak > 0 {
+				prompt += "\n\n" + BuildVerifierIdleRetryPrompt(verificationIdleRetries-idleStreak)
+			}
 			verifier.Query(prompt)
+		} else if idleStreak > 0 {
+			// initial compose is already installed; nudge only
+			verifier.Query(BuildVerifierIdleRetryPrompt(verificationIdleRetries - idleStreak))
 		}
-		_, drainErr := RunPhaseAttempt(ctx,
+		decisionsBefore := len(decisions.Findings) + len(decisions.Dismissals)
+		turn, drainErr := RunPhaseAttempt(ctx,
 			func(c context.Context) (agent.TurnSummary, error) { return verifier.Drain(c) },
 			PhaseRecover{
 				Compact: func() {
@@ -141,6 +155,24 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 		if decisions.HasVerificationDone {
 			break
 		}
+		// only substeps that changed observable state consume the cap
+		if verificationSubstepProductive(turn, decisions,
+			decisionsBefore, len(pending), len(candidates.Pending())) {
+			idleStreak = 0
+			substep++
+			continue
+		}
+		// idle drain: re-prompt without advancing the substep
+		idleStreak++
+		log.Log("verify", "idle verifier drain", map[string]any{
+			"substep": substep, "idle_streak": idleStreak,
+		})
+		if idleStreak >= verificationIdleRetries {
+			log.Log("verify", "idle drain limit reached", map[string]any{
+				"pending": len(candidates.Pending()),
+			})
+			break
+		}
 	}
 
 	if decisions.HasVerificationDone && decisions.VerificationDoneSummary != "" {
@@ -152,6 +184,15 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 		"Verification phase ended with %d filed, %d dismissed, %d still pending.",
 		filedCount, dismissedCount, len(candidates.Pending()),
 	)
+}
+
+// verificationSubstepProductive reports whether a verifier drain changed
+// observable state and should consume the substep cap.
+func verificationSubstepProductive(turn agent.TurnSummary, decisions *DecisionQueue,
+	decisionsBefore, pendingBefore, pendingAfter int) bool {
+	decisionsAfter := len(decisions.Findings) + len(decisions.Dismissals)
+	return len(turn.ToolCalls) > 0 || decisionsAfter > decisionsBefore ||
+		pendingAfter != pendingBefore
 }
 
 // candidateTitles maps matched candidate IDs to their titles for audit logs.

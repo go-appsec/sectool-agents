@@ -150,6 +150,16 @@ func BuildVerifierContinuePrompt(pending []FindingCandidate, filedThisPhase []Fi
 	return strings.Join(parts, "\n")
 }
 
+// BuildVerifierIdleRetryPrompt returns the re-prompt guidance issued after a
+// verifier drain that dispatched no tool calls and recorded no decisions.
+// retriesLeft is the number of idle retries remaining before the phase gives up.
+func BuildVerifierIdleRetryPrompt(retriesLeft int) string {
+	return "Your last response contained no tool calls and no verification decision. " +
+		"You must act now: reproduce a pending candidate with sectool tools, then " +
+		"`file_finding` or `dismiss_candidate`, or call `verification_done(summary)`. " +
+		fmt.Sprintf("Idle retries remaining: %d.", retriesLeft)
+}
+
 // FormatFollowUpHints returns the verifier follow-up hints block for
 // the synthesis prompt, or "" when no hints are present.
 func FormatFollowUpHints(findings []FindingFiled, dismissals []CandidateDismissal) string {

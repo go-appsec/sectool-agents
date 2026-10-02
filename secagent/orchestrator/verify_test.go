@@ -375,6 +375,100 @@ func TestRunVerificationPhase(t *testing.T) {
 		assert.Equal(t, "Verification phase ended with 0 filed, 1 dismissed, 0 still pending.", summary)
 	})
 
+	t.Run("idle_drains_do_not_consume_cap", func(t *testing.T) {
+		// prose-only drains are re-prompted for free; the productive turn still lands
+		writer := newTestFindingWriter(t, t.TempDir())
+		candidates := NewCandidatePool()
+		c1 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Idle then filed",
+			Severity: "high", Endpoint: "GET /idle",
+		})
+
+		decisions := NewDecisionQueue()
+		var drained int
+		verifier := &agent.FakeAgent{Turns: []agent.TurnSummary{
+			{AssistantText: "thinking"},
+			{AssistantText: "still thinking"},
+			{ToolCalls: []agent.ToolCallRecord{{Name: "replay_send"}}},
+		}}
+		verifier.OnDrain = func(_ int) {
+			drained++
+			if drained == 3 {
+				decisions.AddFinding(FindingFiled{
+					Title: "Idle then filed", Severity: "high",
+					Endpoint:               "GET /idle",
+					VerificationNotes:      "ok",
+					SupersedesCandidateIDs: []string{c1},
+				})
+				decisions.SetVerificationDone("filed after idle")
+			}
+		}
+
+		summary := RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, nil)
+
+		assert.Equal(t, 3, drained)
+		assert.Len(t, verifier.QueriedInputs, 2) // one nudge per idle drain
+		for _, q := range verifier.QueriedInputs {
+			assert.Contains(t, q, "no tool calls")
+		}
+		assert.Equal(t, "verified", candidates.ByID(c1).Status)
+		assert.Equal(t, "filed after idle", summary)
+	})
+
+	t.Run("idle_retry_limit_ends_phase", func(t *testing.T) {
+		// fully idle phase gives up after the bounded retries, candidate stays pending
+		writer := newTestFindingWriter(t, t.TempDir())
+		candidates := NewCandidatePool()
+		c1 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Never verified",
+			Severity: "high", Endpoint: "GET /stuck",
+		})
+
+		decisions := NewDecisionQueue()
+		verifier := &agent.FakeAgent{Turns: []agent.TurnSummary{{}, {}, {}}}
+		log, path, _ := newCapturedLogger(t)
+		summary := RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, log)
+		require.NoError(t, log.Close())
+
+		assert.Len(t, verifier.QueriedInputs, verificationIdleRetries-1)
+		assert.Equal(t, "pending", candidates.ByID(c1).Status)
+		assert.Contains(t, summary, "1 still pending")
+		assert.Contains(t, mustReadFile(t, path), `"msg":"idle drain limit reached"`)
+	})
+
+	t.Run("idle_streak_resets_after_productive", func(t *testing.T) {
+		// mixed productive/idle drains: each productive substep renews the idle budget
+		writer := newTestFindingWriter(t, t.TempDir())
+		candidates := NewCandidatePool()
+		c1 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Resolved mid-phase",
+			Severity: "high", Endpoint: "GET /one",
+		})
+		c2 := candidates.Add(AddInput{
+			WorkerID: 1, Title: "Left unresolved",
+			Severity: "high", Endpoint: "GET /two",
+		})
+
+		decisions := NewDecisionQueue()
+		var drained int
+		verifier := &agent.FakeAgent{Turns: []agent.TurnSummary{{}, {}, {}, {}, {}, {}}}
+		verifier.OnDrain = func(_ int) {
+			drained++
+			if drained == 3 {
+				decisions.AddDismissal(CandidateDismissal{CandidateID: c1, Reason: "fp"})
+			}
+		}
+
+		summary := RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, nil)
+
+		// two idle + one productive + three idle (renewed streak) = cap never reached
+		assert.Equal(t, 6, drained)
+		assert.Len(t, verifier.QueriedInputs, 5)
+		assert.Equal(t, "dismissed", candidates.ByID(c1).Status)
+		assert.Equal(t, "pending", candidates.ByID(c2).Status)
+		assert.Contains(t, summary, "1 still pending")
+	})
+
 	t.Run("errored_substep_still_writes_findings", func(t *testing.T) {
 		// A drain that files a finding and then fails must not lose the filed work
 		dir := t.TempDir()
