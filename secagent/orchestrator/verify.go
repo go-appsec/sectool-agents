@@ -23,7 +23,7 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 		log.Log("verify", "no pending candidates; skipping", nil)
 		return "No pending candidates this iteration."
 	}
-	var appliedFindings, appliedDismissals int
+	var appliedFindings, appliedDismissals, filedCount, dismissedCount int
 	for substep := 1; substep <= VerificationMaxSubsteps; substep++ {
 		pending := candidates.Pending()
 		if len(pending) == 0 {
@@ -78,6 +78,7 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 				log.Log("finding", "write failed", map[string]any{"err": err.Error()})
 				continue
 			} else if wrote {
+				filedCount++
 				log.Log("finding", "written", map[string]any{"path": path, "title": filed.Title})
 			}
 			resolved := slices.Clone(filed.SupersedesCandidateIDs)
@@ -129,6 +130,7 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 				continue
 			}
 			candidates.Mark(dm.CandidateID, CandidateStatusDismissed)
+			dismissedCount++
 			log.Log("finding", "candidate dismissed", map[string]any{"candidate_id": dm.CandidateID})
 		}
 		appliedDismissals = len(decisions.Dismissals)
@@ -144,9 +146,11 @@ func RunVerificationPhase(ctx context.Context, verifier agent.Agent,
 	if decisions.HasVerificationDone && decisions.VerificationDoneSummary != "" {
 		return decisions.VerificationDoneSummary
 	}
+	// counts reflect applied outcomes, not queue entries, so duplicate
+	// filings and repeat dismissals don't inflate the director prompt
 	return fmt.Sprintf(
 		"Verification phase ended with %d filed, %d dismissed, %d still pending.",
-		appliedFindings, appliedDismissals, len(candidates.Pending()),
+		filedCount, dismissedCount, len(candidates.Pending()),
 	)
 }
 

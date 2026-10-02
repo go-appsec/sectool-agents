@@ -90,13 +90,14 @@ func TestRunVerificationPhase(t *testing.T) {
 		}
 
 		log, path, _ := newCapturedLogger(t)
-		RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, log)
+		summary := RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, log)
 		require.NoError(t, log.Close())
 
 		content := mustReadFile(t, path)
 		count := strings.Count(content, `"msg":"candidate dismissed"`)
 		assert.Equal(t, 1, count)
 		assert.Equal(t, "dismissed", candidates.ByID(c1).Status)
+		assert.Equal(t, "Verification phase ended with 0 filed, 1 dismissed, 0 still pending.", summary)
 	})
 
 	t.Run("dismiss_cannot_override_verified", func(t *testing.T) {
@@ -334,6 +335,44 @@ func TestRunVerificationPhase(t *testing.T) {
 		content := mustReadFile(t, path)
 		count := strings.Count(content, `"msg":"duplicate skipped"`)
 		assert.Equal(t, 1, count)
+	})
+
+	t.Run("duplicate_filings_count_once", func(t *testing.T) {
+		// four identical filings in one substep collapse to one applied write
+		writer := newTestFindingWriter(t, t.TempDir())
+		candidates := NewCandidatePool()
+		candidates.Add(AddInput{WorkerID: 1, Title: "Same title", Endpoint: "GET /x"})
+		decisions := NewDecisionQueue()
+		verifier := &agent.FakeAgent{Turns: []agent.TurnSummary{{}}}
+		verifier.OnDrain = func(_ int) {
+			for range 4 {
+				decisions.AddFinding(FindingFiled{
+					Title: "Same title", Severity: "high", Endpoint: "GET /x",
+					VerificationNotes: "dup",
+				})
+			}
+		}
+
+		summary := RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, nil)
+		assert.Equal(t, "Verification phase ended with 1 filed, 0 dismissed, 0 still pending.", summary)
+	})
+
+	t.Run("repeat_dismissal_counts_once", func(t *testing.T) {
+		// duplicate dismissals collapse to one applied transition in the summary
+		writer := newTestFindingWriter(t, t.TempDir())
+		candidates := NewCandidatePool()
+		c1 := candidates.Add(AddInput{WorkerID: 1, Title: "x"})
+
+		decisions := NewDecisionQueue()
+		verifier := &agent.FakeAgent{Turns: []agent.TurnSummary{{}}}
+		verifier.OnDrain = func(_ int) {
+			for range 3 {
+				decisions.AddDismissal(CandidateDismissal{CandidateID: c1, Reason: "again"})
+			}
+		}
+
+		summary := RunVerificationPhase(t.Context(), verifier, decisions, candidates, writer, nil, nil)
+		assert.Equal(t, "Verification phase ended with 0 filed, 1 dismissed, 0 still pending.", summary)
 	})
 
 	t.Run("errored_substep_still_writes_findings", func(t *testing.T) {
