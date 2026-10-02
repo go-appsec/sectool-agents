@@ -12,6 +12,9 @@ import (
 
 const distillMaxTokens = 4000
 
+// distillKeepTurns mirrors the default CompactionOptions.KeepTurns.
+const distillKeepTurns = 4
+
 const distillSystemPrompt = `You compress one or more tool-call results from a security-testing agent's history into 1-3 sentences of plain prose. Capture status codes, key fields, observed behavior, and cross-call patterns — anything the agent might need to reference later. Drop boilerplate, byte-level minutiae, and anything already obvious from the tool name. Return prose only — no preamble, no markdown headings or fences.`
 
 // TODO - tune distill batch sizing once OnCompact telemetry is available
@@ -84,8 +87,7 @@ type distillCall struct {
 
 // buildDistillBatches groups eligible old tool-result messages into batches.
 func buildDistillBatches(snapshot []agent.Message) []distillBatch {
-	const keepWindow = 8 // mirrors KeepTurns*2 trailing window
-	cutoff := len(snapshot) - keepWindow
+	cutoff := agent.KeepWindowStart(snapshot, distillKeepTurns)
 	if cutoff <= 1 {
 		return nil
 	}

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,102 @@ func assertToolPairing(t *testing.T, snap []Message) {
 		assert.Equal(t, RoleAssistant, snap[j].Role)
 		assert.NotEmpty(t, snap[j].ToolCalls)
 	}
+}
+
+func TestKeepWindowStart(t *testing.T) {
+	t.Parallel()
+
+	// toolTurn is one assistant-with-tool-calls message plus its paired result.
+	toolTurn := func(id string) []Message {
+		return []Message{
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: id, Function: ToolFunction{Name: "t"}}}},
+			{Role: RoleTool, ToolCallID: id, ToolName: "t"},
+		}
+	}
+
+	t.Run("counts_turns_not_messages", func(t *testing.T) {
+		msgs := make([]Message, 0, 11)
+		msgs = append(msgs, Message{Role: RoleSystem, Content: "sys"})
+		for i := range 5 {
+			msgs = append(msgs, toolTurn(strconv.Itoa(i))...)
+		}
+		// keep=2 protects the last two turns, not the last four messages
+		assert.Equal(t, 7, KeepWindowStart(msgs, 2))
+	})
+
+	t.Run("trailing_text_part_of_turn", func(t *testing.T) {
+		msgs := slices.Concat(
+			[]Message{{Role: RoleSystem, Content: "sys"}},
+			toolTurn("t1"),
+			[]Message{{Role: RoleAssistant, Content: "done"}},
+		)
+		// the trailing text reply belongs to the turn, no phantom turn is counted
+		assert.Equal(t, 1, KeepWindowStart(msgs, 1))
+	})
+
+	t.Run("text_reply_after_user_counts", func(t *testing.T) {
+		msgs := slices.Concat(
+			[]Message{{Role: RoleSystem, Content: "sys"}},
+			toolTurn("t1"),
+			[]Message{{Role: RoleUser, Content: "go on"}, {Role: RoleAssistant, Content: "ok"}},
+		)
+		assert.Equal(t, 1, KeepWindowStart(msgs, 2))
+	})
+
+	t.Run("fewer_turns_protects_all", func(t *testing.T) {
+		msgs := slices.Concat(
+			[]Message{{Role: RoleSystem, Content: "sys"}},
+			toolTurn("t1"),
+		)
+		assert.Equal(t, 1, KeepWindowStart(msgs, 4))
+	})
+
+	t.Run("no_system_prompt", func(t *testing.T) {
+		msgs := slices.Concat(toolTurn("t1"), toolTurn("t2"))
+		assert.Equal(t, 2, KeepWindowStart(msgs, 1))
+	})
+
+	t.Run("empty_history", func(t *testing.T) {
+		assert.Zero(t, KeepWindowStart(nil, 3))
+	})
+
+	t.Run("keep_floored_at_one", func(t *testing.T) {
+		msgs := slices.Concat(
+			[]Message{{Role: RoleSystem, Content: "sys"}},
+			toolTurn("t1"), toolTurn("t2"),
+		)
+		assert.Equal(t, KeepWindowStart(msgs, 1), KeepWindowStart(msgs, 0))
+	})
+
+	// Regression: a window computed in messages (keep*2) lets turn-drop eat into
+	// turns the user asked to protect when turns carry multiple tool results.
+	t.Run("tool_heavy_window", func(t *testing.T) {
+		big := strings.Repeat("x", 3_000)
+		h := NewHistory(8192)
+		h.Append(Message{Role: RoleSystem, Content: "sys"})
+		for i := range 8 {
+			calls := make([]ToolCall, 3)
+			for j := range calls {
+				calls[j] = ToolCall{ID: fmt.Sprintf("t%d_%d", i, j), Function: ToolFunction{Name: "t"}}
+			}
+			h.Append(Message{Role: RoleAssistant, Content: big, ToolCalls: calls})
+			for _, tc := range calls {
+				h.Append(Message{Role: RoleTool, ToolCallID: tc.ID, ToolName: "t", Content: big, Summary120: "s"})
+			}
+		}
+		report := ForceHardTruncate(h, 1, 2)
+		assert.Positive(t, report.DroppedTurns)
+
+		snap := h.Snapshot()
+		// system prompt plus the last two turns survive intact
+		require.Len(t, snap, 9)
+		assertToolPairing(t, snap)
+		for _, m := range snap[7:] {
+			if m.Role == RoleTool {
+				assert.Equal(t, big, m.Content)
+			}
+		}
+	})
 }
 
 func TestMergeReports(t *testing.T) {

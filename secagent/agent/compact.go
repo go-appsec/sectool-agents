@@ -146,11 +146,12 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	}
 
 	msgs := h.Snapshot()
-	keep := opt.KeepTurns
+	// every pass protects the same trailing keep-turn window
+	bound := KeepWindowStart(msgs, opt.KeepTurns)
 
-	// strip <think> from oldest assistants; keep*2 trailing window stays for chain-of-thought continuity
+	// strip inline think from oldest assistants; trailing window keeps chain-of-thought continuity
 	var thinkCount int
-	for i := 0; i < len(msgs)-keep*2; i++ {
+	for i := 0; i < bound; i++ {
 		if !StripAssistantThink(&msgs[i]) {
 			continue
 		}
@@ -172,7 +173,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 
 	// stub oldest tool results; repair errors carry schema guidance, skip them
 	var stubbed, repairsProtected int
-	for i := 0; i < len(msgs)-keep*2; i++ {
+	for i := 0; i < bound; i++ {
 		if msgs[i].Role != RoleTool {
 			continue
 		} else if msgs[i].IsRepairError {
@@ -200,7 +201,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 
 	// Truncate older assistant content to its first sentence
 	var truncCount int
-	for i := 0; i < len(msgs)-keep*2; i++ {
+	for i := 0; i < bound; i++ {
 		if msgs[i].Role != RoleAssistant {
 			continue
 		} else if msgs[i].Content == "" {
@@ -235,7 +236,7 @@ func CompactRemainder(h *History, opt CompactionOptions) (CompactionReport, erro
 	// Drop oldest full turn triples until under target or nothing left
 	var droppedTurns int
 	for h.EstimateTokens() > target {
-		newMsgs, dropped := dropOldestTurn(msgs, keep)
+		newMsgs, dropped := dropOldestTurn(msgs, opt.KeepTurns)
 		if !dropped {
 			break
 		}
@@ -302,7 +303,7 @@ func MergeReports(a, b CompactionReport) CompactionReport {
 }
 
 // ForceHardTruncate drops oldest turns from h until estimated tokens <= targetTokens, preserving the
-// system prompt and a trailing keep*2 window (keep is floored at 2). Returns a report of what was done.
+// system prompt and a trailing keep-turn window (keep is floored at 2). Returns a report of what was done.
 func ForceHardTruncate(h *History, targetTokens, keep int) CompactionReport {
 	if keep < 2 {
 		keep = 2
@@ -328,7 +329,7 @@ func ForceHardTruncate(h *History, targetTokens, keep int) CompactionReport {
 }
 
 // dropOldestTurn removes the oldest assistant-tool-calls turn (paired tool results plus a trailing assistant text) from
-// msgs, keeping the system prompt and the trailing keep*2 window. Returns the new slice and whether a turn was dropped.
+// msgs, keeping the system prompt and the trailing keep-turn window. Returns the new slice and whether a turn was dropped.
 func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 	if keep < 2 {
 		keep = 2
@@ -337,7 +338,7 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 	if len(msgs) > 0 && msgs[0].Role == "system" {
 		floor = 1
 	}
-	ceil := len(msgs) - keep*2
+	ceil := KeepWindowStart(msgs, keep)
 	if ceil <= floor {
 		return msgs, false
 	}
@@ -367,4 +368,38 @@ func dropOldestTurn(msgs []Message, keep int) ([]Message, bool) {
 		return out, true
 	}
 	return msgs, false
+}
+
+// KeepWindowStart returns the index of the first message in the trailing keep-turn window
+// that compaction must leave untouched. A turn is an assistant message through its paired
+// tool results plus an immediately following text assistant, matching the turn-splitting
+// in dropOldestTurn. When fewer than keep turns exist the whole history minus the system
+// prompt is protected. keep is floored at 1.
+func KeepWindowStart(msgs []Message, keep int) int {
+	if keep < 1 {
+		keep = 1
+	}
+	var floor int
+	if len(msgs) > 0 && msgs[0].Role == RoleSystem {
+		floor = 1
+	}
+	var starts []int
+	for i := floor; i < len(msgs); {
+		if msgs[i].Role != RoleAssistant {
+			i++
+			continue
+		}
+		starts = append(starts, i)
+		i++
+		for i < len(msgs) && msgs[i].Role == RoleTool {
+			i++
+		}
+		if i < len(msgs) && msgs[i].Role == RoleAssistant && len(msgs[i].ToolCalls) == 0 {
+			i++
+		}
+	}
+	if len(starts) <= keep {
+		return floor
+	}
+	return starts[len(starts)-keep]
 }
