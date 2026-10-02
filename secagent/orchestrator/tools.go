@@ -197,14 +197,17 @@ func dedupRejectOrMerge(ctx context.Context, dedupReviewer CandidateDedupReviewe
 }
 
 // BashToolDef returns an unrestricted shell-execution tool. maxResultBytes caps
-// the output returned to the model (<= 0 disables the cap). Command filtering is
-// deliberately absent — access is gated by --allow-bash at the controller level.
-func BashToolDef(maxResultBytes int) agent.ToolDef {
+// the output returned to the model (<= 0 disables the cap). bg (optional)
+// enables background=true; nil rejects it. Command filtering is deliberately
+// absent — access is gated by --allow-bash at the controller level.
+func BashToolDef(maxResultBytes int, bg *BashBackground) agent.ToolDef {
 	return agent.ToolDef{
 		Name: "bash",
 		Description: `Execute an arbitrary shell command on the host running secagent via ` +
 			`bash -c. There are no command restrictions. Stdout and stderr are returned ` +
 			`combined; the result flags non-zero exit codes as errors. ` +
+			`Set background=true only when necessary (a command that must outlive this call); ` +
+			`it then returns the pid and stdout/stderr log file paths immediately. ` +
 			`Use when the sectool tools cannot accomplish the task or the instruction calls for it.`,
 		Schema: map[string]any{
 			"type": "object",
@@ -213,12 +216,17 @@ func BashToolDef(maxResultBytes int) agent.ToolDef {
 					"type":        "string",
 					"description": "Shell command line to execute (interpreted by bash)",
 				},
+				"background": map[string]any{
+					"type":        "boolean",
+					"description": "Run detached and return immediately with the pid plus stdout/stderr log file paths. Only use when necessary — when a command must outlive this tool call (long polls, listeners, servers). Tail the returned logs to review progress and kill the pid when done.",
+				},
 			},
 			"required": []string{"command"},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) agent.ToolResult {
 			var in struct {
-				Command string `json:"command"`
+				Command    string `json:"command"`
+				Background bool   `json:"background"`
 			}
 			if err := unmarshalToolArgs(args, &in); err != nil {
 				return agent.ToolResult{
@@ -231,6 +239,22 @@ func BashToolDef(maxResultBytes int) agent.ToolDef {
 					Text:    "Rejected: 'command' must be a non-empty shell command line.",
 					IsError: true,
 				}
+			}
+			if in.Background {
+				if bg == nil {
+					return agent.ToolResult{
+						Text:    "Rejected: background execution is unavailable in this run.",
+						IsError: true,
+					}
+				}
+				text, err := bg.Start(ctx, in.Command)
+				if err != nil {
+					return agent.ToolResult{
+						Text:    "Command failed to start: " + err.Error(),
+						IsError: true,
+					}
+				}
+				return agent.ToolResult{Text: text}
 			}
 			cmd := exec.CommandContext(ctx, "bash", "-c", in.Command)
 			var combined bytes.Buffer

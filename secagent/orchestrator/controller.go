@@ -379,11 +379,12 @@ type workerSpawnFunc func(ctx context.Context, id int, assignment string) (*Work
 
 // newWorkerSpawner returns a workerSpawnFunc that provisions workers against the MCP endpoint at mcpURL.
 // maxWorkers is the run's parallelism cap baked into the worker system prompt;
-// allowBash grants testing workers the unrestricted bash tool (--allow-bash).
+// allowBash grants testing workers the unrestricted bash tool (--allow-bash);
+// bg tracks their backgrounded processes (nil disables background=true).
 func newWorkerSpawner(mcpURL string, toolResultMaxBytes int,
 	factory AgentFactory, candidates *CandidatePool, writer *FindingWriter,
 	candidateDedup CandidateDedupReviewer, merger MergeSubmitter, autonomousBudget int,
-	maxWorkers int, allowBash bool) workerSpawnFunc {
+	maxWorkers int, allowBash bool, bg *BashBackground) workerSpawnFunc {
 	return func(ctx context.Context, id int, assignment string) (*WorkerState, error) {
 		m, defs, err := mcp.Establish(ctx, mcpURL, "mcp__sectool__", toolResultMaxBytes)
 		if err != nil {
@@ -396,7 +397,7 @@ func newWorkerSpawner(mcpURL string, toolResultMaxBytes int,
 		}
 		tools := append(slices.Clone(defs), WorkerToolDefs(candidates, writer, id, candidateDedup, merger)...)
 		if allowBash {
-			tools = append(tools, BashToolDef(toolResultMaxBytes))
+			tools = append(tools, BashToolDef(toolResultMaxBytes, bg))
 		}
 		a.SetTools(tools)
 		ws := &WorkerState{
@@ -425,13 +426,22 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	sd.BindWorkerCancel(workerStop)
 	sd.BindVerifierCancel(verifierStop)
 
+	// backgrounded bash commands must die even on the stage-3 kill path,
+	// which exits without running defers; ctx cancel covers earlier exits
+	bg := NewBashBackground(ctx)
+	defer bg.KillAll()
+
 	srv, err := StartSectool(ctx, cfg.ProxyPort, cfg.MCPPort, cfg.SectoolBinary, attached, log)
 	if err != nil {
 		return fmt.Errorf("sectool start: %w", err)
 	}
 	defer srv.Terminate()
-	// reap the child on the stage-3 kill path, which exits without running defers
-	sd.SetKillFunc(srv.Terminate)
+	// reap the child on the stage-3 kill path, which exits without running defers;
+	// also take out any backgrounded bash commands
+	sd.SetKillFunc(func() {
+		srv.Terminate()
+		bg.KillAll()
+	})
 
 	mcpURL := srv.URL
 
@@ -537,7 +547,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	verifierTools := append(slices.Clone(verifierSectoolDefs), VerifierToolDefs(decisions, candidates)...)
 	verifier.SetTools(verifierTools)
 
-	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, dedupReviewer, asyncMerger, cfg.AutonomousBudget, cfg.MaxWorkers, cfg.AllowBash)
+	spawn := newWorkerSpawner(mcpURL, cfg.ToolResultMaxBytes, factory, candidates, writer, dedupReviewer, asyncMerger, cfg.AutonomousBudget, cfg.MaxWorkers, cfg.AllowBash, bg)
 
 	workers := make([]*WorkerState, 0, cfg.MaxWorkers)
 	defer func() {
