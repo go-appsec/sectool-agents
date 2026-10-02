@@ -11,3 +11,8 @@ const decisionDrainMaxRounds = 4
 
 // minIterationsForDone is the earliest iteration at which `end_run` is accepted with zero findings filed.
 const minIterationsForDone = 5
+
+// maxPendingMerges caps the async merger's queued-or-running merges; excess
+// submissions fail fast into the candidate pool. Must stay above the merger
+// concurrency capacity (4) so saturation can never stall submissions outright.
+const maxPendingMerges = 16

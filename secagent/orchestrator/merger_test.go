@@ -19,6 +19,8 @@ type fakeReviewer struct {
 	merges   []fakeMergeCall
 	mergeErr error
 	merged   FindingFiled
+	// block, when set, makes Merge wait until closed after recording the call.
+	block chan struct{}
 }
 
 type fakeMergeCall struct {
@@ -31,8 +33,11 @@ func (r *fakeReviewer) Classify(context.Context, FindingFiled, FindingFiled) (De
 
 func (r *fakeReviewer) Merge(_ context.Context, primary, secondary FindingFiled) (FindingFiled, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.merges = append(r.merges, fakeMergeCall{primary, secondary})
+	r.mu.Unlock()
+	if r.block != nil {
+		<-r.block
+	}
 	if r.mergeErr != nil {
 		return FindingFiled{}, r.mergeErr
 	}
@@ -199,6 +204,35 @@ func TestAsyncMerger(t *testing.T) {
 		rev.mu.Lock()
 		assert.Len(t, rev.merges, 3, "Wait must block until every submitted merge completes")
 		rev.mu.Unlock()
+	})
+
+	t.Run("backlog_full_fails_fast", func(t *testing.T) {
+		writer := newTestFindingWriter(t, t.TempDir())
+		path, err := writer.Write(FindingFiled{
+			Title: "T", Severity: "low", Endpoint: "GET /",
+		})
+		require.NoError(t, err)
+		rev := &fakeReviewer{block: make(chan struct{})}
+		candidates := NewCandidatePool()
+		log, lpath, _ := newCapturedLogger(t)
+		m := newAsyncMerger(t.Context(), rev, writer, candidates, log, 1)
+
+		// the blocked reviewer pins pending at the cap; the next submit is rejected
+		for range maxPendingMerges {
+			m.Submit(filepath.Base(path), AddInput{Title: "x", Severity: "low", Endpoint: "GET /"})
+		}
+		m.Submit(filepath.Base(path), AddInput{Title: "overflow", Severity: "low", Endpoint: "GET /"})
+		pending := candidates.Pending()
+		require.Len(t, pending, 1)
+		assert.Equal(t, "overflow", pending[0].Title)
+
+		close(rev.block)
+		m.Wait()
+		rev.mu.Lock()
+		assert.Len(t, rev.merges, maxPendingMerges)
+		rev.mu.Unlock()
+		require.NoError(t, log.Close())
+		assert.Contains(t, mustReadFile(t, lpath), "merger backlog full")
 	})
 
 	t.Run("canceled_context_skips", func(t *testing.T) {

@@ -5,7 +5,9 @@ import (
 	"sync"
 )
 
-// asyncMerger implements MergeSubmitter by running each merge in a bounded-concurrency goroutine.
+// asyncMerger implements MergeSubmitter by running merges on a
+// bounded-concurrency goroutine pool; submissions beyond the backlog cap fail
+// fast into the candidate pool.
 type asyncMerger struct {
 	ctx      context.Context
 	reviewer DedupReviewer
@@ -44,7 +46,8 @@ func newAsyncMerger(ctx context.Context, reviewer DedupReviewer, writer *Finding
 // Submit queues a merge of incoming into matchedFilename and returns
 // immediately. Cancellation of the run-level ctx aborts in-flight merges;
 // any merge that cannot complete preserves its evidence in the candidate pool.
-// Submissions after Wait are rejected and recovered the same way.
+// Submissions after Wait, or while maxPendingMerges merges are already queued
+// or running, are rejected and recovered the same way.
 func (m *asyncMerger) Submit(matchedFilename string, incoming AddInput) {
 	if m == nil {
 		return
@@ -53,6 +56,11 @@ func (m *asyncMerger) Submit(matchedFilename string, incoming AddInput) {
 	if m.quiesced {
 		m.mu.Unlock()
 		m.rescue(incoming, matchedFilename, "merger quiesced")
+		return
+	}
+	if m.pending >= maxPendingMerges {
+		m.mu.Unlock()
+		m.rescue(incoming, matchedFilename, "merger backlog full")
 		return
 	}
 	m.pending++
