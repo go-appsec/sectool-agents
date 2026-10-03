@@ -196,7 +196,7 @@ Each loop around the cycle is one **iteration**. The controller keeps iterating 
 
 Workers do not write finding documents themselves — that's the verifier's job (after reproduction).
 
-**Optional `bash` tool.** With `--allow-bash`, every agent role additionally gets a `bash(command)` tool that executes arbitrary shell commands on the host running secagent via `bash -c`. There are no command restrictions — an agent can run anything, including state-changing or destructive commands — so only enable it on hosts where that risk is acceptable. Agents are prompted to use it when the sectool tools can't accomplish a step or the director's instruction calls for it, and the director's prompts note the capability so it can plan around it. Commands run outside the sectool proxy and produce no flow IDs.
+**Optional `bash` tool.** With `--allow-bash`, workers, the recon worker, and the verifier get a `bash(command)` tool that executes arbitrary shell commands on the host running secagent via `bash -c`. There are no command restrictions — an agent with the tool can run anything, including state-changing or destructive commands — so only enable it on hosts where that risk is acceptable. Agents are prompted to use it when the sectool tools can't accomplish a step or the director's instruction calls for it, and the director's prompts note the capability so it can plan around it. Commands run outside the sectool proxy and produce no flow IDs.
 
 ### Candidate dedup pipeline
 
@@ -289,7 +289,7 @@ Each file has Title, Severity, Affected Endpoint, Description, Reproduction Step
 - **Stall detection**: configurable via `--stall-warn-after` / `--stall-stop-after`.
 - **Per-turn timeout**: `--turn-timeout` (default 10m) bounds each model call. `--per-tool-timeout` (default 5m) bounds each tool dispatch.
 - **Max workers**: capped at 5 by `config.Parse`.
-- **Bash execution is opt-in**: agents have no shell access unless `--allow-bash` is set; when set, every agent role gets unrestricted command execution.
+- **Bash execution is opt-in**: agents have no shell access unless `--allow-bash` is set; when set, workers, recon, and the verifier get unrestricted command execution and directors delegate shell work to workers.
 - **Verification required**: findings are only filed after the verifier calls `file_finding` with non-empty `verification_notes`.
 - **Premature end_run guard**: rejected before iteration 5 when zero findings have been filed; also rejected when alive workers haven't been stopped.
 

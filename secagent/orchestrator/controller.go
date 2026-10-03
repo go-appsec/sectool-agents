@@ -463,13 +463,13 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	})
 	if cfg.AllowBash {
 		log.Log("server", "bash enabled (--allow-bash)", map[string]any{
-			"scope": "all agents (workers, recon, verifier, directors)",
-			"note":  "agents may execute arbitrary shell commands when needed or instructed",
+			"scope": "workers, recon, verifier",
+			"note":  "directors have no shell access and direct workers for shell work",
 		})
 	}
 
 	// withBash appends the bash tool when --allow-bash grants shell access;
-	// every agent role gets it, the controller itself holds no tools
+	// workers, recon, and the verifier get it, directors direct workers instead
 	withBash := func(tools []agent.ToolDef) []agent.ToolDef {
 		if !cfg.AllowBash {
 			return tools
@@ -892,8 +892,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			synthesisDirector.SetTools(nil)
 			RunIter1ReconReviewCall(workerRunCtx, synthesisDirector, dirChat, iterStatus, iteration, cfg.MaxWorkers, log)
 
-			synthesisDirector.SetTools(withBash(append(slices.Clone(synthesisDirectorSectoolDefs),
-				SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...)))
+			synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
+				SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
 			RunIter1ReconPlanCall(workerRunCtx, synthesisDirector, dirChat, decisions, iterStatus, cfg.MaxWorkers, log)
 
 			if decisions.HasEndRun {
@@ -918,9 +918,10 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 			continue
 		}
 
-		// directors get sectool tools so they can spot-check rather than hallucinate
-		decisionDirector.SetTools(withBash(append(slices.Clone(decisionDirectorSectoolDefs),
-			DecisionToolDefs(decisions, takenIDsFn, log)...)))
+		// directors get sectool tools so they can spot-check rather than hallucinate;
+		// no bash — shell work is delegated to workers via directives
+		decisionDirector.SetTools(append(slices.Clone(decisionDirectorSectoolDefs),
+			DecisionToolDefs(decisions, takenIDsFn, log)...))
 		decRes := RunDecisionPhase(workerRunCtx, DecisionPhaseInput{
 			Director: decisionDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, WorkerRuns: workerRuns,
@@ -937,8 +938,8 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		LatchStallWarnings(workers, cfg.StallWarnAfter)
 		applyRetiredSummaries()
 
-		synthesisDirector.SetTools(withBash(append(slices.Clone(synthesisDirectorSectoolDefs),
-			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...)))
+		synthesisDirector.SetTools(append(slices.Clone(synthesisDirectorSectoolDefs),
+			SynthesisToolDefs(decisions, guardStateFn, takenIDsFn, completedIDsFn, aliveWorkerIDsFn)...))
 		RunSynthesisPhase(workerRunCtx, SynthesisPhaseInput{
 			Director: synthesisDirector, DirChat: dirChat, Decisions: decisions,
 			Workers: workers, Completed: completed,

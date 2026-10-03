@@ -51,7 +51,7 @@ type Config struct {
 	MaxTurnsPerAgent int
 	FindingsDir      string
 	SkipRecon        bool // iter 1 spawns a normal worker instead of recon
-	AllowBash        bool // every agent role gets an unrestricted `bash` tool
+	AllowBash        bool // workers, recon, and verifier get an unrestricted `bash` tool
 
 	// Stall
 	StallWarnAfter int
@@ -125,7 +125,7 @@ func Parse(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.MaxTurnsPerAgent, "max-turns-per-agent", 100, "hard cap per Drain chain")
 	fs.StringVar(&c.FindingsDir, "findings-dir", "./findings", "finding report directory")
 	fs.BoolVar(&c.SkipRecon, "skip-recon", false, "skip the iter-1 recon pass; iter 1 runs a normal testing worker against cfg.Prompt")
-	fs.BoolVar(&c.AllowBash, "allow-bash", false, "give all agents (workers, recon, verifier, directors) an unrestricted bash tool for arbitrary shell command execution")
+	fs.BoolVar(&c.AllowBash, "allow-bash", false, "give workers, recon, and the verifier an unrestricted bash tool for arbitrary shell command execution (directors direct workers for shell work)")
 
 	fs.IntVar(&c.StallWarnAfter, "stall-warn-after", 3, "silent runs before director warning")
 	fs.IntVar(&c.StallStopAfter, "stall-stop-after", 4, "silent runs before force-stop")
