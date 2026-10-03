@@ -72,6 +72,16 @@ When present, the verifier may attach one-line hints about related angles. Treat
 Up to {max_workers} concurrent workers. Each must own a narrow, mutually-exclusive slice of the surface. Under-parallelizing is the more common failure — a lone worker scatters coverage.
 """
 
+_WORKER_BASH_NOTE = """\
 
-def build_system_prompt(max_workers: int) -> str:
-    return _BASE_PROMPT.format(max_workers=max_workers)
+## Worker shell access
+
+Workers have a `bash` tool with unrestricted shell execution on the host. When an angle benefits from local tooling — parsing captured data, scripting requests the sectool tools cannot shape, inspecting files — say so explicitly in the directive; workers default to sectool primitives for target traffic. You have no shell access yourself — if a step needs it, direct a worker to run it and report the output.
+"""
+
+
+def build_system_prompt(max_workers: int, allow_bash: bool = False) -> str:
+    out = _BASE_PROMPT.format(max_workers=max_workers)
+    if allow_bash:
+        out += _WORKER_BASH_NOTE
+    return out

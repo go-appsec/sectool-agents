@@ -69,6 +69,7 @@ python controller.py \
 | `--worker-model` | no | none | Override model for the Claude Code worker |
 | `--max-workers` | no | `4` | Maximum parallel workers the orchestrator can assign |
 | `--recon-budget` | no | `2` | Autonomous-turn cap for the initial recon worker (choices: `2`, `3`, `4`) |
+| `--allow-bash` | no | `false` | Give workers, recon, and the verifier an unrestricted `bash` tool for arbitrary shell command execution on the host. Off by default. See "Worker Tool" |
 | `--verbose` | no | false | Print full worker and orchestrator outputs |
 | `--sectool-bin` | no | `sectool` | Path to the sectool binary (default: looked up on `PATH`) |
 | `--skip-version-check` | no | `false` | Skip the best-effort sectool version staleness check at startup (see "Sectool version check") |
@@ -173,6 +174,10 @@ Calling a tool in the wrong phase returns an `is_error=True` response directing 
 
 Workers do not write finding documents themselves — that's the orchestrator's job (after verification).
 
+**Optional `bash` tool.** With `--allow-bash`, workers, the recon worker, and the verifier get a `bash(command)` tool that executes arbitrary shell commands on the host running the controller via `bash -c`. There are no command restrictions — an agent with the tool can run anything, including state-changing or destructive commands — so only enable it on hosts where that risk is acceptable. Agents are prompted to use it when the sectool tools can't accomplish a step or the director's instruction calls for it, and the director's prompts note the capability so it can plan around it. Commands run outside the sectool proxy and produce no flow IDs. Directors hold no shell access; when a step needs it, they direct a worker to run it.
+
+**Background execution.** The `bash` tool accepts `background=true` for commands that must outlive the tool call (long polls, listeners, servers). The command runs detached in its own process group with stdout and stderr redirected to separate temp files; the tool result returns the pid plus both log paths so the agent can `tail` progress and `kill` the process when done. A stopped line is appended to both log files when the process exits or is killed, and any still-running background processes are killed when the controller exits.
+
 ## Findings
 
 Filed findings are written as markdown files to the `--findings-dir` directory:
@@ -195,6 +200,7 @@ Each file has Title, Severity, Affected Endpoint, Description, Reproduction Step
 - **Phase substep caps**: `VERIFICATION_MAX_SUBSTEPS=6`, `DIRECTION_MAX_SUBSTEPS=4` bound each orchestrator phase; idle verifier drains get up to `VERIFICATION_IDLE_RETRIES=3` free re-prompts before the phase ends.
 - **Stall detection**: controller-observed via each worker's `escalation_reason`. Three consecutive silent escalations (no tool calls, no new flow IDs) issue a warning in the director prompt; four force a worker stop.
 - **Verification required**: findings are only filed after the verifier calls `file_finding` with non-empty `verification_notes`.
+- **Bash execution is opt-in**: agents have no shell access unless `--allow-bash` is set; when set, workers, recon, and the verifier get unrestricted command execution and directors delegate shell work to workers.
 
 ## Pause/Resume (spacebar)
 

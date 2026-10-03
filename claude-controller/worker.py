@@ -42,6 +42,7 @@ from tools import (
     build_worker_mcp_server,
     extract_flow_ids,
 )
+from bash_tool import BASH_TOOL_ALLOWED
 
 
 # ---------------------------------------------------------------------------
@@ -266,17 +267,24 @@ def _build_worker_options(
     *,
     is_recon: bool = False,
     user_prompt: str | None = None,
+    bash_tools_server=None,
 ) -> ClaudeAgentOptions:
+    allow_bash = bash_tools_server is not None
+    mcp_servers = {
+        "sectool": {"type": "http", "url": mcp_url},
+        "worker_tools": worker_tools_server,
+    }
+    allowed_tools = [
+        "mcp__sectool__*",
+        WORKER_TOOL_ALLOWED,
+        "Read", "Glob", "Grep", "Bash",
+    ]
+    if allow_bash:
+        mcp_servers["bash_tools"] = bash_tools_server
+        allowed_tools.append(BASH_TOOL_ALLOWED)
     return ClaudeAgentOptions(
-        mcp_servers={
-            "sectool": {"type": "http", "url": mcp_url},
-            "worker_tools": worker_tools_server,
-        },
-        allowed_tools=[
-            "mcp__sectool__*",
-            WORKER_TOOL_ALLOWED,
-            "Read", "Glob", "Grep", "Bash",
-        ],
+        mcp_servers=mcp_servers,
+        allowed_tools=allowed_tools,
         disallowed_tools=["Write", "Edit"],
         permission_mode="acceptEdits",
         cwd=base.cwd,
@@ -285,6 +293,7 @@ def _build_worker_options(
         stderr=stderr_cb,
         system_prompt=worker_prompts.build_system_prompt(
             worker_id, num_workers, is_recon=is_recon, user_prompt=user_prompt,
+            allow_bash=allow_bash,
         ),
     )
 
@@ -299,11 +308,13 @@ async def create_worker(
     *,
     is_recon: bool = False,
     user_prompt: str | None = None,
+    bash_tools_server=None,
 ) -> WorkerState:
     worker_tools_server = build_worker_mcp_server(candidates, worker_id)
     opts = _build_worker_options(
         base, worker_tools_server, mcp_url, worker_id, num_workers, stderr_cb,
         is_recon=is_recon, user_prompt=user_prompt,
+        bash_tools_server=bash_tools_server,
     )
     managed = ManagedSDKClient(options=opts)
     client = await managed.connect()

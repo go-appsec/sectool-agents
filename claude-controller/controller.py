@@ -45,6 +45,7 @@ from runtime import (
     toggle_pause,
 )
 import version_check
+from bash_tool import BASH_TOOL_ALLOWED, BashBackground, build_bash_mcp_server
 from tools import (
     DIRECTION_SELF_REVIEW_MAX_ROUNDS,
     DIRECTOR_TOOL_ALLOWED,
@@ -966,6 +967,7 @@ async def apply_plan_diff(
     stderr_cb,
     max_workers: int,
     recon_summary: str | None = None,
+    bash_tools_server=None,
 ) -> None:
     by_id = {w.worker_id: w for w in workers}
     existing_ids = {w.worker_id for w in workers if w.alive}
@@ -1002,7 +1004,8 @@ async def apply_plan_diff(
             log(f"worker {p.worker_id}", f"Spawning: {snippet}")
             try:
                 new_w = await create_worker(
-                    p.worker_id, num_workers_total, candidates, mcp_url, base_options, stderr_cb,
+                    p.worker_id, num_workers_total, candidates, mcp_url, base_options,
+                    stderr_cb, bash_tools_server=bash_tools_server,
                 )
                 new_w.assignment = p.assignment
                 new_w.last_instruction = p.assignment
@@ -1135,6 +1138,14 @@ async def run(config: Config) -> None:
     decisions = DecisionQueue()
     total_cost = 0.0
 
+    # Backgrounded bash commands must die on every exit path, including the
+    # force-exit branch of the Ctrl-C handler.
+    bash_bg = BashBackground()
+    bash_tools_server = build_bash_mcp_server(bash_bg)
+    if config.allow_bash:
+        log("server", "bash enabled (--allow-bash); workers, recon, and the "
+            "verifier may execute arbitrary shell commands")
+
     _status_bar.install()
     stop_spacebar = start_spacebar_listener(
         asyncio.get_running_loop(), toggle_pause,
@@ -1170,14 +1181,17 @@ async def run(config: Config) -> None:
             mcp_servers={
                 "sectool": {"type": "http", "url": mcp_url},
                 "orch_tools": orch_tools_server,
+                "bash_tools": bash_tools_server,
             },
-            allowed_tools=[ORCH_SECTOOL_TOOLS_GLOB] + list(VERIFIER_TOOL_ALLOWED),
+            allowed_tools=[ORCH_SECTOOL_TOOLS_GLOB] + list(VERIFIER_TOOL_ALLOWED) + [BASH_TOOL_ALLOWED],
             permission_mode="acceptEdits",
             cwd=cwd,
             max_turns=100,
             model=config.orchestrator_model_id,
             stderr=stderr_cb,
-            system_prompt=verifier_prompts.build_system_prompt(config.max_workers),
+            system_prompt=verifier_prompts.build_system_prompt(
+                config.max_workers, allow_bash=config.allow_bash,
+            ),
         )
 
         director_options = ClaudeAgentOptions(
@@ -1190,7 +1204,9 @@ async def run(config: Config) -> None:
             max_turns=100,
             model=config.orchestrator_model_id,
             stderr=stderr_cb,
-            system_prompt=director_prompts.build_system_prompt(config.max_workers),
+            system_prompt=director_prompts.build_system_prompt(
+                config.max_workers, allow_bash=config.allow_bash,
+            ),
         )
 
         verifier_managed: ManagedSDKClient | None = None
@@ -1203,6 +1219,7 @@ async def run(config: Config) -> None:
                 w1 = await create_worker(
                     1, 1, candidates, mcp_url, base_options, stderr_cb,
                     is_recon=True, user_prompt=config.prompt,
+                    bash_tools_server=bash_tools_server if config.allow_bash else None,
                 )
                 w1.autonomous_budget = config.recon_budget
                 w1.max_autonomous_budget = config.recon_budget
@@ -1278,8 +1295,9 @@ async def run(config: Config) -> None:
                 else:
                     log("ctrl-c", "Force-exit.")
                     # os._exit skips atexit/finally, so restore the terminal
-                    # synchronously here or the scroll region and cbreak mode
-                    # leak into the parent shell.
+                    # and kill backgrounded bash commands synchronously here
+                    # or they leak into the parent shell.
+                    bash_bg.kill_all()
                     if stop_spacebar is not None:
                         stop_spacebar()
                     _status_bar.uninstall()
@@ -1424,6 +1442,8 @@ async def run(config: Config) -> None:
                         decisions.plan, workers, candidates, mcp_url,
                         base_options, stderr_cb, config.max_workers,
                         recon_summary=recon_summary,
+                        bash_tools_server=(
+                            bash_tools_server if config.allow_bash else None),
                     )
 
                 # 9) Per-worker decisions
@@ -1504,6 +1524,7 @@ async def run(config: Config) -> None:
                 print(f"              {path}")
 
     finally:
+        bash_bg.kill_all()
         status_tick_task.cancel()
         try:
             await status_tick_task

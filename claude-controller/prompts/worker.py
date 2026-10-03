@@ -58,6 +58,20 @@ You are **Worker {worker_id}** of **{num_workers}** parallel workers, sharing on
 - Work exclusively on your assigned slice; include `flow_ids` in every candidate so the orchestrator can locate your evidence.
 """
 
+_WORKER_BASH_ADDENDUM = """\
+
+## Shell access
+
+You also have a `bash` tool with unrestricted command execution on the host running the controller. Use it when the sectool tools cannot accomplish a step or when your instruction calls for it. Prefer sectool primitives for target traffic so evidence stays flow-traceable — commands run outside the proxy and produce no flow IDs.
+"""
+
+_RECON_BASH_ADDENDUM = """\
+
+## Shell access
+
+You also have a `bash` tool with unrestricted command execution on the host running the controller — useful for parsing captured data, decoding payloads, or inspecting local files. It does not relax the observation-only restriction above: never use it to send state-changing requests to the target. Commands run outside the proxy and produce no flow IDs.
+"""
+
 _RECON_PROMPT = """\
 You are the **initial recon worker**. Your only job is to map the target's API surface so the director can dispatch testing workers. You do NOT test, exploit, fuzz, or file findings — those are for the workers spawned after you. You are single-shot: when synthesis completes, your context is discarded.
 
@@ -102,13 +116,21 @@ def build_system_prompt(
     *,
     is_recon: bool = False,
     user_prompt: str | None = None,
+    allow_bash: bool = False,
 ) -> str:
     if is_recon:
         if not user_prompt:
             raise ValueError("is_recon=True requires user_prompt")
-        return _RECON_PROMPT.format(user_prompt=user_prompt)
+        out = _RECON_PROMPT.format(user_prompt=user_prompt)
+        if allow_bash:
+            out += _RECON_BASH_ADDENDUM
+        return out
     if num_workers <= 1:
-        return _BASE_PROMPT
-    return _BASE_PROMPT + MULTI_WORKER_ADDENDUM.format(
-        worker_id=worker_id, num_workers=num_workers,
-    )
+        out = _BASE_PROMPT
+    else:
+        out = _BASE_PROMPT + MULTI_WORKER_ADDENDUM.format(
+            worker_id=worker_id, num_workers=num_workers,
+        )
+    if allow_bash:
+        out += _WORKER_BASH_ADDENDUM
+    return out

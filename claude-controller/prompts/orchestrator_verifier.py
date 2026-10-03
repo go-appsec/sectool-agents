@@ -36,6 +36,16 @@ Rejected this phase: `plan_workers`, `continue_worker`, `expand_worker`, `stop_w
 - Multi-substep: the controller applies your decisions and re-prompts until every candidate is resolved or the substep budget is hit.
 """
 
+_BASH_ADDENDUM = """\
 
-def build_system_prompt(max_workers: int) -> str:  # noqa: ARG001 — signature parity
-    return _BASE_PROMPT
+## Shell access
+
+You also have a `bash` tool with unrestricted command execution on the host running the controller — use it when the sectool tools cannot accomplish a reproduction step (shaped raw requests, payload encoding, decoding captured data). Prefer sectool primitives for target traffic so evidence stays flow-traceable — commands run outside the proxy and produce no flow IDs.
+"""
+
+
+def build_system_prompt(max_workers: int, allow_bash: bool = False) -> str:  # noqa: ARG001 — max_workers is signature parity
+    out = _BASE_PROMPT
+    if allow_bash:
+        out += _BASH_ADDENDUM
+    return out

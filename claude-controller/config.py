@@ -26,6 +26,7 @@ class Config:
     skip_version_check: bool = False
     max_workers: int = 4
     recon_budget: int = 2
+    allow_bash: bool = False
 
     @property
     def orchestrator_model_id(self) -> str:
@@ -104,6 +105,13 @@ def parse_args() -> Config:
         "--recon-budget", type=int, default=2, choices=[2, 3, 4],
         help="Autonomous-turn cap for the initial recon worker (default: 2)",
     )
+    parser.add_argument(
+        "--allow-bash", action="store_true",
+        help=(
+            "give workers, recon, and the verifier an unrestricted bash tool "
+            "for arbitrary shell command execution"
+        ),
+    )
     args = parser.parse_args()
     max_workers = max(1, min(5, args.max_workers))
     return Config(
@@ -120,4 +128,5 @@ def parse_args() -> Config:
         skip_version_check=args.skip_version_check,
         max_workers=max_workers,
         recon_budget=args.recon_budget,
+        allow_bash=args.allow_bash,
     )
