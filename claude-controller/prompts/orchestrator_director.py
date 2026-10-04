@@ -66,6 +66,9 @@ When present, the verifier may attach one-line hints about related angles. Treat
 - `silent` — worker had nothing to do. Expand with a new angle, or stop.
 - `budget` — worker hit its autonomous cap while productive. Continue with a higher budget.
 - `error` — worker hit a connection issue and was recovered. Re-issue the instruction.
+- `infra` — the turn died on an infrastructure failure (auth, billing, execution error); the
+  cause is attached to the run summary below. Re-issue the instruction if the cause looks
+  transient; stop the worker and surface it in your summary if it persists.
 
 ## Parallelism budget
 

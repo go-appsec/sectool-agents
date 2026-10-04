@@ -59,6 +59,10 @@ class WorkerTurnSummary:
     # produced no useful work and is not counted against the autonomous budget.
     rate_limited: bool = False
     rate_limit_text: str = ""
+    # Cause string when the turn died in-band on infrastructure: a non-
+    # rate-limit assistant error literal (auth, billing, ...) or an
+    # error-flagged result message (execution failure, max-turns).
+    infra_error: str = ""
 
 
 # ---------------------------------------------------------------------------

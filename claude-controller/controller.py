@@ -264,9 +264,14 @@ def _format_autonomous_run(
             f"### Worker {worker_id}\n"
             f"(No autonomous turns this iteration. escalation_reason={escalation_reason or 'unknown'})"
         )
+    reason = escalation_reason or "unknown"
+    infra = next((t.infra_error for t in turns if t.infra_error), "")
+    if infra:
+        # Cause rides along even when the run escalated candidate/budget.
+        reason += f" ({infra})"
     parts = [
         f"### Worker {worker_id} — {len(turns)} autonomous turn(s), "
-        f"escalated: {escalation_reason or 'unknown'}",
+        f"escalated: {reason}",
     ]
     for i, s in enumerate(turns, 1):
         calls = ", ".join(c.name for c in s.tool_calls) or "(no tool calls)"
@@ -1161,7 +1166,12 @@ async def apply_decision(
 
 
 def update_worker_streaks(workers: list[WorkerState]) -> None:
-    """Update progress_none_streak from escalation_reason after autonomous runs."""
+    """Update progress_none_streak from escalation_reason after autonomous runs.
+
+    Infra escalations never increment the streak — their cause surfaces in
+    logs and the director prompt instead. Genuine flow activity still resets
+    it via the shared branch below.
+    """
     for w in workers:
         if not w.alive:
             continue

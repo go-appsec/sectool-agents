@@ -4,7 +4,7 @@ The worker is the LLM-facing role that drives sectool to find candidates.
 Each worker owns a `ManagedSDKClient` (running the SDK in its own asyncio
 task to isolate anyio cancel scopes) and a `WorkerState` of accumulated
 context. The autonomous loop runs each alive worker for up to its budget of
-turns, escalating on candidate / silent / budget / error / rate_limit.
+turns, escalating on candidate / silent / infra / error / rate_limit.
 """
 
 import asyncio
@@ -218,6 +218,10 @@ async def collect_worker_turn(
                     summary.rate_limit_text = "".join(
                         b.text for b in message.content if isinstance(b, TextBlock)
                     )
+                elif message.error:
+                    # Auth/billing/server literals: the turn died on
+                    # infrastructure rather than idling.
+                    summary.infra_error = f"assistant {message.error}"
             elif isinstance(message, UserMessage):
                 blocks = message.content if isinstance(message.content, list) else []
                 for block in blocks:
@@ -231,6 +235,13 @@ async def collect_worker_turn(
                                 summary.flow_ids_touched.append(fid)
             elif isinstance(message, ResultMessage):
                 summary.cost_usd = message.total_cost_usd
+                if message.is_error and not summary.infra_error:
+                    # Error-flagged results carry the CLI failure subtype
+                    # (execution failure, max-turns) plus a detail string.
+                    detail = _short(" ".join(str(message.result or "").split()), 200)
+                    summary.infra_error = (
+                        f"result {message.subtype}" + (f": {detail}" if detail else "")
+                    )
                 break
 
     # Scope candidates to this worker so concurrent drains don't cross-attribute.
@@ -516,6 +527,9 @@ def _classify_escalation(summary: WorkerTurnSummary) -> str | None:
     """Return an escalation reason, or None if the turn was productive."""
     if summary.candidate_ids:
         return "candidate"
+    if summary.infra_error:
+        # Infrastructure failures must not read as silent stalls.
+        return "infra"
     if not summary.tool_calls and not summary.flow_ids_touched:
         return "silent"
     return None
@@ -527,7 +541,7 @@ async def run_worker_autonomous_turn(
     candidates: CandidatePool,
     verbose: bool,
 ) -> tuple[WorkerTurnSummary | None, str | None]:
-    """Drain one turn from the worker; classify as candidate/silent/None/error.
+    """Drain one turn from the worker; classify as candidate/infra/silent/None.
 
     Returns (summary, escalation_reason). On connection error returns
     (None, "error"); the turn otherwise runs to completion. External
@@ -550,7 +564,10 @@ async def run_worker_autonomous_turn(
         # surviving turns produced; the pause holds before the next iteration.
         return summary, "rate_limit"
 
-    return summary, _classify_escalation(summary)
+    reason = _classify_escalation(summary)
+    if reason == "infra":
+        log(f"worker {worker.worker_id}", f"Infrastructure failure: {summary.infra_error}")
+    return summary, reason
 
 
 async def run_worker_until_escalation(

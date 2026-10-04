@@ -47,6 +47,20 @@ def _result(cost: float = 0.01) -> ResultMessage:
     )
 
 
+def _error_result(subtype: str = "error_during_execution",
+                  result: str | None = None) -> ResultMessage:
+    return ResultMessage(
+        subtype=subtype,
+        duration_ms=0,
+        duration_api_ms=0,
+        is_error=True,
+        num_turns=1,
+        session_id="test",
+        total_cost_usd=0.01,
+        result=result,
+    )
+
+
 class FakeSDKClient:
     """Minimal async fake of ClaudeSDKClient.
 
@@ -156,6 +170,43 @@ class TestCollectWorkerTurn(unittest.TestCase):
         self.assertIn("xyz789", s.flow_ids_touched)
         self.assertEqual(s.cost_usd, 0.02)
 
+    def test_captures_assistant_infra_error(self):
+        pool = CandidatePool()
+        client = FakeSDKClient([
+            [
+                AssistantMessage(content=[], model="test", error="authentication_failed"),
+                _result(0.0),
+            ],
+        ])
+        s = _run(worker_mod.collect_worker_turn(client, worker_id=1, iteration=1, candidates=pool))
+        self.assertEqual(s.infra_error, "assistant authentication_failed")
+
+    def test_captures_result_level_infra_error(self):
+        pool = CandidatePool()
+        client = FakeSDKClient([
+            _productive_turn("rr01aa")[:-1] + [_error_result(
+                result="Error: MCP server\ndropped connection"),
+            ],
+        ])
+        s = _run(worker_mod.collect_worker_turn(client, worker_id=1, iteration=1, candidates=pool))
+        self.assertEqual(
+            s.infra_error,
+            "result error_during_execution: Error: MCP server dropped connection",
+        )
+
+    def test_rate_limit_stays_out_of_infra(self):
+        pool = CandidatePool()
+        client = FakeSDKClient([
+            [
+                AssistantMessage(content=[TextBlock(text="slow down")], model="test",
+                                 error="rate_limit"),
+                _result(0.0),
+            ],
+        ])
+        s = _run(worker_mod.collect_worker_turn(client, worker_id=1, iteration=1, candidates=pool))
+        self.assertTrue(s.rate_limited)
+        self.assertEqual(s.infra_error, "")
+
     def test_attributes_candidates_to_active_worker(self):
         pool = CandidatePool()
         # Pre-seed a prior candidate (other worker) to verify filtering.
@@ -233,6 +284,11 @@ def _silent_turn() -> list:
         AssistantMessage(content=[], model="test"),
         _result(0.0),
     ]
+
+
+def _infra_result_turn() -> list:
+    """Productive turn terminated by an error-flagged result message."""
+    return _productive_turn("ii01aa")[:-1] + [_error_result()]
 
 
 def _candidate_turn(pool: CandidatePool, wid: int) -> list:
@@ -330,6 +386,25 @@ class TestRunWorkerAutonomousTurn(unittest.TestCase):
                     self.assertEqual(reason, "candidate")
                     self.assertEqual(len(s.candidate_ids), 1)
 
+    def test_classifies_infra_escalation(self):
+        pool = CandidatePool()
+        # Idle-looking turn that died on an assistant auth literal.
+        client = FakeSDKClient([[
+            AssistantMessage(content=[], model="test", error="billing_error"),
+            _result(0.0),
+        ]])
+        w = self._make_worker(client)
+        s, reason = _run(worker_mod.run_worker_autonomous_turn(w, 1, pool, verbose=False))
+        self.assertEqual(reason, "infra")
+        self.assertEqual(s.infra_error, "assistant billing_error")
+
+        # A turn with tool calls still escalates infra on an error result.
+        client = FakeSDKClient([_infra_result_turn()])
+        w = self._make_worker(client)
+        s, reason = _run(worker_mod.run_worker_autonomous_turn(w, 1, pool, verbose=False))
+        self.assertEqual(reason, "infra")
+        self.assertTrue(s.tool_calls)
+
 
 class TestRunWorkerUntilEscalation(unittest.TestCase):
     def _make_worker(self, client, budget: int = 3):
@@ -379,6 +454,23 @@ class TestRunWorkerUntilEscalation(unittest.TestCase):
         w = self._make_worker(client, budget=4)
         _run(worker_mod.run_worker_until_escalation(w, 1, pool, verbose=False))
         self.assertEqual(len(w.autonomous_turns), 2)
+
+    def test_infra_turn_stops_drain(self):
+        """An in-band infrastructure failure ends the run like a silent turn."""
+        pool = CandidatePool()
+        scripts = [
+            _productive_turn("ee01aa"),
+            [
+                AssistantMessage(content=[], model="test", error="authentication_failed"),
+                _result(0.0),
+            ],
+            _productive_turn("ee02bb"),
+        ]
+        client = FakeSDKClient(scripts)
+        w = self._make_worker(client, budget=3)
+        runs = _run(worker_mod.run_worker_until_escalation(w, 1, pool, verbose=False))
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(w.escalation_reason, "infra")
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +522,26 @@ class TestUpdateWorkerStreaks(unittest.TestCase):
         w.autonomous_turns = [WorkerTurnSummary(worker_id=1, iteration=1)]
         controller.update_worker_streaks([w])
         self.assertEqual(w.progress_none_streak, 1)
+
+    def test_infra_without_flows_unchanged(self):
+        """Infra escalations are excluded from the silent-streak count."""
+        w = self._make()
+        w.progress_none_streak = 2
+        w.escalation_reason = "infra"
+        w.autonomous_turns = [WorkerTurnSummary(worker_id=1, iteration=1)]
+        controller.update_worker_streaks([w])
+        self.assertEqual(w.progress_none_streak, 2)
+
+    def test_infra_with_flows_resets(self):
+        """Genuine flow activity still resets the streak despite infra."""
+        w = self._make()
+        w.progress_none_streak = 2
+        w.escalation_reason = "infra"
+        s = WorkerTurnSummary(worker_id=1, iteration=1)
+        s.flow_ids_touched = ["aaaa11"]
+        w.autonomous_turns = [s]
+        controller.update_worker_streaks([w])
+        self.assertEqual(w.progress_none_streak, 0)
 
 
 class TestRecoverErroredWorkers(unittest.TestCase):
@@ -639,6 +751,12 @@ class TestPromptFormatting(unittest.TestCase):
         self.assertIn("Turn 2", out)
         self.assertIn("fl0w02", out)
         self.assertIn("c001", out)
+
+    def test_format_autonomous_run_infra_cause(self):
+        turns = [_turn(1, 2, ["mcp__sectool__proxy_poll"], ["in01aa"], [])]
+        turns[-1].infra_error = "assistant authentication_failed"
+        out = controller._format_autonomous_run(1, turns, "infra")
+        self.assertIn("escalated: infra (assistant authentication_failed)", out)
 
     def test_build_verifier_prompt(self):
         pool = CandidatePool()
