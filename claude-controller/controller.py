@@ -1028,6 +1028,15 @@ async def run_direction_phase(
 # ---------------------------------------------------------------------------
 
 
+def find_alive_worker(workers: list[WorkerState], worker_id: int) -> WorkerState | None:
+    """Resolve a worker id to its live state, or None when retired.
+
+    Prefers the alive entry so duplicate ids can never misroute a lookup onto
+    a dead one; a worker id has at most one authoritative state per run.
+    """
+    return next((w for w in workers if w.worker_id == worker_id and w.alive), None)
+
+
 async def apply_plan_diff(
     plan: list[PlanEntry],
     workers: list[WorkerState],
@@ -1055,8 +1064,9 @@ async def apply_plan_diff(
 
     for p in plan:
         snippet = _short(p.assignment, 120)
-        if p.worker_id in by_id and by_id[p.worker_id].alive:
-            w = by_id[p.worker_id]
+        current = by_id.get(p.worker_id)
+        if current is not None and current.alive:
+            w = current
             log(f"worker {p.worker_id}", f"Retargeting: {snippet}")
             w.assignment = p.assignment
             w.last_instruction = p.assignment
@@ -1066,6 +1076,10 @@ async def apply_plan_diff(
                 await submit_query(w.client, p.assignment)
             except Exception:
                 await attempt_worker_recovery(w)
+        elif current is not None:
+            # Retired id — never respawn; the dead entry must stay unique.
+            log(f"worker {p.worker_id}",
+                "Spawn skipped: id taken by retired worker.")
         else:
             if len(existing_ids) >= max_workers:
                 log(f"worker {p.worker_id}", f"Spawn skipped: max_workers={max_workers} reached.")
@@ -1508,8 +1522,8 @@ async def run(config: Config) -> None:
                         f"effective={len(effective_decisions)}")
                 decided_wids: set[int] = set()
                 for d in effective_decisions:
-                    worker = next((w for w in workers if w.worker_id == d.worker_id), None)
-                    if worker is None or not worker.alive:
+                    worker = find_alive_worker(workers, d.worker_id)
+                    if worker is None:
                         log(f"iter {iteration}",
                             f"Decision for unknown/dead worker {d.worker_id} — skipped.")
                         continue

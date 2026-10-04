@@ -2216,6 +2216,64 @@ class TestApplyPlanDiffReconKickoff(unittest.TestCase):
         self.assertEqual(client.queries, ["bare assignment"])
 
 
+class TestFindAliveWorker(unittest.TestCase):
+    """Worker-id resolution must reach the live entry, never a dead one."""
+
+    @staticmethod
+    def _worker(worker_id: int, alive: bool = True) -> controller.WorkerState:
+        w = controller.WorkerState(worker_id=worker_id, options=None)
+        w.alive = alive
+        return w
+
+    def test_prefers_live_over_retired(self):
+        corpse = self._worker(2, alive=False)
+        live = self._worker(2)
+        self.assertIs(
+            controller.find_alive_worker([corpse, live], 2), live)
+
+    def test_retired_only_returns_none(self):
+        corpse = self._worker(2, alive=False)
+        self.assertIsNone(controller.find_alive_worker([corpse], 2))
+
+    def test_unknown_id_returns_none(self):
+        w = self._worker(1)
+        self.assertIsNone(controller.find_alive_worker([w], 9))
+
+
+class TestApplyPlanDiffRetiredWorkerId(unittest.TestCase):
+    """A retired worker id must never be respawned — the dead entry stays
+    unique in the workers list (mirrors the Go twin's plan handling)."""
+
+    def test_retired_id_spawn_refused(self):
+        from tools import PlanEntry
+        corpse = controller.WorkerState(worker_id=2, options=None)
+        corpse.alive = False
+        workers = [corpse]
+        plan = [PlanEntry(worker_id=2, assignment="fresh angle")]
+
+        _run(controller.apply_plan_diff(
+            plan, workers, CandidatePool(), "http://x",
+            None, None, max_workers=4,
+        ))
+
+        self.assertEqual(workers, [corpse])
+        self.assertFalse(workers[0].alive)
+
+    def test_alive_id_still_retargeted(self):
+        from tools import PlanEntry
+        w = controller.WorkerState(worker_id=2, options=None)
+        w.client = _StubClient()
+        plan = [PlanEntry(worker_id=2, assignment="new directive")]
+
+        _run(controller.apply_plan_diff(
+            plan, [w], CandidatePool(), "http://x",
+            None, None, max_workers=4,
+        ))
+
+        self.assertEqual(w.last_instruction, "new directive")
+        self.assertEqual(w.client.queries, ["new directive"])
+
+
 class DumpUnverifiedCandidatesTests(unittest.TestCase):
     def _pool(self) -> CandidatePool:
         pool = CandidatePool()
