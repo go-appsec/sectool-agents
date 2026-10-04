@@ -1226,6 +1226,14 @@ def _dump_unverified_candidates(
 # ---------------------------------------------------------------------------
 
 
+def _cost_ceiling_reached(total_cost: float, max_cost: float | None, iteration: int) -> bool:
+    """Report whether the --max-cost ceiling is configured and reached."""
+    if max_cost is None or total_cost < max_cost:
+        return False
+    log(f"iter {iteration}", f"Cost ceiling reached (${total_cost:.2f}). Stopping.")
+    return True
+
+
 async def run(config: Config) -> None:
     cwd = os.getcwd()
     server_proc = None
@@ -1448,8 +1456,7 @@ async def run(config: Config) -> None:
                         f"Recon synthesis captured ({len(recon_summary)} chars, "
                         f"cost=${synth_cost:.4f}).")
 
-                if config.max_cost is not None and total_cost >= config.max_cost:
-                    log(f"iter {iteration}", f"Cost ceiling reached (${total_cost:.2f}). Stopping.")
+                if _cost_ceiling_reached(total_cost, config.max_cost, iteration):
                     break
 
                 # 4) Reset decisions for this iteration
@@ -1464,8 +1471,7 @@ async def run(config: Config) -> None:
                 )
                 total_cost += v_cost
 
-                if config.max_cost is not None and total_cost >= config.max_cost:
-                    log(f"iter {iteration}", f"Cost ceiling reached (${total_cost:.2f}). Stopping.")
+                if _cost_ceiling_reached(total_cost, config.max_cost, iteration):
                     break
 
                 # On shutdown: skip direction and exit. Dump pending candidates
@@ -1494,6 +1500,11 @@ async def run(config: Config) -> None:
                     abort_event=dump_unverified_event,
                 )
                 total_cost += d_cost
+
+                # Enforce the ceiling before committing further billed work:
+                # plan spawns/retargets and per-worker instructions below.
+                if _cost_ceiling_reached(total_cost, config.max_cost, iteration):
+                    break
 
                 if dump_unverified_event.is_set():
                     _dump_unverified_candidates(candidates, finding_writer)

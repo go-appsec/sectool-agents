@@ -2566,6 +2566,18 @@ class TestApplyPlanDiffRetiredWorkerId(unittest.TestCase):
         self.assertEqual(seen, [event])
 
 
+class CostCeilingReachedTests(unittest.TestCase):
+    def test_no_ceiling_false(self):
+        self.assertFalse(controller._cost_ceiling_reached(100.0, None, 1))
+
+    def test_below_ceiling_false(self):
+        self.assertFalse(controller._cost_ceiling_reached(4.99, 5.0, 3))
+
+    def test_at_or_over_ceiling_true(self):
+        self.assertTrue(controller._cost_ceiling_reached(5.0, 5.0, 3))
+        self.assertTrue(controller._cost_ceiling_reached(6.0, 5.0, 3))
+
+
 class DumpUnverifiedCandidatesTests(unittest.TestCase):
     def _pool(self) -> CandidatePool:
         pool = CandidatePool()
