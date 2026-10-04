@@ -209,10 +209,10 @@ class TestExtractFlowIds(unittest.TestCase):
     def test_text_keyword_patterns(self):
         text = (
             "I opened flow_id=abcdef and also source_flow_id: DEF456. "
-            'Nested: flow_a="xy12zz", flow_b=11qq2.'
+            'Nested: flow_a="xy12zz", flow_b=11qq22.'
         )
         ids = extract_flow_ids(text)
-        for expected in ("abcdef", "DEF456", "xy12zz", "11qq2"):
+        for expected in ("abcdef", "DEF456", "xy12zz", "11qq22"):
             self.assertIn(expected, ids)
 
     def test_dict_flow_id_field(self):
@@ -259,6 +259,23 @@ class TestExtractFlowIds(unittest.TestCase):
     def test_dict_value_shape_validation(self):
         self.assertEqual(extract_flow_ids({"flow_id": "ab1", "flow_a": "abc-123!"}), [])
         self.assertEqual(extract_flow_ids({"flow_id": 123456, "flow_b": True}), ["123456"])
+
+    def test_plural_keys_text_and_dicts(self):
+        ids = extract_flow_ids(
+            '"flow_ids": ["ab12cd", "ef34gh"], flow_ids=aa11bb',
+            {"source_flow_ids": ["cc22dd"]},
+            {"flow_id": ["ww33xx"]},
+        )
+        self.assertEqual(ids, ["ab12cd", "ef34gh", "aa11bb", "cc22dd", "ww33xx"])
+
+    def test_oversized_tokens_rejected_entirely(self):
+        # No truncation: over-long tokens fail the whole match.
+        self.assertEqual(extract_flow_ids("flow_id: abc123def456"), [])
+        self.assertEqual(extract_flow_ids({"flow_id": "abc123def456"}), [])
+        self.assertEqual(
+            extract_flow_ids('"flow_ids": ["abc123def", "ab12cd"]'),
+            ["ab12cd"],
+        )
 
 
 class TestCandidatePoolMark(unittest.TestCase):

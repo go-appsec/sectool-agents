@@ -455,19 +455,43 @@ class DecisionQueue:
 # ---------------------------------------------------------------------------
 
 
-# Flow IDs (sectool/service/ids/ids.go): base62, default length 6, entity IDs 4.
-# The key requires word boundaries on both sides and an explicit [:=] separator
-# so suffix-embedded names (workflow_id) and bare prose never match.
+# Flow IDs (sectool/service/ids/ids.go): base62, flows length 6, entity
+# IDs 4. Exact lengths reject glued tokens instead of truncating them; all
+# flow-ID matching must use this shape.
+_FLOW_ID_SHAPE = r"[0-9A-Za-z]{6}|[0-9A-Za-z]{4}"
+
+# Keyword accepts singular and plural spellings, requires word boundaries on
+# both sides plus an explicit [:=] separator so suffix-embedded names
+# (workflow_id) and bare prose never match. The trailing boundary rejects
+# over-long tokens instead of capturing a truncated prefix.
+_FLOW_ID_KEYWORD = r"(?:flow[_ ]?ids?|flow_a|flow_b|source_flow_ids?)"
 _FLOW_ID_RE = re.compile(
-    r"""\b(?:flow[_ ]?id|flow_a|flow_b|source_flow_id)\b  # keyword
-        ["']?\s*[:=]\s*["']?                             # required [:=] separator
-        ([0-9A-Za-z]{4,16})                              # base62 token
+    rf"""\b{_FLOW_ID_KEYWORD}\b                          # keyword
+        ["']?\s*[:=]\s*["']?                            # required [:=] separator
+        ({_FLOW_ID_SHAPE})\b                            # base62 token
     """,
     re.VERBOSE | re.IGNORECASE,
 )
 
-# Same shape constraint as _FLOW_ID_RE, applied to dict-key values.
-_FLOW_ID_VALUE_RE = re.compile(r"^[0-9A-Za-z]{4,16}$")
+# JSON-style array values in prose ("flow_ids": ["a", "b"]): every
+# exact-shape token inside the brackets counts, other inner text is ignored.
+_FLOW_ID_LIST_RE = re.compile(
+    rf"""\b{_FLOW_ID_KEYWORD}\b                          # keyword
+        ["']?\s*[:=]\s*\[([^\]]*)\]                     # bracketed array span
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+_FLOW_ID_TOKEN_RE = re.compile(r"[0-9A-Za-z]+")
+
+# Same shape constraint as the text patterns, applied to dict-key values.
+_FLOW_ID_VALUE_RE = re.compile(rf"^(?:{_FLOW_ID_SHAPE})$")
+
+# Dict keys recognized as flow-ID carriers, singular and plural spellings.
+_FLOW_ID_KEYS = frozenset({
+    "flow_id", "flow_ids",
+    "flow_a", "flow_b",
+    "source_flow_id", "source_flow_ids",
+})
 
 
 def _flow_id_value(val: Any) -> str | None:
@@ -485,30 +509,32 @@ def _flow_id_value(val: Any) -> str | None:
 def extract_flow_ids(*sources: Any) -> list[str]:
     """Extract sectool flow IDs from a mix of strings, dicts, and lists.
 
-    Order-preserving and deduplicated.
+    Singular and plural key spellings are recognized alike in free text and
+    structured values. Order-preserving and deduplicated.
     """
     seen: dict[str, None] = {}
+
+    def add(fid: str | None) -> None:
+        if fid and fid not in seen:
+            seen[fid] = None
 
     def walk(val: Any) -> None:
         if val is None:
             return
         if isinstance(val, str):
+            for m in _FLOW_ID_LIST_RE.finditer(val):
+                for tok in _FLOW_ID_TOKEN_RE.findall(m.group(1)):
+                    if _FLOW_ID_VALUE_RE.match(tok):
+                        add(tok)
             for m in _FLOW_ID_RE.finditer(val):
-                fid = m.group(1)
-                if fid not in seen:
-                    seen[fid] = None
+                add(m.group(1))
             return
         if isinstance(val, dict):
             for k, v in val.items():
-                if isinstance(k, str) and k.lower() in (
-                    "flow_id",
-                    "flow_a",
-                    "flow_b",
-                    "source_flow_id",
-                ):
-                    fid = _flow_id_value(v)
-                    if fid and fid not in seen:
-                        seen[fid] = None
+                if isinstance(k, str) and k.lower() in _FLOW_ID_KEYS:
+                    # Plural keys carry lists; scalars take the same check.
+                    for item in (v if isinstance(v, (list, tuple)) else [v]):
+                        add(_flow_id_value(item))
                 walk(v)
             return
         if isinstance(val, (list, tuple)):
