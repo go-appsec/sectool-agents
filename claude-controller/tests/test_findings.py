@@ -29,6 +29,12 @@ class TestSlugify(unittest.TestCase):
         self.assertEqual(slugify("  Spaces  &  Symbols  !"), "spaces-symbols")
         self.assertEqual(slugify(""), "")
 
+    def test_underscore_equals_hyphen(self):
+        # Mirrors secagent's TestSlugify: underscored and hyphenated titles
+        # must produce the same slug.
+        self.assertEqual(slugify("plaintext client_secret exposure"), "plaintext-client-secret-exposure")
+        self.assertEqual(slugify("plaintext client-secret exposure"), "plaintext-client-secret-exposure")
+
 
 class TestCanonicalEndpoint(unittest.TestCase):
     def test_strip_method_and_normalize(self):
@@ -206,6 +212,11 @@ class TestMatchPendingCandidates(unittest.TestCase):
             _candidate("c002", "Reflected XSS in search results", "get /search/"),
         ]
         self.assertEqual(match_pending_candidates(filed, pending), ["c001", "c002"])
+
+    def test_underscore_title_matches_hyphen(self):
+        filed = _make("plaintext client-secret exposure", endpoint="GET /search")
+        pending = [_candidate("c001", "plaintext client_secret exposure", "GET /search")]
+        self.assertEqual(match_pending_candidates(filed, pending), ["c001"])
 
     def test_empty_endpoint_returns_empty(self):
         filed = _make("Reflected XSS", endpoint="")

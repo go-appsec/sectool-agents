@@ -17,10 +17,16 @@ _UNVERIFIED_SEQ_RE = re.compile(r"^unverified-(\d+)-.*\.md$")
 
 
 def slugify(text: str) -> str:
+    """Return a URL-safe slug matching secagent's util.Slugify.
+
+    Underscores normalize to spaces so underscored and hyphenated titles
+    produce the same slug.
+    """
     text = text.lower().strip()
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"[-\s]+", "-", text)
-    return text.strip("-")
+    text = text.replace("_", " ")
+    # Explicit ASCII whitespace: Go's \s excludes \v and unicode spaces.
+    text = re.sub(r"[^a-z0-9\t\n\f\r -]", "", text)
+    return re.sub(r"[\t\n\f\r -]+", "-", text).strip("-")
 
 
 def _max_sequence(findings_dir: str, pattern: re.Pattern[str]) -> int:
