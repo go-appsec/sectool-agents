@@ -1047,6 +1047,7 @@ async def apply_plan_diff(
     max_workers: int,
     recon_summary: str | None = None,
     bash_tools_server=None,
+    shutdown_event: asyncio.Event | None = None,
 ) -> None:
     by_id = {w.worker_id: w for w in workers}
     existing_ids = {w.worker_id for w in workers if w.alive}
@@ -1075,7 +1076,7 @@ async def apply_plan_diff(
             try:
                 await submit_query(w.client, p.assignment)
             except Exception:
-                await attempt_worker_recovery(w)
+                await attempt_worker_recovery(w, shutdown_event)
         elif current is not None:
             # Retired id — never respawn; the dead entry must stay unique.
             log(f"worker {p.worker_id}",
@@ -1118,11 +1119,13 @@ async def apply_decision(
     decision: WorkerDecision,
     worker: WorkerState,
     iteration: int,
+    shutdown_event: asyncio.Event | None = None,
 ) -> None:
     """Dispatch a single director decision to the target worker.
 
-    No longer touches stall tracking (that is done from escalation_reason in
-    the main loop). Copies the director's `autonomous_budget` onto the worker.
+    Copies the director's `autonomous_budget` onto the worker; stall tracking
+    lives in the main loop. Dispatch-failure recovery is refused once
+    `shutdown_event` (when given) has fired.
     """
     if decision.kind == "stop":
         log(f"iter {iteration}", f"Worker {worker.worker_id}: stop — {decision.reason}")
@@ -1146,7 +1149,7 @@ async def apply_decision(
     try:
         await submit_query(worker.client, decision.instruction)
     except Exception:
-        await attempt_worker_recovery(worker)
+        await attempt_worker_recovery(worker, shutdown_event)
 
 
 def update_worker_streaks(workers: list[WorkerState]) -> None:
@@ -1160,6 +1163,27 @@ def update_worker_streaks(workers: list[WorkerState]) -> None:
         elif w.escalation_reason == "candidate" or produced_flows:
             w.progress_none_streak = 0
             w.stall_warned = False
+
+
+async def recover_errored_workers(
+    alive: list[WorkerState],
+    shutdown_event: asyncio.Event | None = None,
+) -> None:
+    """Reconnect workers that errored during their autonomous run.
+
+    With each client isolated on its own runner task, cancellations leave no
+    poisoned state to drain — an errored worker just needs a rebuild here.
+    Skipped once shutdown is requested: recovery re-bills the last
+    instruction, whose answer would be discarded at exit.
+    """
+    if shutdown_event is not None and shutdown_event.is_set():
+        log("ctrl-c", "Shutdown requested; skipping worker error-recovery.")
+        return
+    for w in alive:
+        if w.escalation_reason == "error" and w.client is None:
+            recovered = await attempt_worker_recovery(w, shutdown_event)
+            if recovered:
+                log(f"worker {w.worker_id}", "Recovered after autonomous run error.")
 
 
 # ---------------------------------------------------------------------------
@@ -1382,15 +1406,10 @@ async def run(config: Config) -> None:
                     shutdown_event=shutdown_event,
                 )
 
-                # Recover any connection-errored workers. With ManagedSDKClient
-                # isolating each client's anyio scope on its own runner task,
-                # the main task stays clean through cancellations and no
-                # special draining is required here.
-                for w in alive:
-                    if w.escalation_reason == "error" and w.client is None:
-                        recovered = await attempt_worker_recovery(w)
-                        if recovered:
-                            log(f"worker {w.worker_id}", "Recovered after autonomous run error.")
+                # Recover any connection-errored workers — never once shutdown
+                # is requested: recovery re-bills each worker's last
+                # instruction and the answer would be discarded at exit.
+                await recover_errored_workers(alive, shutdown_event)
 
                 # 2) Update stall tracking
                 update_worker_streaks(alive)
@@ -1406,7 +1425,11 @@ async def run(config: Config) -> None:
                 # 3b) Iter-1 only: harvest the recon worker's surface synthesis
                 # and tear it down. After this point the recon worker no
                 # longer exists; iter 2+ skips this block entirely.
-                if iteration == 1 and workers and workers[0].worker_id == 1:
+                # Post-shutdown the synthesis feeds a direction phase that
+                # never runs — skip the billed query; teardown still happens
+                # on the exit path.
+                if (iteration == 1 and workers and workers[0].worker_id == 1
+                        and not shutdown_event.is_set()):
                     recon_summary, synth_cost = await synthesize_and_teardown_recon(
                         workers[0], candidates, iteration, config.verbose,
                     )
@@ -1504,6 +1527,7 @@ async def run(config: Config) -> None:
                         recon_summary=recon_summary,
                         bash_tools_server=(
                             bash_tools_server if config.allow_bash else None),
+                        shutdown_event=shutdown_event,
                     )
 
                 # 9) Per-worker decisions
@@ -1527,7 +1551,7 @@ async def run(config: Config) -> None:
                         log(f"iter {iteration}",
                             f"Decision for unknown/dead worker {d.worker_id} — skipped.")
                         continue
-                    await apply_decision(d, worker, iteration)
+                    await apply_decision(d, worker, iteration, shutdown_event)
                     decided_wids.add(d.worker_id)
 
                 # 10) Implicit continue for undirected alive workers
@@ -1548,7 +1572,7 @@ async def run(config: Config) -> None:
                             ),
                         )
                     except Exception:
-                        await attempt_worker_recovery(w)
+                        await attempt_worker_recovery(w, shutdown_event)
 
                 # 11) Forced stop for stalled workers
                 for w in list(workers):

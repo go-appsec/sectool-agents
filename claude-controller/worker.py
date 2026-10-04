@@ -329,7 +329,18 @@ async def teardown_worker(state: WorkerState) -> None:
     state.managed = None
 
 
-async def attempt_worker_recovery(state: WorkerState) -> bool:
+async def attempt_worker_recovery(
+    state: WorkerState,
+    shutdown_event: asyncio.Event | None = None,
+) -> bool:
+    """Tear down and rebuild an errored worker, resubmitting its last instruction.
+
+    Returns True when the worker is usable again. Refused without any query
+    once `shutdown_event` (when provided) has fired — recovery re-bills the
+    last instruction, whose answer would be discarded after shutdown.
+    """
+    if shutdown_event is not None and shutdown_event.is_set():
+        return False
     await teardown_worker(state)
     for attempt in range(1, 3):
         try:
@@ -340,7 +351,9 @@ async def attempt_worker_recovery(state: WorkerState) -> bool:
             state.client = client
             state.alive = True
             log(f"worker {state.worker_id}", f"Recovery succeeded (attempt {attempt})")
-            if state.last_instruction:
+            # Re-check at the billing gate: Ctrl-C can land mid-recovery.
+            shutting_down = shutdown_event is not None and shutdown_event.is_set()
+            if state.last_instruction and not shutting_down:
                 await submit_query(client, state.last_instruction)
             return True
         except Exception as exc:

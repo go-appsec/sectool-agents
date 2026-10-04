@@ -432,6 +432,81 @@ class TestUpdateWorkerStreaks(unittest.TestCase):
         self.assertEqual(w.progress_none_streak, 1)
 
 
+class TestRecoverErroredWorkers(unittest.TestCase):
+    """The post-autonomous-run recovery pass must never fire once shutdown was
+    requested — each recovered worker would be re-billed, and its answer is
+    discarded when the loop exits after final verification."""
+
+    @staticmethod
+    def _errored(worker_id: int) -> controller.WorkerState:
+        w = controller.WorkerState(worker_id=worker_id, options=None)
+        # Shape left behind by the per-worker cancellation handler.
+        w.escalation_reason = "error"
+        w.client = None
+        return w
+
+    def test_recovers_errored_workers(self):
+        seen: list[tuple[int, Any]] = []
+
+        async def fake_recovery(state, shutdown_event=None):
+            seen.append((state.worker_id, shutdown_event))
+            state.client = object()
+            return True
+
+        orig = controller.attempt_worker_recovery
+        controller.attempt_worker_recovery = fake_recovery
+        try:
+            event = asyncio.Event()
+            _run(controller.recover_errored_workers(
+                [self._errored(2), self._errored(3)], event))
+        finally:
+            controller.attempt_worker_recovery = orig
+
+        self.assertEqual([wid for wid, _ in seen], [2, 3])
+        self.assertTrue(all(ev is event for _, ev in seen))
+
+    def test_shutdown_skips_recovery(self):
+        calls: list[int] = []
+
+        async def fake_recovery(state, shutdown_event=None):
+            calls.append(state.worker_id)
+            return True
+
+        orig = controller.attempt_worker_recovery
+        controller.attempt_worker_recovery = fake_recovery
+        try:
+            event = asyncio.Event()
+            event.set()
+            ws = [self._errored(2)]
+            _run(controller.recover_errored_workers(ws, event))
+        finally:
+            controller.attempt_worker_recovery = orig
+
+        self.assertEqual(calls, [])
+        # Worker untouched — the exit-path teardown owns it from here.
+        self.assertIsNone(ws[0].client)
+        self.assertTrue(ws[0].alive)
+
+    def test_healthy_workers_untouched(self):
+        healthy = controller.WorkerState(worker_id=4, options=None)
+        healthy.escalation_reason = "budget"
+        healthy.client = object()
+        calls: list[int] = []
+
+        async def fake_recovery(state, shutdown_event=None):
+            calls.append(state.worker_id)
+            return True
+
+        orig = controller.attempt_worker_recovery
+        controller.attempt_worker_recovery = fake_recovery
+        try:
+            _run(controller.recover_errored_workers([healthy], asyncio.Event()))
+        finally:
+            controller.attempt_worker_recovery = orig
+
+        self.assertEqual(calls, [])
+
+
 # ---------------------------------------------------------------------------
 # apply_decision (simplified — no more streak mutation)
 # ---------------------------------------------------------------------------
@@ -492,6 +567,33 @@ class TestApplyDecision(unittest.TestCase):
                            progress="new", autonomous_budget=2)
         _run(controller.apply_decision(d, w, iteration=5))
         self.assertEqual(w.autonomous_budget, 2)
+
+    def test_failure_recovery_forwards_shutdown_event(self):
+        """Dispatch-failure recovery must see the shutdown event so a Ctrl-C
+        racing the dispatch cannot trigger a billed re-submission."""
+        class _FailingClient:
+            async def query(self, msg: str) -> None:
+                raise RuntimeError("connection lost")
+
+        w = self._make_worker()
+        w.client = _FailingClient()
+        seen: list[Any] = []
+
+        async def fake_recovery(state, shutdown_event=None):
+            seen.append(shutdown_event)
+            return False
+
+        orig = controller.attempt_worker_recovery
+        controller.attempt_worker_recovery = fake_recovery
+        try:
+            event = asyncio.Event()
+            d = WorkerDecision(kind="continue", worker_id=7, instruction="go",
+                               progress="new", autonomous_budget=3)
+            _run(controller.apply_decision(d, w, iteration=5, shutdown_event=event))
+        finally:
+            controller.attempt_worker_recovery = orig
+
+        self.assertEqual(seen, [event])
 
 
 # ---------------------------------------------------------------------------
@@ -1421,6 +1523,90 @@ class TestManagedTeardown(unittest.TestCase):
         self.assertFalse(w.alive)
 
 
+class TestWorkerRecoveryShutdownGate(unittest.TestCase):
+    """attempt_worker_recovery is a billing chokepoint: once shutdown has been
+    requested it must not reconnect-and-resubmit workers — the resubmitted
+    answer could never be drained after shutdown."""
+
+    def _worker(self) -> controller.WorkerState:
+        w = controller.WorkerState(worker_id=3, options=None)
+        w.last_instruction = "continue probing"
+        return w
+
+    def _install_fakes(self, connect_hook=None):
+        """Patch ManagedSDKClient/submit_query/sleep; return (built, queries)."""
+        built: list[Any] = []
+        queries: list[str] = []
+
+        class _FakeManaged:
+            def __init__(self, options):
+                self.client = _StubClient()
+                built.append(self)
+
+            async def connect(self):
+                if connect_hook is not None:
+                    await connect_hook()
+                return self.client
+
+        async def fake_submit(client, prompt):
+            queries.append(prompt)
+
+        async def instant_sleep(_delay):
+            return None
+
+        orig_managed = worker_mod.ManagedSDKClient
+        orig_submit = worker_mod.submit_query
+        orig_sleep = asyncio.sleep
+        worker_mod.ManagedSDKClient = _FakeManaged
+        worker_mod.submit_query = fake_submit
+        asyncio.sleep = instant_sleep  # skip recovery's reconnect backoff
+        self.addCleanup(setattr, worker_mod, "ManagedSDKClient", orig_managed)
+        self.addCleanup(setattr, worker_mod, "submit_query", orig_submit)
+        self.addCleanup(setattr, asyncio, "sleep", orig_sleep)
+        return built, queries
+
+    def test_refused_once_shutdown_requested(self):
+        built, queries = self._install_fakes()
+        w = self._worker()
+        event = asyncio.Event()
+        event.set()
+
+        result = _run(worker_mod.attempt_worker_recovery(w, event))
+
+        self.assertFalse(result)
+        # No reconnect attempt, no query — worker left for exit teardown.
+        self.assertEqual(built, [])
+        self.assertEqual(queries, [])
+
+    def test_resubmits_last_instruction_while_running(self):
+        built, queries = self._install_fakes()
+        w = self._worker()
+
+        result = _run(worker_mod.attempt_worker_recovery(w))
+
+        self.assertTrue(result)
+        self.assertTrue(w.alive)
+        self.assertIs(w.client, built[0].client)
+        self.assertEqual(queries, ["continue probing"])
+
+    def test_shutdown_mid_recovery_skips_resubmit(self):
+        # Ctrl-C lands while recovery is reconnecting: the rebuild completes
+        # but nothing is re-billed.
+        event = asyncio.Event()
+
+        async def fire_during_connect():
+            event.set()
+
+        built, queries = self._install_fakes(connect_hook=fire_during_connect)
+        w = self._worker()
+
+        result = _run(worker_mod.attempt_worker_recovery(w, event))
+
+        self.assertTrue(result)
+        self.assertEqual(len(built), 1)
+        self.assertEqual(queries, [])
+
+
 class TestCancelledErrorIsolation(unittest.TestCase):
     """A CancelledError in one per-worker task must not crash the whole run."""
 
@@ -2272,6 +2458,35 @@ class TestApplyPlanDiffRetiredWorkerId(unittest.TestCase):
 
         self.assertEqual(w.last_instruction, "new directive")
         self.assertEqual(w.client.queries, ["new directive"])
+
+    def test_retarget_failure_forwards_shutdown_event(self):
+        from tools import PlanEntry
+
+        class _FailingClient:
+            async def query(self, msg: str) -> None:
+                raise RuntimeError("connection lost")
+
+        w = controller.WorkerState(worker_id=2, options=None)
+        w.client = _FailingClient()
+        seen: list[Any] = []
+
+        async def fake_recovery(state, shutdown_event=None):
+            seen.append(shutdown_event)
+            return False
+
+        orig = controller.attempt_worker_recovery
+        controller.attempt_worker_recovery = fake_recovery
+        try:
+            event = asyncio.Event()
+            _run(controller.apply_plan_diff(
+                [PlanEntry(worker_id=2, assignment="new directive")], [w],
+                CandidatePool(), "http://x", None, None, max_workers=4,
+                shutdown_event=event,
+            ))
+        finally:
+            controller.attempt_worker_recovery = orig
+
+        self.assertEqual(seen, [event])
 
 
 class DumpUnverifiedCandidatesTests(unittest.TestCase):
