@@ -1024,14 +1024,22 @@ async def run_direction_phase(
             break
 
     # Mandatory self-review substep unless the director already ended the run
-    # or the phase aborted from a connection error.
+    # or the phase aborted from a connection error. Raced like every other
+    # substep so the abort event can interrupt it mid-flight.
     if not aborted and decisions.done_summary is None:
-        ok, cost, _ = await run_phase_substep(
-            managed.client, _build_director_self_review_prompt(),
-            PHASE_DIRECTION, iteration, DIRECTION_MAX_SUBSTEPS + 1, verbose,
+        result, raced = await _race_with_abort(
+            run_phase_substep(
+                managed.client, _build_director_self_review_prompt(),
+                PHASE_DIRECTION, iteration, DIRECTION_MAX_SUBSTEPS + 1, verbose,
+            ),
+            abort_event,
         )
-        if ok and cost is not None:
-            phase_cost += cost
+        if raced:
+            log("direct", "Self-review aborted by user mid-flight.")
+        else:
+            ok, cost, _ = result
+            if ok and cost is not None:
+                phase_cost += cost
 
     return managed, phase_cost
 

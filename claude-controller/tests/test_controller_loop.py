@@ -1672,6 +1672,62 @@ class TestDirectionPhase(unittest.TestCase):
         )
         self.assertIn("Self-review", client.queries[-1])
 
+    def test_self_review_abort_mid_flight(self):
+        """Issue 14: the mandatory self-review substep must be interruptible
+        by the abort event like every other phase substep."""
+        decisions = DecisionQueue()
+        w1 = self._make_worker(1)
+        abort = asyncio.Event()
+
+        class _ReviewHangsClient:
+            """Turn 1 records a decision; the self-review drain hangs after
+            firing the abort — the phase must return instead of hanging."""
+
+            def __init__(self):
+                self.queries: list[str] = []
+
+            async def query(self, content: str) -> None:
+                self.queries.append(content)
+
+            def receive_response(self):
+                if len(self.queries) == 1:
+                    decisions.add_decision(WorkerDecision(
+                        kind="continue", worker_id=1,
+                        instruction="keep", progress="new"))
+                    messages = _orch_tool_turn(
+                        "continue_worker",
+                        {"worker_id": 1, "instruction": "k", "progress": "new"})
+
+                    async def gen():
+                        for m in messages:
+                            yield m
+                    return gen()
+                abort.set()
+
+                async def hang_gen():
+                    await asyncio.Event().wait()  # never set — hangs until cancelled
+                    yield None
+                return hang_gen()
+
+        client = _ReviewHangsClient()
+
+        async def body():
+            await asyncio.wait_for(controller.run_direction_phase(
+                _FakeManaged(client), None, decisions, [w1], worker_runs={},
+                pending_candidates=[],
+                verification_summary="ok", findings_summary="x",
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None,
+                findings_count=0, stall_warnings="", follow_up_hints="", verbose=False,
+                max_workers=4, user_prompt="test", abort_event=abort,
+            ), timeout=5)
+
+        _run(body())
+        # The self-review prompt went out (2nd query) and the phase returned
+        # promptly instead of waiting on the unowned hung drain.
+        self.assertEqual(len(client.queries), 2)
+        self.assertIn("Self-review", client.queries[-1])
+        self.assertEqual(len(decisions.worker_decisions), 1)
+
 
 class TestClearLeakedCancellations(unittest.TestCase):
     """The helper drains `task.cancelling()` via `task.uncancel()`.
@@ -1982,6 +2038,80 @@ class TestWorkerExceptionSiblingSettlement(unittest.TestCase):
         self.assertEqual(results, {})
         self.assertEqual(w1.escalation_reason, "error")
         self.assertEqual(w2.escalation_reason, "error")
+
+
+class TestRaceWithAbort(unittest.TestCase):
+    """_race_with_abort must settle every raced child on all exit paths and
+    propagate genuine cancellations of the calling task (issue 14)."""
+
+    def test_completes_before_abort(self):
+        async def sub():
+            return "ok"
+
+        result, aborted = _run(worker_mod._race_with_abort(sub(), asyncio.Event()))
+        self.assertEqual(result, "ok")
+        self.assertFalse(aborted)
+
+    def test_none_event_awaits_directly(self):
+        async def sub():
+            return "ok"
+
+        result, aborted = _run(worker_mod._race_with_abort(sub(), None))
+        self.assertEqual(result, "ok")
+        self.assertFalse(aborted)
+
+    def test_abort_cancels_and_settles_substep(self):
+        state = {"cancelled": False}
+
+        async def hang():
+            try:
+                await asyncio.Event().wait()  # never set
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+
+        async def body():
+            abort = asyncio.Event()
+            race_task = asyncio.create_task(worker_mod._race_with_abort(hang(), abort))
+            await asyncio.sleep(0)  # let the race reach its wait
+            abort.set()
+            result, aborted = await race_task
+            self.assertIsNone(result)
+            self.assertTrue(aborted)
+            self.assertTrue(state["cancelled"], "raced substep must be cancelled and awaited")
+
+        _run(body())
+
+    def test_caller_cancel_settles_children_and_propagates(self):
+        state = {"cancelled": False}
+
+        async def hang():
+            try:
+                await asyncio.Event().wait()  # never set
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+
+        async def body():
+            race_task = asyncio.create_task(
+                worker_mod._race_with_abort(hang(), asyncio.Event()))
+            await asyncio.sleep(0)  # let the race reach its wait
+            race_task.cancel()
+            try:
+                await race_task
+            except asyncio.CancelledError:
+                pass
+            # Settled before returning, not left for loop teardown to reap.
+            self.assertTrue(state["cancelled"], "caller cancellation must cancel the substep")
+
+        _run(body())
+
+    def test_substep_exception_propagates(self):
+        async def boom():
+            raise RuntimeError("substep boom")
+
+        with self.assertRaises(RuntimeError):
+            _run(worker_mod._race_with_abort(boom(), asyncio.Event()))
 
 
 class TestManagedSDKClientScopeIsolation(unittest.TestCase):

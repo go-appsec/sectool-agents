@@ -512,26 +512,31 @@ async def _race_with_abort(
 
     On normal completion returns (result, False). When `abort_event` is None
     this just awaits coro and returns (result, False) — the no-abort path.
+    Caller cancellation cancels and awaits both raced tasks before propagating,
+    so a raced substep never outlives its caller unowned.
     """
     if abort_event is None:
         return await coro, False
     task = asyncio.create_task(coro)
     waiter = asyncio.create_task(abort_event.wait())
-    done, _ = await asyncio.wait(
-        [task, waiter], return_when=asyncio.FIRST_COMPLETED,
-    )
+    try:
+        done, _ = await asyncio.wait(
+            [task, waiter], return_when=asyncio.FIRST_COMPLETED,
+        )
+    except BaseException:
+        # Caller cancelled mid-race: settle both children so the substep
+        # never runs unowned, then let cancellation propagate.
+        task.cancel()
+        waiter.cancel()
+        await asyncio.gather(task, waiter, return_exceptions=True)
+        raise
     if task in done:
         waiter.cancel()
-        try:
-            await waiter
-        except (asyncio.CancelledError, Exception):
-            pass
+        await asyncio.gather(waiter, return_exceptions=True)
         return task.result(), False
+    # Abort won: cancel the substep and settle it before reporting.
     task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, Exception):
-        pass
+    await asyncio.gather(task, return_exceptions=True)
     return None, True
 
 
