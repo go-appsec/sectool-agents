@@ -126,33 +126,59 @@ def start_mcp_server(
     return proc, log_file
 
 
-def is_server_running(mcp_port: int, timeout: float = 1.0) -> bool:
-    url = f"http://127.0.0.1:{mcp_port}/mcp"
+# Per-attempt MCP probe timeout shared by the attach probe and readiness wait,
+# so a healthy-but-slow server can't fail one and pass the other.
+MCP_PROBE_TIMEOUT = 2.0
+
+# Delay between readiness-wait probe attempts.
+MCP_WAIT_INTERVAL = 0.5
+
+
+def _mcp_url(mcp_port: int) -> str:
+    return f"http://127.0.0.1:{mcp_port}/mcp"
+
+
+def _probe_mcp(url: str, timeout: float) -> bool:
+    """Report whether one blocking GET to url receives any HTTP response."""
     try:
-        urllib.request.urlopen(
-            urllib.request.Request(url, method="GET"), timeout=timeout,
-        )
+        urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=timeout)
+    except urllib.error.HTTPError:
+        # Error statuses (405 is the normal streamable-HTTP answer to a GET)
+        # still prove a server answered; they must not read as down.
         return True
     except (urllib.error.URLError, ConnectionError, OSError):
         return False
+    return True
 
 
-def wait_for_server(mcp_port: int, proc: subprocess.Popen, timeout: float = 10.0) -> None:
-    url = f"http://127.0.0.1:{mcp_port}/mcp"
+async def is_server_running(mcp_port: int, timeout: float = MCP_PROBE_TIMEOUT) -> bool:
+    """Report whether an HTTP server answers on the MCP port.
+
+    Any received response counts as running. Runs off the event loop.
+    """
+    return await asyncio.to_thread(_probe_mcp, _mcp_url(mcp_port), timeout)
+
+
+async def wait_for_server(mcp_port: int, proc: subprocess.Popen, timeout: float = 10.0) -> None:
+    """Wait until a spawned MCP server answers; exits fatally on early child
+    death or when nothing responds within `timeout` seconds.
+
+    Non-blocking to the event loop.
+    """
+    url = _mcp_url(mcp_port)
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
         exit_code = proc.poll()
         if exit_code is not None:
             log("server", f"MCP server exited early (code {exit_code}). See sectool-mcp.log.")
             sys.exit(1)
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(url, method="GET"), timeout=2,
-            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if await asyncio.to_thread(_probe_mcp, url, MCP_PROBE_TIMEOUT):
             log("server", "MCP server ready.")
             return
-        except (urllib.error.URLError, ConnectionError, OSError):
-            time.sleep(0.5)
+        await asyncio.sleep(min(MCP_WAIT_INTERVAL, remaining))
     log("server", f"MCP server failed to become ready within {timeout}s.")
     sys.exit(1)
 
@@ -1282,10 +1308,11 @@ async def run(config: Config) -> None:
 
     # stale-installed sectool is fatal only when the controller will spawn it;
     # in attach mode the local binary isn't invoked, so log and continue.
-    attached = is_server_running(config.mcp_port)
+    attached = await is_server_running(config.mcp_port)
     state_path = os.path.join(tempfile.gettempdir(), "claude-controller-state.json")
-    sectool_bin = version_check.run(
-        config.sectool_bin, state_path,
+    # Off-loop: subprocess + module-proxy fetch can block for several seconds.
+    sectool_bin = await asyncio.to_thread(
+        version_check.run, config.sectool_bin, state_path,
         skip_version=config.skip_version_check,
         fatal_on_stale=not attached,
     )
@@ -1321,12 +1348,12 @@ async def run(config: Config) -> None:
 
     try:
         if server_proc is not None:
-            wait_for_server(config.mcp_port, server_proc)
+            await wait_for_server(config.mcp_port, server_proc)
 
         for key in [k for k in os.environ if k.startswith("CLAUDE")]:
             os.environ.pop(key, None)
 
-        mcp_url = f"http://127.0.0.1:{config.mcp_port}/mcp"
+        mcp_url = _mcp_url(config.mcp_port)
         stderr_cb = (lambda line: log("claude", line.rstrip())) if config.verbose else None
 
         # `workers` is mutated below as workers spawn and retire; the lambdas

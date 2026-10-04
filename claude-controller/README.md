@@ -114,7 +114,7 @@ The resolved or configured sectool is used for both the version check and the MC
               continue / expand / stop / spawn — or end_run to exit
 ```
 
-1. **Launch MCP** — probes `--mcp-port`; if a server is already accepting requests, reuses it (and won't tear it down on exit). Otherwise starts `sectool mcp` as a subprocess on `--mcp-port` using the binary from `--sectool-bin` (or `PATH`). The controller does not build sectool; it must already be installed.
+1. **Launch MCP** — probes `--mcp-port` with an HTTP GET; any received response (including error statuses like the 405 streamable-HTTP endpoints return for GET) counts as a running server and is reused (and won't be torn down on exit). The probe, version check, and readiness wait run off the event loop so the status line and pause key stay responsive during startup. Otherwise starts `sectool mcp` as a subprocess on `--mcp-port` using the binary from `--sectool-bin` (or `PATH`). The controller does not build sectool; it must already be installed.
 2. **Connect worker 1, verifier, and director** — all three share the sectool MCP server; the workers get an in-process `worker_tools` MCP server (exposing `report_finding_candidate`), and the verifier and director each connect to the shared in-process `orch_tools` MCP server (tools are phase-gated — see below). The verifier gets the full sectool tool surface; the director gets only worker-control tools.
 3. **Initial prompt** — the user's prompt is sent to worker 1 for discovery.
 4. **Per-iteration anatomy** (three phases):
