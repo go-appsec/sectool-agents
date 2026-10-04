@@ -34,9 +34,15 @@ def _short(s: str, n: int) -> str:
 #
 # `_inflight` records currently-draining turns so the status bar can show
 # what is still finishing during pause.
+#
+# Once shutdown is requested (`request_shutdown`) the gate stops gating:
+# parked submitters are released, later ones skip the wait, and pause
+# controls go inert — Ctrl-C must stay effective while paused.
 
 _pause_gate: asyncio.Event = asyncio.Event()
 _pause_gate.set()  # set = "go"; clear = "pause"
+
+_shutdown_requested: bool = False
 
 # Auto-engaged when an AssistantMessage arrives with error="rate_limit". Shares
 # the same `_pause_gate` as the spacebar pause so callers don't need a second
@@ -199,6 +205,19 @@ _status_bar: StatusBar = StatusBar()
 _inflight: InflightRegistry = InflightRegistry()
 
 
+def request_shutdown() -> None:
+    """Retire the pause gate for the rest of the run.
+
+    Called when Ctrl-C shutdown begins. Releases tasks parked in
+    submit_query and makes later gated submissions skip the wait, so a
+    paused or rate-limited run still unwinds on shutdown.
+    """
+    global _shutdown_requested
+    if not _shutdown_requested:
+        _shutdown_requested = True
+        _pause_gate.set()
+
+
 def toggle_pause() -> None:
     """Flip the pause gate; called from the spacebar listener.
 
@@ -209,6 +228,8 @@ def toggle_pause() -> None:
     keypress maps to that.
     """
     global _rate_limited
+    if _shutdown_requested:
+        return  # gate retired during shutdown wind-down
     if _rate_limited:
         _rate_limited = False
         _pause_gate.set()
@@ -231,6 +252,8 @@ def toggle_pause() -> None:
 def engage_rate_limit_pause(assistant_text: str = "") -> None:
     """Auto-pause on rate_limit response; spacebar is the only resume."""
     global _rate_limited
+    if _shutdown_requested:
+        return  # gate retired during shutdown wind-down
     if _rate_limited:
         return  # already engaged; don't double-log
     _rate_limited = True
@@ -259,7 +282,8 @@ async def submit_query(client, prompt: str) -> None:
     happens before submission; once query() returns, the turn is committed
     and the receive_response loop must be allowed to finish.
     """
-    await _pause_gate.wait()
+    if not _shutdown_requested:
+        await _pause_gate.wait()
     await client.query(prompt)
 
 
@@ -278,6 +302,9 @@ def _clear_leaked_cancellations(tag: str = "") -> int:
     for logging. On older Pythons (no `uncancel`) we return 0 (best-effort
     — the fallback relies on teardown_worker skipping `__aexit__` on
     poisoned clients).
+
+    Only call this once a genuine external cancellation of the current task
+    has been ruled out — the drain erases standard cancel bookkeeping.
     """
     try:
         task = asyncio.current_task()

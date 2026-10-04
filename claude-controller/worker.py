@@ -686,6 +686,11 @@ async def run_all_workers_until_escalation(
     tasks are cancelled — the per_worker handler treats this as the
     same recovery path as a leaked cancel scope.
 
+    Cancellation delivered into the calling task itself (an external stop)
+    is not a worker-level event: the remaining workers are cancelled and
+    settled, then the cancellation propagates without draining standard
+    cancel bookkeeping.
+
     Any other exception escaping a worker task is collected and reported
     once all tasks settle, with the failed worker marked
     escalation_reason="error" like the cancellation path. Sibling runs
@@ -730,17 +735,38 @@ async def run_all_workers_until_escalation(
 
     results: dict[int, list[WorkerTurnSummary]] = {}
     failures: list[str] = []
+    # First cancellation delivered into this task (children absorb their own,
+    # so those never reach this frame). Re-raised after settlement.
+    own_cancel: asyncio.CancelledError | None = None
+
+    def _note_task_cancellation(exc: asyncio.CancelledError) -> None:
+        """Record a cancellation genuinely delivered into the current task.
+
+        An escaping CancelledError belongs to this task only when the task
+        has pending cancel counts; otherwise it re-raises a child that died
+        mid-cleanup. The first genuine hit stops the remaining children so
+        nothing outlives us; it is re-raised below, never drained.
+        """
+        nonlocal own_cancel
+        if own_cancel is not None:
+            return
+        task = asyncio.current_task()
+        cancelling = getattr(task, "cancelling", None)
+        if callable(cancelling) and cancelling() > 0:
+            log("worker", "Worker run interrupted by external cancellation.")
+            for extra in tasks:
+                if not extra.done():
+                    extra.cancel()
+            own_cancel = exc
+
     # Settle every task before returning: one worker's exception must never
     # leave siblings running into teardown and the next phase.
     for w, t in zip(alive, tasks):
         try:
             wid, runs = await t
             results[wid] = runs
-        except asyncio.CancelledError:
-            # Defence in depth — per_worker already catches, but if the await
-            # itself is cancelled we still don't want to crash the whole run.
-            log("worker", "Task await cancelled; continuing with remaining workers.")
-            _clear_leaked_cancellations("worker")
+        except asyncio.CancelledError as exc:
+            _note_task_cancellation(exc)
         except Exception as exc:
             w.escalation_reason = "error"
             failures.append(f"worker {w.worker_id} failed: {_short(repr(exc), 160)}")
@@ -753,10 +779,20 @@ async def run_all_workers_until_escalation(
         watcher.cancel()
         try:
             await watcher
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError as exc:
+            _note_task_cancellation(exc)
+        except Exception:
             pass
-    # Always drain leaked cancellations before returning to the main task.
-    # A cancel-scope leak from one worker's timeout can otherwise poison the
-    # main loop's next await (e.g. attempt_worker_recovery's asyncio.sleep).
+
+    if own_cancel is not None:
+        # Settle the children cancelled above, then propagate untouched —
+        # draining here would erase the caller's cancellation signal.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise own_cancel
+
+    # No cancellation was delivered into this task on any path above, so any
+    # residual counts are SDK cancel-scope leaks from a worker timeout. Drain
+    # them before returning or they poison the main loop's next await (e.g.
+    # attempt_worker_recovery's asyncio.sleep).
     _clear_leaked_cancellations("worker")
     return results

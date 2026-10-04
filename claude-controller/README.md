@@ -212,6 +212,8 @@ When `stdout` is a TTY, a status line at the bottom of the terminal shows the cu
 
 A `rate_limit` response from Claude auto-engages the same gate; the status line shows `[RATE-LIMITED — space to resume]`. Press **space** once the window clears. Rate-limited workers drop their remaining autonomous budget; verifier and director substeps retry the same prompt on resume.
 
+The gate only holds work while the run wants to continue: any Ctrl-C press retires it for the rest of the run, releasing everything parked at the gate and letting later submissions through without waiting — a paused or rate-limited run always unwinds on shutdown.
+
 ## Graceful Shutdown (Ctrl-C)
 
 The controller installs a triple-Ctrl-C handler so an in-flight run can be wound down without losing already-collected work:
@@ -220,6 +222,8 @@ The controller installs a triple-Ctrl-C handler so an in-flight run can be wound
 2. **Second Ctrl-C** — aborts the current verification (or direction) substep mid-flight and dumps every still-pending candidate to disk as an `unverified-NN-<slug>.md` file with a clear `UNVERIFIED` header. Decisions tool handlers already accepted during the aborted substep are applied first, so verified evidence is written normally; only unresolved candidates fall back to `UNVERIFIED`. Useful when verification is taking too long but you don't want to lose the worker's evidence.
 3. **Third Ctrl-C** — force-exits via `os._exit(130)`. No teardown, no further writes.
 
-Once shutdown has been requested, final verification is the only billed work left: worker error-recovery re-connections/resubmissions and the recon synthesis query are suppressed because their results could never be consumed.
+Once shutdown has been requested, final verification is the only billed work left: worker error-recovery re-connections/resubmissions and the recon synthesis query are suppressed because their results could never be consumed. The pause gate is retired with it (see above), so shutdown proceeds even while paused.
+
+Cancellation bookkeeping stays standard throughout: leaked SDK cancel-scope counts are drained only after worker runs settle without an external cancellation, and a genuine cancellation of the orchestrator task propagates instead of being swallowed.
 
 Still-pending candidates are also dumped to disk (same `unverified-` format) on every normal exit — director `done`, `--max-iterations` exhaustion, or the cost ceiling — so worker evidence is never silently dropped regardless of how the run ends.

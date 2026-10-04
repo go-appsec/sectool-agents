@@ -42,6 +42,7 @@ class TestPauseGate(unittest.TestCase):
         # Reset module-level state between tests.
         runtime._pause_gate = asyncio.Event()
         runtime._pause_gate.set()
+        runtime._shutdown_requested = False
         runtime._inflight = runtime.InflightRegistry()
 
     def test_gate_passes_when_unpaused(self):
@@ -239,9 +240,56 @@ class _ScriptedClient:
 def _reset_pause_state() -> None:
     runtime._pause_gate = asyncio.Event()
     runtime._pause_gate.set()
+    runtime._shutdown_requested = False
     runtime._rate_limited = False
     runtime._inflight = runtime.InflightRegistry()
     runtime._status_bar = runtime.StatusBar()
+
+
+class TestShutdownGate(unittest.TestCase):
+    """Once shutdown is requested the pause gate must stop gating: parked
+    submitters release and later submissions skip the wait, so Ctrl-C stays
+    effective while paused or rate-limited (issue 15)."""
+
+    def setUp(self) -> None:
+        _reset_pause_state()
+
+    def test_shutdown_releases_parked_waiters(self):
+        client = _RecorderClient()
+
+        async def go():
+            runtime._pause_gate.clear()
+            task = asyncio.create_task(runtime.submit_query(client, "hello"))
+            await asyncio.sleep(0)  # let the task reach the gate
+            self.assertFalse(task.done())
+            runtime.request_shutdown()
+            await asyncio.wait_for(task, timeout=1)
+            self.assertEqual(client.queries, ["hello"])
+
+        _run(go())
+
+    def test_gated_submissions_skip_wait_after_shutdown(self):
+        client = _RecorderClient()
+
+        async def go():
+            runtime.request_shutdown()
+            runtime._pause_gate.clear()  # even a closed gate must not block
+            await asyncio.wait_for(runtime.submit_query(client, "hello"), timeout=1)
+            self.assertEqual(client.queries, ["hello"])
+
+        _run(go())
+
+    def test_toggle_pause_inert_after_shutdown(self):
+        runtime.request_shutdown()
+        self.assertTrue(runtime._pause_gate.is_set())
+        runtime.toggle_pause()
+        self.assertTrue(runtime._pause_gate.is_set())
+
+    def test_rate_limit_pause_ignored_after_shutdown(self):
+        runtime.request_shutdown()
+        runtime.engage_rate_limit_pause("rate-limited")
+        self.assertFalse(runtime._rate_limited)
+        self.assertTrue(runtime._pause_gate.is_set())
 
 
 class TestRateLimitGate(unittest.TestCase):

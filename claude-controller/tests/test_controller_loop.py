@@ -1956,6 +1956,110 @@ class TestCancelledErrorIsolation(unittest.TestCase):
         self.assertIn(2, results)
 
 
+class TestWorkerRunExternalCancellation(unittest.TestCase):
+    """Issue 15: the leak-drain in run_all_workers_until_escalation must only
+    fire on paths without a genuine external cancellation, and cancellations
+    delivered into the calling task must propagate untouched."""
+
+    def setUp(self) -> None:
+        self.drains: list[str] = []
+        orig = worker_mod._clear_leaked_cancellations
+
+        def recording(tag: str = "") -> int:
+            self.drains.append(tag)
+            return orig(tag)
+
+        worker_mod._clear_leaked_cancellations = recording
+        self.addCleanup(
+            setattr, worker_mod, "_clear_leaked_cancellations", orig)
+
+    @staticmethod
+    def _worker(wid: int) -> controller.WorkerState:
+        w = controller.WorkerState(worker_id=wid, options=object())
+        w.client = object()
+        return w
+
+    def test_own_cancellation_propagates_without_drain(self):
+        """Cancelling the task running the settle loop must re-raise after
+        settling the workers — never swallow-and-drain."""
+        async def hanging_run(worker, iteration, candidates, verbose):
+            await asyncio.Event().wait()  # never set — parked like a live turn
+
+        orig = worker_mod.run_worker_until_escalation
+        worker_mod.run_worker_until_escalation = hanging_run
+        self.addCleanup(
+            setattr, worker_mod, "run_worker_until_escalation", orig)
+
+        async def body():
+            run_task = asyncio.create_task(
+                controller.run_all_workers_until_escalation(
+                    [self._worker(1), self._worker(2)], iteration=1,
+                    candidates=CandidatePool(), verbose=False,
+                ))
+            await asyncio.sleep(0)  # let both workers park on their turns
+            run_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await run_task
+
+        _run(body())
+        # The genuine cancellation was propagated, not drained away.
+        self.assertEqual(self.drains, [])
+
+    def test_inert_cancel_count_drained_on_clean_path(self):
+        """An inert cancel count on the current task (the leak signature:
+        delivered once, already caught) is still drained when settlement
+        completes without a genuine cancellation."""
+        async def clean_run(worker, iteration, candidates, verbose):
+            return [WorkerTurnSummary(
+                worker_id=worker.worker_id, iteration=iteration)]
+
+        orig = worker_mod.run_worker_until_escalation
+        worker_mod.run_worker_until_escalation = clean_run
+        self.addCleanup(
+            setattr, worker_mod, "run_worker_until_escalation", orig)
+
+        async def body():
+            me = asyncio.current_task()
+            me.cancel()
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                pass
+            self.assertEqual(me.cancelling(), 1)
+            return await controller.run_all_workers_until_escalation(
+                [self._worker(3)], iteration=1,
+                candidates=CandidatePool(), verbose=False,
+            )
+
+        results = _run(body())
+        self.assertIn(3, results)
+        self.assertEqual(self.drains, ["worker"])
+
+    def test_pending_cancel_on_entry_propagates(self):
+        """A cancellation pending on entry (delivered at the first await of
+        the settle loop) counts as genuine and must propagate."""
+        async def clean_run(worker, iteration, candidates, verbose):
+            return [WorkerTurnSummary(
+                worker_id=worker.worker_id, iteration=iteration)]
+
+        orig = worker_mod.run_worker_until_escalation
+        worker_mod.run_worker_until_escalation = clean_run
+        self.addCleanup(
+            setattr, worker_mod, "run_worker_until_escalation", orig)
+
+        async def body():
+            me = asyncio.current_task()
+            me.cancel()  # delivered at the settle loop's first await
+            with self.assertRaises(asyncio.CancelledError):
+                await controller.run_all_workers_until_escalation(
+                    [self._worker(4)], iteration=1,
+                    candidates=CandidatePool(), verbose=False,
+                )
+
+        _run(body())
+        self.assertEqual(self.drains, [])
+
+
 class TestWorkerExceptionSiblingSettlement(unittest.TestCase):
     """A non-cancellation exception in one worker task must not lose its
     siblings: every task settles and failures surface together."""

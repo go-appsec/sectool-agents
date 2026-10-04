@@ -41,6 +41,7 @@ from runtime import (
     engage_rate_limit_pause,
     inflight,
     log,
+    request_shutdown,
     submit_query,
     toggle_pause,
 )
@@ -1424,6 +1425,9 @@ async def run(config: Config) -> None:
             def _on_sigint() -> None:
                 nonlocal shutdown_count
                 shutdown_count += 1
+                # Every press is a shutdown intent: retire the pause gate so
+                # Ctrl-C stays effective while paused or rate-limited.
+                request_shutdown()
                 if shutdown_count == 1:
                     log("ctrl-c",
                         "Stopping workers; transitioning to final verification. "
