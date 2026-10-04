@@ -10,7 +10,6 @@ stay ordinary result responses.
 
 import asyncio
 import unittest
-import warnings
 
 from claude_agent_sdk._internal.query import Query
 
@@ -62,11 +61,14 @@ def _call_tool(server_config, server_name, name, arguments):
         "method": "tools/call",
         "params": {"name": name, "arguments": arguments},
     }
-    with warnings.catch_warnings():
-        # Query's internal anyio streams are only closed by its reader loop,
-        # which these one-shot dispatches never start.
-        warnings.simplefilter("ignore", ResourceWarning)
+    try:
         return asyncio.run(query._handle_sdk_mcp_request(server_name, message))
+    finally:
+        # Query's internal anyio streams are only closed by its reader loop,
+        # which these one-shot dispatches never start; close them explicitly
+        # so the GC does not emit ResourceWarnings after the test finishes.
+        query._message_send.close()
+        query._message_receive.close()
 
 
 class TestWorkerToolErrorPropagation(unittest.TestCase):

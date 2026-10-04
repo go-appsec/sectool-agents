@@ -1681,8 +1681,11 @@ class TestVerificationPhase(unittest.TestCase):
                 action(decisions)
 
             def receive_response(self):
+                # Bare yield makes this an async generator, matching how
+                # controller.py consumes receive_response() with async for.
                 async def gen():
                     raise RuntimeError("connection reset")
+                    yield  # pragma: no cover
                 return gen()
 
         async def fake_recovery(managed, options, tag):
