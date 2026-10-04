@@ -680,6 +680,11 @@ async def run_all_workers_until_escalation(
     When `shutdown_event` is provided and fires, all in-flight worker
     tasks are cancelled — the per_worker handler treats this as the
     same recovery path as a leaked cancel scope.
+
+    Any other exception escaping a worker task is collected and reported
+    once all tasks settle, with the failed worker marked
+    escalation_reason="error" like the cancellation path. Sibling runs
+    finish untouched and their results are preserved.
     """
     async def per_worker(w: WorkerState) -> tuple[int, list[WorkerTurnSummary]]:
         w.escalation_reason = None
@@ -719,7 +724,10 @@ async def run_all_workers_until_escalation(
         watcher = asyncio.create_task(_watch_shutdown())
 
     results: dict[int, list[WorkerTurnSummary]] = {}
-    for t in tasks:
+    failures: list[str] = []
+    # Settle every task before returning: one worker's exception must never
+    # leave siblings running into teardown and the next phase.
+    for w, t in zip(alive, tasks):
         try:
             wid, runs = await t
             results[wid] = runs
@@ -728,6 +736,13 @@ async def run_all_workers_until_escalation(
             # itself is cancelled we still don't want to crash the whole run.
             log("worker", "Task await cancelled; continuing with remaining workers.")
             _clear_leaked_cancellations("worker")
+        except Exception as exc:
+            w.escalation_reason = "error"
+            failures.append(f"worker {w.worker_id} failed: {_short(repr(exc), 160)}")
+
+    if failures:
+        log("worker", f"{len(failures)} worker task(s) raised; siblings settled: "
+                      + "; ".join(failures))
 
     if watcher is not None and not watcher.done():
         watcher.cancel()

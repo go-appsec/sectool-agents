@@ -1900,6 +1900,90 @@ class TestCancelledErrorIsolation(unittest.TestCase):
         self.assertIn(2, results)
 
 
+class TestWorkerExceptionSiblingSettlement(unittest.TestCase):
+    """A non-cancellation exception in one worker task must not lose its
+    siblings: every task settles and failures surface together."""
+
+    @staticmethod
+    def _worker(worker_id, managed=None):
+        w = controller.WorkerState(worker_id=worker_id, options=object())
+        w.client = object()  # non-None so it's treated as alive-with-client
+        w.managed = managed
+        return w
+
+    def _patch_run(self, fake_run):
+        orig = worker_mod.run_worker_until_escalation
+        worker_mod.run_worker_until_escalation = fake_run
+        self.addCleanup(setattr, worker_mod, "run_worker_until_escalation", orig)
+
+    def test_sibling_survives_worker_exception(self):
+        async def fake_run(worker, iteration, candidates, verbose):
+            if worker.worker_id == 1:
+                raise RuntimeError("autonomous boom")
+            # Yield so the sibling is still pending when the failure surfaces.
+            await asyncio.sleep(0)
+            return [WorkerTurnSummary(worker_id=worker.worker_id, iteration=iteration)]
+
+        self._patch_run(fake_run)
+        w1 = self._worker(1)
+        w2 = self._worker(2)
+
+        results = _run(controller.run_all_workers_until_escalation(
+            [w1, w2], iteration=1, candidates=CandidatePool(), verbose=False,
+        ))
+
+        # The surviving sibling's result is preserved and the failed run was
+        # marked for accounting like an errored autonomous run.
+        self.assertEqual(len(results[2]), 1)
+        self.assertNotIn(1, results)
+        self.assertEqual(w1.escalation_reason, "error")
+        self.assertEqual(w2.escalation_reason, None)
+
+    def test_cleanup_failure_after_cancel_settles_siblings(self):
+        # aclose raising inside per_worker's cancellation handler is exactly
+        # the non-cancellation escape the sequential await used to propagate.
+        class _BrokenManaged:
+            async def aclose(self):
+                raise RuntimeError("aclose boom")
+
+        async def fake_run(worker, iteration, candidates, verbose):
+            if worker.worker_id == 1:
+                raise asyncio.CancelledError()
+            await asyncio.sleep(0)
+            return [WorkerTurnSummary(worker_id=worker.worker_id, iteration=iteration)]
+
+        self._patch_run(fake_run)
+        w1 = self._worker(1, managed=_BrokenManaged())
+        w2 = self._worker(2)
+
+        results = _run(controller.run_all_workers_until_escalation(
+            [w1, w2], iteration=1, candidates=CandidatePool(), verbose=False,
+        ))
+
+        self.assertEqual(len(results[2]), 1)
+        self.assertNotIn(1, results)
+        self.assertEqual(w1.escalation_reason, "error")
+
+    def test_all_failures_collected_together(self):
+        async def fake_run(worker, iteration, candidates, verbose):
+            if worker.worker_id == 1:
+                raise RuntimeError("first boom")
+            await asyncio.sleep(0)
+            raise ValueError("second boom")
+
+        self._patch_run(fake_run)
+        w1 = self._worker(1)
+        w2 = self._worker(2)
+
+        results = _run(controller.run_all_workers_until_escalation(
+            [w1, w2], iteration=1, candidates=CandidatePool(), verbose=False,
+        ))
+
+        self.assertEqual(results, {})
+        self.assertEqual(w1.escalation_reason, "error")
+        self.assertEqual(w2.escalation_reason, "error")
+
+
 class TestManagedSDKClientScopeIsolation(unittest.TestCase):
     """The whole point of ManagedSDKClient: a cancellation that fires inside
     the runner task's anyio scope must NOT poison the caller task. Without
