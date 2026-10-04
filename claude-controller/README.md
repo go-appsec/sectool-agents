@@ -149,7 +149,7 @@ Plus the **full sectool tool surface** (same as workers): `flow_get`, `proxy_pol
 
 | Tool | Purpose |
 |------|---------|
-| `plan_workers(plans)` | Spawn/retarget workers. |
+| `plan_workers(plans)` | Spawn/retarget workers. Pair with `continue_worker`/`expand_worker` for a planned id to attach its budget and directive; a `stop_worker` overrides that entry. |
 | `continue_worker(worker_id, instruction, autonomous_budget?)` | Keep worker N going with the specified budget. |
 | `expand_worker(worker_id, instruction, autonomous_budget?)` | Pivot worker N's plan. |
 | `stop_worker(worker_id, reason)` | Retire worker N. |
@@ -164,6 +164,8 @@ Calling a tool in the wrong phase returns an `is_error=True` response directing 
 
 - **5–10** — productive workers on a clear exploitation path.
 - **2–3** — exploratory/uncertain assignments where you want to review sooner.
+
+A budget authored on a `continue_worker` / `expand_worker` whose worker also appears in `plan_workers` is folded into that plan entry and applied when the controller connects (spawn) or retargets the worker. A `stop_worker` for a planned id takes precedence: the plan entry is voided and no client is connected.
 
 ## Worker Tool
 

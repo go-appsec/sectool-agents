@@ -30,6 +30,7 @@ from tools import (
     DecisionQueue,
     FindingFiled,
     FindingMerged,
+    PlanEntry,
     ToolCallRecord,
     WorkerDecision,
     WorkerTurnSummary,
@@ -3546,6 +3547,91 @@ class TestApplyPlanDiffRetiredWorkerId(unittest.TestCase):
             controller.attempt_worker_recovery = orig
 
         self.assertEqual(seen, [event])
+
+
+class TestApplyPlanDiffFoldedDirectives(unittest.TestCase):
+    """Plan entries carrying a decision folded in by coalesce_decisions must
+    deliver the director's budget and instruction to the planned worker."""
+
+    def _entry(self) -> PlanEntry:
+        from tools import PlanEntry
+        return PlanEntry(
+            worker_id=2, assignment="probe /api/v2",
+            instruction="focus on IDOR", autonomous_budget=12,
+        )
+
+    def test_retarget_applies_folded_directive_and_budget(self):
+        w = controller.WorkerState(worker_id=2, options=None)
+        w.client = _StubClient()
+        w.autonomous_budget = 3
+
+        _run(controller.apply_plan_diff(
+            [self._entry()], [w], CandidatePool(), "http://x",
+            None, None, max_workers=4,
+        ))
+
+        expected = "probe /api/v2\n\nfocus on IDOR"
+        self.assertEqual(w.client.queries, [expected])
+        self.assertEqual(w.last_instruction, expected)
+        self.assertEqual(w.assignment, "probe /api/v2")
+        self.assertEqual(w.autonomous_budget, 12)
+
+    def test_retarget_folded_budget_respects_worker_cap(self):
+        w = controller.WorkerState(worker_id=2, options=None)
+        w.client = _StubClient()
+        w.max_autonomous_budget = 4  # mimics recon worker initialisation
+
+        _run(controller.apply_plan_diff(
+            [self._entry()], [w], CandidatePool(), "http://x",
+            None, None, max_workers=4,
+        ))
+
+        self.assertEqual(w.autonomous_budget, 4)
+
+    def test_retarget_without_fold_keeps_budget(self):
+        w = controller.WorkerState(worker_id=2, options=None)
+        w.client = _StubClient()
+        w.autonomous_budget = 7
+
+        _run(controller.apply_plan_diff(
+            [PlanEntry(worker_id=2, assignment="new directive")], [w],
+            CandidatePool(), "http://x", None, None, max_workers=4,
+        ))
+
+        self.assertEqual(w.client.queries, ["new directive"])
+        self.assertEqual(w.autonomous_budget, 7)
+
+    def test_spawn_applies_folded_directive_and_budget(self):
+        spawned: list[controller.WorkerState] = []
+
+        class _Managed:
+            async def aclose(self):
+                pass
+
+        async def fake_create_worker(*args, **kwargs):
+            w = controller.WorkerState(worker_id=args[0], options=None)
+            w.client = _StubClient()
+            w.managed = _Managed()
+            w.alive = True
+            spawned.append(w)
+            return w
+
+        orig = controller.create_worker
+        controller.create_worker = fake_create_worker
+        try:
+            _run(controller.apply_plan_diff(
+                [self._entry()], [], CandidatePool(), "http://x",
+                None, None, max_workers=4,
+            ))
+        finally:
+            controller.create_worker = orig
+
+        self.assertEqual(len(spawned), 1)
+        new_w = spawned[0]
+        expected = "probe /api/v2\n\nfocus on IDOR"
+        self.assertEqual(new_w.client.queries, [expected])
+        self.assertEqual(new_w.last_instruction, expected)
+        self.assertEqual(new_w.autonomous_budget, 12)
 
 
 class TestApplyPlanDiffRetargetStallState(unittest.TestCase):

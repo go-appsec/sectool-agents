@@ -347,62 +347,121 @@ class TestCandidatePoolMark(unittest.TestCase):
 class TestCoalesceDecisions(unittest.TestCase):
     """A2: collapse duplicate director decisions into one per worker."""
 
-    def _dec(self, kind: str, wid: int, instruction: str = "go") -> WorkerDecision:
-        return WorkerDecision(
-            kind=kind, worker_id=wid, instruction=instruction,
-            reason="" if kind != "stop" else "r",
-        )
+    def _dec(self, kind: str, wid: int, instruction: str = "go",
+             budget: int | None = None) -> WorkerDecision:
+        kwargs: dict = {
+            "kind": kind, "worker_id": wid, "instruction": instruction,
+            "reason": "" if kind != "stop" else "r",
+        }
+        if budget is not None:
+            kwargs["autonomous_budget"] = budget
+        return WorkerDecision(**kwargs)
 
     def test_empty(self):
-        self.assertEqual(coalesce_decisions([], None), [])
+        out = coalesce_decisions([], None)
+        self.assertEqual(out.decisions, [])
+        self.assertIsNone(out.plan)
+        self.assertEqual(out.notes, [])
 
     def test_single_passes_through(self):
         d = self._dec("continue", 1)
-        self.assertEqual(coalesce_decisions([d], None), [d])
+        self.assertEqual(coalesce_decisions([d], None).decisions, [d])
 
     def test_two_continues_for_one_worker_keeps_last(self):
         d1 = self._dec("continue", 1, "first")
         d2 = self._dec("continue", 1, "second")
         out = coalesce_decisions([d1, d2], None)
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].instruction, "second")
+        self.assertEqual(len(out.decisions), 1)
+        self.assertEqual(out.decisions[0].instruction, "second")
 
     def test_stop_then_continue_last_wins(self):
         stop = self._dec("stop", 1)
         cont = self._dec("continue", 1, "after-stop")
         out = coalesce_decisions([stop, cont], None)
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].kind, "continue")
+        self.assertEqual(len(out.decisions), 1)
+        self.assertEqual(out.decisions[0].kind, "continue")
 
     def test_continue_then_stop_last_wins(self):
         cont = self._dec("continue", 1, "first")
         stop = self._dec("stop", 1)
         out = coalesce_decisions([cont, stop], None)
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].kind, "stop")
+        self.assertEqual(len(out.decisions), 1)
+        self.assertEqual(out.decisions[0].kind, "stop")
 
     def test_mixed_workers_preserved(self):
         d1 = self._dec("continue", 1, "a")
         d2 = self._dec("expand", 2, "b")
         d3 = self._dec("stop", 3)
         out = coalesce_decisions([d1, d2, d3], None)
-        self.assertEqual([d.worker_id for d in out], [1, 2, 3])
+        self.assertEqual([d.worker_id for d in out.decisions], [1, 2, 3])
 
-    def test_plan_entry_drops_continue_and_expand(self):
-        cont = self._dec("continue", 2, "keep going")
-        expand = self._dec("expand", 3, "pivot")
+    def test_paired_decision_folds_into_plan_entry(self):
+        cont = self._dec("continue", 2, "keep going", budget=12)
+        expand = self._dec("expand", 3, "pivot", budget=5)
         out = coalesce_decisions(
             [cont, expand],
             [PlanEntry(2, "new assignment"), PlanEntry(3, "other")],
         )
-        # Both dropped — plan covers them via the spawn/retarget path.
-        self.assertEqual(out, [])
+        # Folded into the plan — no separate dispatch, one kickoff each.
+        self.assertEqual(out.decisions, [])
+        self.assertEqual(len(out.plan), 2)
+        self.assertEqual(out.plan[0].instruction, "keep going")
+        self.assertEqual(out.plan[0].autonomous_budget, 12)
+        self.assertEqual(out.plan[1].instruction, "pivot")
+        self.assertEqual(out.plan[1].autonomous_budget, 5)
 
-    def test_plan_entry_does_not_drop_stop(self):
+    def test_last_paired_decision_wins(self):
+        d1 = self._dec("continue", 2, "first", budget=3)
+        d2 = self._dec("expand", 2, "second", budget=9)
+        out = coalesce_decisions([d1, d2], [PlanEntry(2, "reassignment")])
+        self.assertEqual(out.decisions, [])
+        self.assertEqual(out.plan[0].instruction, "second")
+        self.assertEqual(out.plan[0].autonomous_budget, 9)
+
+    def test_unpaired_plan_entry_untouched(self):
+        entry = PlanEntry(4, "fresh spawn")
+        cont = self._dec("continue", 2, "go", budget=6)
+        out = coalesce_decisions([cont], [entry])
+        self.assertEqual(len(out.decisions), 1)
+        self.assertIs(out.plan[0], entry)
+        self.assertIsNone(out.plan[0].autonomous_budget)
+
+    def test_fold_does_not_mutate_input_entry(self):
+        cont = self._dec("continue", 2, "go", budget=6)
+        entry = PlanEntry(2, "reassignment")
+        out = coalesce_decisions([cont], [entry])
+        # The fold lands on a copy; the queue's original stays pristine.
+        self.assertIsNot(out.plan[0], entry)
+        self.assertEqual(entry.instruction, "")
+        self.assertIsNone(entry.autonomous_budget)
+
+    def test_plan_entry_voided_by_stop(self):
         stop = self._dec("stop", 2)
         out = coalesce_decisions([stop], [PlanEntry(2, "retarget")])
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].kind, "stop")
+        # Stop survives and wins — the plan must not connect a client.
+        self.assertEqual(len(out.decisions), 1)
+        self.assertEqual(out.decisions[0].kind, "stop")
+        self.assertEqual(out.plan, [])
+
+    def test_stop_without_plan_untouched(self):
+        stop = self._dec("stop", 2)
+        out = coalesce_decisions([stop], None)
+        self.assertEqual(len(out.decisions), 1)
+        self.assertIsNone(out.plan)
+
+    def test_notes_describe_fold_and_void(self):
+        cont = self._dec("continue", 2, "go", budget=12)
+        stop = self._dec("stop", 3)
+        out = coalesce_decisions(
+            [cont, stop],
+            [PlanEntry(2, "a"), PlanEntry(3, "b")],
+        )
+        self.assertEqual(len(out.notes), 2)
+        self.assertIn("worker 2", out.notes[0])
+        self.assertIn("folded", out.notes[0])
+        self.assertIn("12", out.notes[0])
+        self.assertIn("worker 3", out.notes[1])
+        self.assertIn("stop decision takes precedence", out.notes[1])
 
     def test_ordering_stable_by_first_seen(self):
         d2 = self._dec("continue", 2, "x")
@@ -410,7 +469,7 @@ class TestCoalesceDecisions(unittest.TestCase):
         d1b = self._dec("continue", 1, "z")  # updates last for worker 1
         out = coalesce_decisions([d2, d1, d1b], None)
         # Order follows first-seen: worker 2 first, then worker 1.
-        self.assertEqual([d.worker_id for d in out], [2, 1])
+        self.assertEqual([d.worker_id for d in out.decisions], [2, 1])
 
 
 class TestPlanWorkersHandler(unittest.TestCase):

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -202,6 +202,10 @@ class WorkerDecision:
 class PlanEntry:
     worker_id: int
     assignment: str
+    # Folded in from a paired continue/expand decision by coalesce_decisions;
+    # a None budget leaves the worker's current/default untouched.
+    instruction: str = ""
+    autonomous_budget: int | None = None
 
 
 @dataclass
@@ -308,11 +312,25 @@ def _parse_plan_args(args: dict[str, Any]) -> tuple[
     return entries, rejections, None
 
 
+@dataclass
+class CoalescedDirection:
+    """Reconciled director output for one direction phase.
+
+    `decisions` are dispatched as-is; `plan` entries carry folded
+    continue/expand directives and drop stop-covered ids. `notes` holds one
+    line per folded or voided record, for the caller to log.
+    """
+
+    decisions: list[WorkerDecision]
+    plan: list[PlanEntry] | None
+    notes: list[str] = field(default_factory=list)
+
+
 def coalesce_decisions(
     worker_decisions: list["WorkerDecision"],
     plan: list["PlanEntry"] | None,
-) -> list["WorkerDecision"]:
-    """Collapse duplicate per-worker decisions before the controller applies them.
+) -> CoalescedDirection:
+    """Collapse duplicate per-worker decisions and reconcile them with the plan.
 
     The director often calls `continue_worker` / `expand_worker` / `stop_worker`
     for the same worker across substeps; each hit queues a duplicate instruction
@@ -321,12 +339,15 @@ def coalesce_decisions(
     - Pure last-writer-wins per `worker_id` — if the director's last decision
       for a worker is `stop`, the worker stops; if `continue`, the worker
       continues.
-    - A `plan` entry covers the worker via the spawn/retarget path, so drop
-      any `continue`/`expand` for `plan`'d workers. A `stop` for a `plan`'d
-      worker is an explicit override and is preserved.
+    - A plan entry covers its worker via the spawn/retarget path, so a paired
+      `continue`/`expand` folds its instruction and `autonomous_budget` into
+      that entry instead of dispatching separately (one kickoff, not two). A
+      `stop` for a plan'd worker is an explicit override: it is preserved and
+      voids the entry so no client connects for a decided-dead worker.
 
     The relative order of the first-seen decision per `worker_id` is kept
-    so downstream iteration is deterministic.
+    so downstream iteration is deterministic. Inputs are never mutated;
+    folded entries come back as copies.
     """
     plan_ids: set[int] = set()
     if plan is not None:
@@ -341,12 +362,38 @@ def coalesce_decisions(
         last[d.worker_id] = d
 
     out: list["WorkerDecision"] = []
+    folds: dict[int, WorkerDecision] = {}
+    voided: set[int] = set()
+    notes: list[str] = []
     for wid in order:
         d = last[wid]
-        if wid in plan_ids and d.kind != "stop":
-            continue
-        out.append(d)
-    return out
+        if wid not in plan_ids or d.kind == "stop":
+            out.append(d)
+            if wid in plan_ids:
+                voided.add(wid)
+                notes.append(
+                    f"plan entry for worker {wid} voided: stop decision takes precedence")
+        else:
+            folds[wid] = d
+            notes.append(
+                f"{d.kind} for worker {wid} folded into plan entry "
+                f"(autonomous_budget={d.autonomous_budget})")
+
+    effective_plan: list[PlanEntry] | None = None
+    if plan is not None:
+        effective_plan = []
+        for p in plan:
+            if p.worker_id in voided:
+                continue
+            f = folds.get(p.worker_id)
+            if f is not None:
+                p = replace(
+                    p,
+                    instruction=f.instruction,
+                    autonomous_budget=f.autonomous_budget,
+                )
+            effective_plan.append(p)
+    return CoalescedDirection(decisions=out, plan=effective_plan, notes=notes)
 
 
 class DecisionQueue:
@@ -874,7 +921,9 @@ def build_orch_mcp_server(
             "are left running (use stop_worker to retire). Multiple calls within "
             "one direction phase accumulate: entries with new worker_ids are "
             "added; entries with an existing worker_id overwrite (last-wins). "
-            "Prefer ONE call with all entries for clarity."
+            "Pair a continue_worker/expand_worker for a planned id to attach "
+            "its budget and directive to that entry; stop_worker overrides the "
+            "entry. Prefer ONE call with all entries for clarity."
         ),
         {
             "type": "object",

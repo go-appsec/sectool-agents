@@ -1110,6 +1110,25 @@ def find_alive_worker(workers: list[WorkerState], worker_id: int) -> WorkerState
     return next((w for w in workers if w.worker_id == worker_id and w.alive), None)
 
 
+def _plan_directive(entry: PlanEntry) -> str:
+    """Directive text submitted to a planned worker.
+
+    A decision folded into the entry appends its instruction so director-
+    authored directives survive coalescing; the budget rides on state.
+    """
+    if not entry.instruction:
+        return entry.assignment
+    return f"{entry.assignment}\n\n{entry.instruction}"
+
+
+def _apply_folded_budget(entry: PlanEntry, worker: WorkerState) -> None:
+    """Apply an entry's folded decision budget to the worker; None is a no-op."""
+    if entry.autonomous_budget is None:
+        return
+    cap = worker.max_autonomous_budget or MAX_AUTONOMOUS_BUDGET
+    worker.autonomous_budget = min(max(1, entry.autonomous_budget), cap)
+
+
 async def apply_plan_diff(
     plan: list[PlanEntry],
     workers: list[WorkerState],
@@ -1137,20 +1156,25 @@ async def apply_plan_diff(
         log("plan", f"Plan requested {total_after} workers; capped at {max_workers}.")
 
     for p in plan:
-        snippet = _short(p.assignment, 120)
+        directive = _plan_directive(p)
+        snippet = _short(directive, 120)
         current = by_id.get(p.worker_id)
         if current is not None and current.alive:
             w = current
-            log(f"worker {p.worker_id}", f"Retargeting: {snippet}")
+            budget_note = ""
+            if p.autonomous_budget is not None:
+                _apply_folded_budget(p, w)
+                budget_note = f" (budget={w.autonomous_budget})"
+            log(f"worker {p.worker_id}", f"Retargeting{budget_note}: {snippet}")
             w.assignment = p.assignment
-            w.last_instruction = p.assignment
+            w.last_instruction = directive
             # Stall state survives retargeting an idle worker — only a
             # productive run earns a reset.
             if _has_productive_turn(w.autonomous_turns):
                 w.progress_none_streak = 0
                 w.stall_warned = False
             try:
-                await submit_query(w.client, p.assignment)
+                await submit_query(w.client, directive)
             except Exception:
                 await attempt_worker_recovery(w, shutdown_event)
         elif current is not None:
@@ -1169,8 +1193,9 @@ async def apply_plan_diff(
                     p.worker_id, num_workers_total, candidates, mcp_url, base_options,
                     stderr_cb, bash_tools_server=bash_tools_server,
                 )
+                _apply_folded_budget(p, new_w)
                 new_w.assignment = p.assignment
-                new_w.last_instruction = p.assignment
+                new_w.last_instruction = directive
                 # Fresh SDK client — prepend the recon report so the worker
                 # starts with the surface map in its context. Existing workers
                 # being retargeted (above) already have it from their first
@@ -1180,10 +1205,10 @@ async def apply_plan_diff(
                         "## Recon context (from the initial recon worker)\n"
                         f"{recon_summary}\n\n"
                         "## Your assignment\n"
-                        f"{p.assignment}"
+                        f"{directive}"
                     )
                 else:
-                    kickoff = p.assignment
+                    kickoff = directive
                 await submit_query(new_w.client, kickoff)
             except Exception as exc:
                 log(f"worker {p.worker_id}", f"Spawn failed: {exc}")
@@ -1194,7 +1219,11 @@ async def apply_plan_diff(
             else:
                 workers.append(new_w)
                 existing_ids.add(p.worker_id)
-                log(f"worker {p.worker_id}", "Connected and assigned.")
+                budget_note = (
+                    f" (budget={new_w.autonomous_budget})"
+                    if p.autonomous_budget is not None else ""
+                )
+                log(f"worker {p.worker_id}", f"Connected and assigned{budget_note}.")
 
 
 async def apply_decision(
@@ -1638,10 +1667,27 @@ async def run(config: Config) -> None:
                         f"Director: done — {_short(decisions.done_summary, 120)}")
                     break
 
-                # 8) Plan diff
-                if decisions.plan is not None:
+                # 8) Reconcile director output before anything applies.
+                # Coalescing keeps one last-writer decision per worker, folds a
+                # paired continue/expand (budget + instruction) into its plan
+                # entry so authored directives reach planned workers, and voids
+                # entries covered by a stop — stops must never spawn or
+                # retarget, so no client connects for a decided-dead worker.
+                original_decisions = list(decisions.worker_decisions)
+                reconciled = coalesce_decisions(
+                    original_decisions, decisions.plan,
+                )
+                for note in reconciled.notes:
+                    log(f"iter {iteration}", note)
+                if len(reconciled.decisions) != len(original_decisions):
+                    log(f"iter {iteration}",
+                        f"decision coalesced original={len(original_decisions)} "
+                        f"effective={len(reconciled.decisions)}")
+
+                # 9) Plan diff
+                if reconciled.plan:
                     await apply_plan_diff(
-                        decisions.plan, workers, candidates, mcp_url,
+                        reconciled.plan, workers, candidates, mcp_url,
                         base_options, stderr_cb, config.max_workers,
                         recon_summary=recon_summary,
                         bash_tools_server=(
@@ -1649,22 +1695,9 @@ async def run(config: Config) -> None:
                         shutdown_event=shutdown_event,
                     )
 
-                # 9) Per-worker decisions
-                #
-                # Coalesce duplicate decisions the director may have issued
-                # across substeps (continue_worker + expand_worker for the
-                # same worker; stop after continue; etc). The apply loop
-                # below then sees at most one decision per worker.
-                original_decisions = list(decisions.worker_decisions)
-                effective_decisions = coalesce_decisions(
-                    original_decisions, decisions.plan,
-                )
-                if len(effective_decisions) != len(original_decisions):
-                    log(f"iter {iteration}",
-                        f"decision coalesced original={len(original_decisions)} "
-                        f"effective={len(effective_decisions)}")
+                # 10) Per-worker decisions — at most one per worker.
                 decided_wids: set[int] = set()
-                for d in effective_decisions:
+                for d in reconciled.decisions:
                     worker = find_alive_worker(workers, d.worker_id)
                     if worker is None:
                         log(f"iter {iteration}",
@@ -1673,7 +1706,7 @@ async def run(config: Config) -> None:
                     await apply_decision(d, worker, iteration, shutdown_event)
                     decided_wids.add(d.worker_id)
 
-                # 10) Implicit continue for undirected alive workers
+                # 11) Implicit continue for undirected alive workers
                 worker_findings_summary = finding_writer.summary_for_worker()
                 for w in workers:
                     if not w.alive or w.worker_id in decided_wids:
@@ -1693,7 +1726,7 @@ async def run(config: Config) -> None:
                     except Exception:
                         await attempt_worker_recovery(w, shutdown_event)
 
-                # 11) Forced stop for stalled workers
+                # 12) Forced stop for stalled workers
                 for w in list(workers):
                     if w.alive and w.progress_none_streak >= STALL_STOP_AFTER:
                         log(f"iter {iteration}",
