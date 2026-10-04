@@ -42,7 +42,7 @@ from tools import (
     build_worker_mcp_server,
     extract_flow_ids,
 )
-from bash_tool import BASH_TOOL_ALLOWED
+from bash_tool import BASH_BUILTIN_DENIED, BASH_TOOL_ALLOWED
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +277,7 @@ def _build_worker_options(
     allowed_tools = [
         "mcp__sectool__*",
         WORKER_TOOL_ALLOWED,
-        "Read", "Glob", "Grep", "Bash",
+        "Read", "Glob", "Grep",
     ]
     if allow_bash:
         mcp_servers["bash_tools"] = bash_tools_server
@@ -285,7 +285,7 @@ def _build_worker_options(
     return ClaudeAgentOptions(
         mcp_servers=mcp_servers,
         allowed_tools=allowed_tools,
-        disallowed_tools=["Write", "Edit"],
+        disallowed_tools=["Write", "Edit", BASH_BUILTIN_DENIED],
         permission_mode="acceptEdits",
         cwd=base.cwd,
         max_turns=base.max_turns,

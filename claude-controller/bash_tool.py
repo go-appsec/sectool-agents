@@ -60,6 +60,11 @@ BASH_TOOL_SCHEMA = {
 # Public allowed-tool name (use with ClaudeAgentOptions.allowed_tools).
 BASH_TOOL_ALLOWED = "mcp__bash_tools__bash"
 
+# Built-in CLI Bash tool name, denied on every client. Shell access runs through
+# the tracked mcp__bash_tools__bash tool or not at all; denying built-in Bash
+# outright also keeps ambient settings files from re-opening untracked access.
+BASH_BUILTIN_DENIED = "Bash"
+
 
 def _create_temp_log(suffix: str) -> tuple[Any, str]:
     """Open an os-level temp file for one background log stream."""

@@ -12,6 +12,7 @@ from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
+    ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
     ToolResultBlock,
@@ -22,7 +23,7 @@ from claude_agent_sdk import (
 import controller
 import runtime
 import worker as worker_mod
-from bash_tool import BASH_TOOL_ALLOWED
+from bash_tool import BASH_BUILTIN_DENIED, BASH_TOOL_ALLOWED
 from findings import FindingWriter
 from tools import (
     CandidatePool,
@@ -1604,6 +1605,68 @@ class TestVerifierOptionsBashGate(unittest.TestCase):
         self.assertIn(BASH_TOOL_ALLOWED, opts.allowed_tools)
         # The prompt documents the granted shell section.
         self.assertIn("Shell access", opts.system_prompt)
+
+    def test_builtin_bash_denied(self):
+        """Built-in Bash stays denied regardless of the flag; the tracked
+        bash_tools tool is the only shell surface."""
+        for allow in (False, True):
+            opts = self._build(allow)
+            self.assertNotIn("Bash", opts.allowed_tools)
+            self.assertIn(BASH_BUILTIN_DENIED, opts.disallowed_tools)
+
+
+class TestWorkerOptionsBashGate(unittest.TestCase):
+    """The worker's tool surface must not pre-approve the CLI's built-in Bash
+    (it previously stayed allowed even with --allow-bash off)."""
+
+    def _build(self, allow_bash: bool):
+        return worker_mod._build_worker_options(
+            ClaudeAgentOptions(cwd="/tmp", max_turns=10),
+            object(),  # worker_tools_server
+            "http://127.0.0.1:9119/mcp",
+            worker_id=1, num_workers=1, stderr_cb=None,
+            bash_tools_server=object() if allow_bash else None,
+        )
+
+    def test_builtin_bash_denied_by_default(self):
+        opts = self._build(False)
+        self.assertNotIn("Bash", opts.allowed_tools)
+        self.assertIn(BASH_BUILTIN_DENIED, opts.disallowed_tools)
+        self.assertNotIn("bash_tools", opts.mcp_servers)
+        self.assertNotIn(BASH_TOOL_ALLOWED, opts.allowed_tools)
+        # The prompt must not advertise shell access either.
+        self.assertNotIn("Shell access", opts.system_prompt)
+
+    def test_core_surface_unchanged_without_bash(self):
+        opts = self._build(False)
+        for tool in (
+            "mcp__sectool__*", worker_mod.WORKER_TOOL_ALLOWED,
+            "Read", "Glob", "Grep",
+        ):
+            self.assertIn(tool, opts.allowed_tools)
+
+    def test_builtin_bash_denied_with_allow_bash(self):
+        # The flag grants only the tracked custom tool; built-in Bash stays
+        # denied so shell use always passes through background tracking.
+        opts = self._build(True)
+        self.assertIn("bash_tools", opts.mcp_servers)
+        self.assertIn(BASH_TOOL_ALLOWED, opts.allowed_tools)
+        self.assertNotIn("Bash", opts.allowed_tools)
+        self.assertIn(BASH_BUILTIN_DENIED, opts.disallowed_tools)
+        self.assertIn("Shell access", opts.system_prompt)
+
+
+class TestDirectorOptionsBashGate(unittest.TestCase):
+    """Directors hold no shell access; built-in Bash is denied outright."""
+
+    def test_builtin_bash_denied(self):
+        config = controller.Config(prompt="test", allow_bash=True)
+        opts = controller._build_director_options(
+            config, orch_tools_server=object(), cwd="/tmp", stderr_cb=None,
+        )
+        self.assertNotIn("Bash", opts.allowed_tools)
+        self.assertIn(BASH_BUILTIN_DENIED, opts.disallowed_tools)
+        self.assertEqual(set(opts.mcp_servers), {"orch_tools"})
 
 
 class TestPrematureDoneGuard(unittest.TestCase):

@@ -45,7 +45,12 @@ from runtime import (
     toggle_pause,
 )
 import version_check
-from bash_tool import BASH_TOOL_ALLOWED, BashBackground, build_bash_mcp_server
+from bash_tool import (
+    BASH_BUILTIN_DENIED,
+    BASH_TOOL_ALLOWED,
+    BashBackground,
+    build_bash_mcp_server,
+)
 from tools import (
     DIRECTION_SELF_REVIEW_MAX_ROUNDS,
     DIRECTOR_TOOL_ALLOWED,
@@ -185,6 +190,7 @@ def _build_verifier_options(
 
     `bash` is granted only when config.allow_bash is set, matching the
     worker/recon gating in _build_worker_options. Directors never get it.
+    Built-in Bash stays denied on every role regardless of the flag.
     """
     mcp_servers = {
         "sectool": {"type": "http", "url": mcp_url},
@@ -197,12 +203,41 @@ def _build_verifier_options(
     return ClaudeAgentOptions(
         mcp_servers=mcp_servers,
         allowed_tools=allowed_tools,
+        disallowed_tools=[BASH_BUILTIN_DENIED],
         permission_mode="acceptEdits",
         cwd=cwd,
         max_turns=100,
         model=config.orchestrator_model_id,
         stderr=stderr_cb,
         system_prompt=verifier_prompts.build_system_prompt(
+            config.max_workers, allow_bash=config.allow_bash,
+        ),
+    )
+
+
+def _build_director_options(
+    config: Config,
+    orch_tools_server,
+    cwd: str,
+    stderr_cb,
+) -> ClaudeAgentOptions:
+    """Build the director's client options.
+
+    Directors hold no shell access; when a step needs it, they direct a
+    worker to run it. Built-in Bash is denied outright like every role.
+    """
+    return ClaudeAgentOptions(
+        mcp_servers={
+            "orch_tools": orch_tools_server,
+        },
+        allowed_tools=list(DIRECTOR_TOOL_ALLOWED),
+        disallowed_tools=[BASH_BUILTIN_DENIED],
+        permission_mode="acceptEdits",
+        cwd=cwd,
+        max_turns=100,
+        model=config.orchestrator_model_id,
+        stderr=stderr_cb,
+        system_prompt=director_prompts.build_system_prompt(
             config.max_workers, allow_bash=config.allow_bash,
         ),
     )
@@ -1216,19 +1251,8 @@ async def run(config: Config) -> None:
             config, cwd, mcp_url, orch_tools_server, bash_tools_server, stderr_cb,
         )
 
-        director_options = ClaudeAgentOptions(
-            mcp_servers={
-                "orch_tools": orch_tools_server,
-            },
-            allowed_tools=list(DIRECTOR_TOOL_ALLOWED),
-            permission_mode="acceptEdits",
-            cwd=cwd,
-            max_turns=100,
-            model=config.orchestrator_model_id,
-            stderr=stderr_cb,
-            system_prompt=director_prompts.build_system_prompt(
-                config.max_workers, allow_bash=config.allow_bash,
-            ),
+        director_options = _build_director_options(
+            config, orch_tools_server, cwd, stderr_cb,
         )
 
         verifier_managed: ManagedSDKClient | None = None
