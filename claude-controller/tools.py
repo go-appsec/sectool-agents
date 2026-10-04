@@ -266,6 +266,41 @@ PHASE_VERIFICATION = "verification"
 PHASE_DIRECTION = "direction"
 
 
+# ---------------------------------------------------------------------------
+# Schema-exact input checks (handler-side mirror of declared JSON schemas)
+# ---------------------------------------------------------------------------
+
+
+def _check_worker_id(args: dict[str, Any]) -> str | None:
+    """Rejection text unless `args["worker_id"]` satisfies its schema."""
+    if "worker_id" not in args:
+        return "worker_id is required"
+    wid = args["worker_id"]
+    # reject bools even though they subclass int
+    if isinstance(wid, bool) or not isinstance(wid, int):
+        return f"worker_id must be an integer (got {wid!r})"
+    if wid < 1:
+        return f"worker_id must be >= 1 (got {wid})"
+    return None
+
+
+def _check_severity(value: Any) -> str | None:
+    """Rejection text unless `value` is an exact SEVERITIES member."""
+    if isinstance(value, str) and value in SEVERITIES:
+        return None
+    return f"severity must be one of {SEVERITIES}"
+
+
+def _check_supersedes_ids(value: Any) -> str | None:
+    """Rejection text unless `value` is an array of candidate ID strings."""
+    if not isinstance(value, list):
+        return "supersedes_candidate_ids must be an array"
+    for item in value:
+        if not isinstance(item, str):
+            return f"supersedes_candidate_ids entries must be strings (got {item!r})"
+    return None
+
+
 def _parse_plan_args(args: dict[str, Any]) -> tuple[
     list["PlanEntry"] | None, list[str], str | None,
 ]:
@@ -295,31 +330,23 @@ def _parse_plan_args(args: dict[str, Any]) -> tuple[
         if not isinstance(p, dict):
             rejections.append(f"plans[{i}]: entry must be an object")
             continue
-        if "worker_id" not in p:
-            rejections.append(f"plans[{i}]: worker_id is required")
+        wid_err = _check_worker_id(p)
+        if wid_err is not None:
+            rejections.append(f"plans[{i}]: {wid_err}")
             continue
-        try:
-            wid = int(p["worker_id"])
-        except (TypeError, ValueError):
-            rejections.append(
-                f"plans[{i}]: worker_id must be an integer (got {p['worker_id']!r})"
-            )
-            continue
-        if wid < 1:
-            rejections.append(f"plans[{i}]: worker_id must be >= 1 (got {wid})")
-            continue
+        wid = p["worker_id"]
         if "assignment" not in p:
             rejections.append(
                 f"plans[{i}] (worker_id={wid}): assignment is required"
             )
             continue
-        try:
-            asg = str(p["assignment"]).strip()
-        except (TypeError, ValueError):
+        asg = p["assignment"]
+        if not isinstance(asg, str):
             rejections.append(
                 f"plans[{i}] (worker_id={wid}): assignment must be a string"
             )
             continue
+        asg = asg.strip()
         if not asg:
             rejections.append(
                 f"plans[{i}] (worker_id={wid}): assignment is empty"
@@ -742,15 +769,16 @@ def build_worker_mcp_server(candidates: CandidatePool, worker_id: int) -> Any:
         },
     )
     async def report_finding_candidate(args: dict[str, Any]) -> dict[str, Any]:
-        severity = str(args.get("severity", "")).lower()
-        if severity not in SEVERITIES:
+        sev_err = _check_severity(args.get("severity"))
+        if sev_err is not None:
             return {
                 "content": [{
                     "type": "text",
-                    "text": f"Rejected: severity must be one of {SEVERITIES}.",
+                    "text": f"Rejected: {sev_err}.",
                 }],
                 "is_error": True,
             }
+        severity = args["severity"]
         flow_ids = args.get("flow_ids") or []
         if not isinstance(flow_ids, list) or not flow_ids:
             return {
@@ -1047,13 +1075,13 @@ def build_orch_mcp_server(
     def _record_worker_decision(kind: str, args: dict[str, Any]) -> dict[str, Any]:
         if decisions.current_phase != PHASE_DIRECTION:
             return _reject_wrong_phase(PHASE_DIRECTION, decisions.current_phase, f"{kind}_worker")
-        try:
-            wid = int(args["worker_id"])
-        except (KeyError, TypeError, ValueError):
+        wid_err = _check_worker_id(args)
+        if wid_err is not None:
             return {
-                "content": [{"type": "text", "text": "Rejected: worker_id required."}],
+                "content": [{"type": "text", "text": f"Rejected: {wid_err}."}],
                 "is_error": True,
             }
+        wid = args["worker_id"]
         instruction = str(args.get("instruction", "")).strip()
         if not instruction:
             return {
@@ -1140,13 +1168,13 @@ def build_orch_mcp_server(
     async def stop_worker(args: dict[str, Any]) -> dict[str, Any]:
         if decisions.current_phase != PHASE_DIRECTION:
             return _reject_wrong_phase(PHASE_DIRECTION, decisions.current_phase, "stop_worker")
-        try:
-            wid = int(args["worker_id"])
-        except (KeyError, TypeError, ValueError):
+        wid_err = _check_worker_id(args)
+        if wid_err is not None:
             return {
-                "content": [{"type": "text", "text": "Rejected: worker_id required."}],
+                "content": [{"type": "text", "text": f"Rejected: {wid_err}."}],
                 "is_error": True,
             }
+        wid = args["worker_id"]
         reason = str(args.get("reason", "")).strip()
         if not reason:
             return {
@@ -1225,12 +1253,13 @@ def build_orch_mcp_server(
     async def file_finding(args: dict[str, Any]) -> dict[str, Any]:
         if decisions.current_phase != PHASE_VERIFICATION:
             return _reject_wrong_phase(PHASE_VERIFICATION, decisions.current_phase, "file_finding")
-        severity = str(args.get("severity", "")).lower()
-        if severity not in SEVERITIES:
+        sev_err = _check_severity(args.get("severity"))
+        if sev_err is not None:
             return {
-                "content": [{"type": "text", "text": f"Rejected: severity must be one of {SEVERITIES}."}],
+                "content": [{"type": "text", "text": f"Rejected: {sev_err}."}],
                 "is_error": True,
             }
+        severity = args["severity"]
         verification = str(args.get("verification_notes", "")).strip()
         if not verification:
             return {
@@ -1243,6 +1272,13 @@ def build_orch_mcp_server(
                 }],
                 "is_error": True,
             }
+        supersedes = args.get("supersedes_candidate_ids", [])
+        sup_err = _check_supersedes_ids(supersedes)
+        if sup_err is not None:
+            return {
+                "content": [{"type": "text", "text": f"Rejected: {sup_err}."}],
+                "is_error": True,
+            }
         filed = FindingFiled(
             title=str(args.get("title", "")).strip() or "untitled",
             severity=severity,
@@ -1252,9 +1288,7 @@ def build_orch_mcp_server(
             evidence=str(args.get("evidence", "")).strip(),
             impact=str(args.get("impact", "")).strip(),
             verification_notes=verification,
-            supersedes_candidate_ids=[
-                str(c) for c in (args.get("supersedes_candidate_ids") or [])
-            ],
+            supersedes_candidate_ids=list(supersedes),
             follow_up_hint=str(args.get("follow_up_hint", "")).strip(),
         )
         decisions.add_finding(filed)
@@ -1340,14 +1374,19 @@ def build_orch_mcp_server(
                 }],
                 "is_error": True,
             }
+        supersedes = args.get("supersedes_candidate_ids", [])
+        sup_err = _check_supersedes_ids(supersedes)
+        if sup_err is not None:
+            return {
+                "content": [{"type": "text", "text": f"Rejected: {sup_err}."}],
+                "is_error": True,
+            }
         decisions.add_merge(FindingMerged(
             finding_id=finding_id,
             rationale=rationale,
             additional_endpoint=str(args.get("additional_endpoint", "")).strip(),
             evidence_note=str(args.get("evidence_note", "")).strip(),
-            supersedes_candidate_ids=[
-                str(c) for c in (args.get("supersedes_candidate_ids") or [])
-            ],
+            supersedes_candidate_ids=list(supersedes),
             follow_up_hint=str(args.get("follow_up_hint", "")).strip(),
         ))
         return {

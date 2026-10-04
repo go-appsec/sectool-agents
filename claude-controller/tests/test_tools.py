@@ -4,6 +4,7 @@ import unittest
 
 from tools import (
     MIN_ITERATIONS_FOR_DONE,
+    SEVERITIES,
     CandidatePool,
     DecisionQueue,
     FindingFiled,
@@ -13,6 +14,9 @@ from tools import (
     PHASE_VERIFICATION,
     PlanEntry,
     WorkerDecision,
+    _check_severity,
+    _check_supersedes_ids,
+    _check_worker_id,
     _done_guard_rejection,
     _is_premature_done,
     _parse_plan_args,
@@ -533,6 +537,96 @@ class TestPlanWorkersHandler(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual([e.worker_id for e in entries], [1, 2])
         self.assertEqual(rej, [])
+
+    def test_coerced_types_rejected(self):
+        """Issue 29: bools/floats/strings are not integers, null is no string."""
+        cases = [
+            ({"worker_id": True, "assignment": "x"}, "must be an integer"),
+            ({"worker_id": 2.7, "assignment": "y"}, "must be an integer"),
+            ({"worker_id": "3", "assignment": "z"}, "must be an integer"),
+            # Previously str(None) became the literal text "None"
+            ({"worker_id": 4, "assignment": None}, "assignment must be a string"),
+        ]
+        for entry, needle in cases:
+            with self.subTest(entry=entry):
+                entries, rej, err = _parse_plan_args({"plans": [entry]})
+                self.assertIsNone(entries)
+                self.assertIsNotNone(err)
+                self.assertIn(needle, rej[0])
+
+
+class TestCheckWorkerId(unittest.TestCase):
+    """Issue 29: one schema-exact worker_id rule shared by every tool."""
+
+    def test_valid_ids_accepted(self):
+        for wid in (1, 5, 9999):
+            self.assertIsNone(_check_worker_id({"worker_id": wid}))
+
+    def test_missing_rejected(self):
+        err = _check_worker_id({})
+        self.assertIsNotNone(err)
+        self.assertIn("required", err)
+
+    def test_bool_rejected_as_non_integer(self):
+        """bool subclasses int; JSON booleans are not integers."""
+        for v in (True, False):
+            with self.subTest(value=v):
+                err = _check_worker_id({"worker_id": v})
+                self.assertIsNotNone(err)
+                self.assertIn("must be an integer", err)
+
+    def test_float_and_string_rejected(self):
+        for v in (2.0, 2.7, "3"):
+            with self.subTest(value=v):
+                err = _check_worker_id({"worker_id": v})
+                self.assertIsNotNone(err)
+                self.assertIn("must be an integer", err)
+
+    def test_below_minimum_rejected(self):
+        for v in (0, -1):
+            with self.subTest(value=v):
+                err = _check_worker_id({"worker_id": v})
+                self.assertIsNotNone(err)
+                self.assertIn(">= 1", err)
+
+
+class TestCheckSeverity(unittest.TestCase):
+    """Issue 29: severity is an exact enum — no case tolerance anywhere."""
+
+    def test_exact_members_accepted(self):
+        for s in SEVERITIES:
+            self.assertIsNone(_check_severity(s))
+
+    def test_case_mismatch_rejected(self):
+        self.assertIsNotNone(_check_severity("HIGH"))
+
+    def test_non_string_rejected(self):
+        for v in (None, 3, True, ["high"]):
+            with self.subTest(value=v):
+                self.assertIsNotNone(_check_severity(v))
+
+
+class TestCheckSupersedesIds(unittest.TestCase):
+    """Issue 29: supersedes_candidate_ids must be an array of strings."""
+
+    def test_string_list_accepted(self):
+        self.assertIsNone(_check_supersedes_ids(["c001", "c002"]))
+
+    def test_empty_accepted_null_rejected(self):
+        # Absent keys default to [] at the handler; explicit null is rejected.
+        self.assertIsNone(_check_supersedes_ids([]))
+        self.assertIsNotNone(_check_supersedes_ids(None))
+
+    def test_bare_string_rejected(self):
+        """Iterating a bare string yields per-character candidate IDs."""
+        err = _check_supersedes_ids("c001")
+        self.assertIsNotNone(err)
+        self.assertIn("must be an array", err)
+
+    def test_non_string_items_rejected(self):
+        for v in ([1], ["c001", None]):
+            with self.subTest(value=v):
+                self.assertIsNotNone(_check_supersedes_ids(v))
 
 
 class TestPrematureDonePredicate(unittest.TestCase):
