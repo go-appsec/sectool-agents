@@ -22,6 +22,7 @@ from claude_agent_sdk import (
 import controller
 import runtime
 import worker as worker_mod
+from bash_tool import BASH_TOOL_ALLOWED
 from findings import FindingWriter
 from tools import (
     CandidatePool,
@@ -1571,6 +1572,38 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
             self.assertEqual(_run(body()), "boom")
         finally:
             worker_mod.ClaudeSDKClient = orig
+
+
+class TestVerifierOptionsBashGate(unittest.TestCase):
+    """The verifier's tool surface must honor --allow-bash exactly like the
+    worker/recon surfaces (it was previously granted unconditionally)."""
+
+    def _build(self, allow_bash: bool):
+        config = controller.Config(prompt="test", allow_bash=allow_bash)
+        return controller._build_verifier_options(
+            config, cwd="/tmp", mcp_url="http://127.0.0.1:9119/mcp",
+            orch_tools_server=object(), bash_tools_server=object(), stderr_cb=None,
+        )
+
+    def test_bash_absent_by_default(self):
+        opts = self._build(False)
+        self.assertNotIn("bash_tools", opts.mcp_servers)
+        self.assertNotIn(BASH_TOOL_ALLOWED, opts.allowed_tools)
+        # The prompt must not advertise shell access either.
+        self.assertNotIn("Shell access", opts.system_prompt)
+
+    def test_core_surface_unchanged_without_bash(self):
+        opts = self._build(False)
+        self.assertEqual(opts.allowed_tools[0], controller.ORCH_SECTOOL_TOOLS_GLOB)
+        for tool in controller.VERIFIER_TOOL_ALLOWED:
+            self.assertIn(tool, opts.allowed_tools)
+
+    def test_bash_granted_with_allow_bash(self):
+        opts = self._build(True)
+        self.assertIn("bash_tools", opts.mcp_servers)
+        self.assertIn(BASH_TOOL_ALLOWED, opts.allowed_tools)
+        # The prompt documents the granted shell section.
+        self.assertIn("Shell access", opts.system_prompt)
 
 
 class TestPrematureDoneGuard(unittest.TestCase):

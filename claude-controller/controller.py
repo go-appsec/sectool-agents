@@ -173,6 +173,41 @@ def _is_premature_done(iteration: int, findings_count: int) -> bool:
     return iteration < MIN_ITERATIONS_FOR_DONE and findings_count == 0
 
 
+def _build_verifier_options(
+    config: Config,
+    cwd: str,
+    mcp_url: str,
+    orch_tools_server,
+    bash_tools_server,
+    stderr_cb,
+) -> ClaudeAgentOptions:
+    """Build the verifier's client options.
+
+    `bash` is granted only when config.allow_bash is set, matching the
+    worker/recon gating in _build_worker_options. Directors never get it.
+    """
+    mcp_servers = {
+        "sectool": {"type": "http", "url": mcp_url},
+        "orch_tools": orch_tools_server,
+    }
+    allowed_tools = [ORCH_SECTOOL_TOOLS_GLOB] + list(VERIFIER_TOOL_ALLOWED)
+    if config.allow_bash:  # bash strictly opt-in for every client role
+        mcp_servers["bash_tools"] = bash_tools_server
+        allowed_tools.append(BASH_TOOL_ALLOWED)
+    return ClaudeAgentOptions(
+        mcp_servers=mcp_servers,
+        allowed_tools=allowed_tools,
+        permission_mode="acceptEdits",
+        cwd=cwd,
+        max_turns=100,
+        model=config.orchestrator_model_id,
+        stderr=stderr_cb,
+        system_prompt=verifier_prompts.build_system_prompt(
+            config.max_workers, allow_bash=config.allow_bash,
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Prompt formatting
 # ---------------------------------------------------------------------------
@@ -1177,21 +1212,8 @@ async def run(config: Config) -> None:
             model=config.worker_model_id or config.orchestrator_model_id,
         )
 
-        verifier_options = ClaudeAgentOptions(
-            mcp_servers={
-                "sectool": {"type": "http", "url": mcp_url},
-                "orch_tools": orch_tools_server,
-                "bash_tools": bash_tools_server,
-            },
-            allowed_tools=[ORCH_SECTOOL_TOOLS_GLOB] + list(VERIFIER_TOOL_ALLOWED) + [BASH_TOOL_ALLOWED],
-            permission_mode="acceptEdits",
-            cwd=cwd,
-            max_turns=100,
-            model=config.orchestrator_model_id,
-            stderr=stderr_cb,
-            system_prompt=verifier_prompts.build_system_prompt(
-                config.max_workers, allow_bash=config.allow_bash,
-            ),
+        verifier_options = _build_verifier_options(
+            config, cwd, mcp_url, orch_tools_server, bash_tools_server, stderr_cb,
         )
 
         director_options = ClaudeAgentOptions(
