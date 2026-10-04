@@ -3,6 +3,7 @@
 import unittest
 
 from tools import (
+    MIN_ITERATIONS_FOR_DONE,
     CandidatePool,
     DecisionQueue,
     FindingFiled,
@@ -11,6 +12,8 @@ from tools import (
     PHASE_VERIFICATION,
     PlanEntry,
     WorkerDecision,
+    _done_guard_rejection,
+    _is_premature_done,
     _parse_plan_args,
     _reject_wrong_phase,
     coalesce_decisions,
@@ -437,6 +440,93 @@ class TestPlanWorkersHandler(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual([e.worker_id for e in entries], [1, 2])
         self.assertEqual(rej, [])
+
+
+class TestPrematureDonePredicate(unittest.TestCase):
+    def test_truth_table(self):
+        cases = [
+            # (iter, findings, expected_premature)
+            (1, 0, True),
+            (MIN_ITERATIONS_FOR_DONE - 1, 0, True),
+            (1, 1, False),                  # any finding clears the guard
+            (2, 3, False),
+            (MIN_ITERATIONS_FOR_DONE, 0, False),  # at threshold, no longer premature
+            (MIN_ITERATIONS_FOR_DONE + 1, 0, False),
+        ]
+        for it, n, expected in cases:
+            with self.subTest(iteration=it, findings=n):
+                self.assertEqual(_is_premature_done(it, n), expected)
+
+
+class TestDoneGuardRejection(unittest.TestCase):
+    """07: done guards fire at the tool call so the director sees why."""
+
+    def _queue(self) -> DecisionQueue:
+        q = DecisionQueue()
+        q.begin_phase(PHASE_DIRECTION)
+        return q
+
+    @staticmethod
+    def _progress(iteration: int, findings: int):
+        return lambda: (iteration, findings)
+
+    def test_premature_rejected_with_explanation(self):
+        msg = _done_guard_rejection(
+            self._queue(), None, self._progress(2, 0))
+        self.assertIsNotNone(msg)
+        self.assertIn("premature", msg)
+        self.assertIn(str(MIN_ITERATIONS_FOR_DONE), msg)
+        self.assertIn("direction_done", msg)
+
+    def test_findings_or_threshold_accepted(self):
+        for it, n in ((1, 2), (MIN_ITERATIONS_FOR_DONE, 0)):
+            with self.subTest(iteration=it, findings=n):
+                msg = _done_guard_rejection(
+                    self._queue(), None, self._progress(it, n))
+                self.assertIsNone(msg)
+
+    def test_no_progress_provider_skips_premature(self):
+        self.assertIsNone(_done_guard_rejection(self._queue(), None, None))
+
+    def test_alive_worker_without_stop_rejected(self):
+        q = self._queue()
+        q.add_decision(WorkerDecision(
+            kind="continue", worker_id=4, instruction="go", progress="new"))
+        msg = _done_guard_rejection(
+            q, lambda: [4], self._progress(MIN_ITERATIONS_FOR_DONE + 1, 0))
+        self.assertIsNotNone(msg)
+        self.assertIn("abandon live work", msg)
+
+    def test_alive_worker_without_decision_rejected(self):
+        msg = _done_guard_rejection(
+            self._queue(), lambda: [4], self._progress(MIN_ITERATIONS_FOR_DONE + 1, 0))
+        self.assertIsNotNone(msg)
+        self.assertIn("no decision recorded", msg)
+
+    def test_all_stopped_alive_workers_accepted(self):
+        q = self._queue()
+        q.add_decision(WorkerDecision(kind="stop", worker_id=4, reason="exhausted"))
+        msg = _done_guard_rejection(
+            q, lambda: [4], self._progress(MIN_ITERATIONS_FOR_DONE + 1, 0))
+        self.assertIsNone(msg)
+
+    def test_empty_alive_without_plan_rejected(self):
+        """The iteration-1 recon teardown leaves no alive workers; done must
+        not pass the live-work guard vacuously."""
+        msg = _done_guard_rejection(
+            self._queue(), lambda: [], self._progress(MIN_ITERATIONS_FOR_DONE + 1, 0))
+        self.assertIsNotNone(msg)
+        self.assertIn("no workers alive", msg)
+
+    def test_empty_alive_with_plan_accepted(self):
+        q = self._queue()
+        q.set_plan([PlanEntry(2, "scan /api")])
+        msg = _done_guard_rejection(
+            q, lambda: [], self._progress(MIN_ITERATIONS_FOR_DONE + 1, 0))
+        self.assertIsNone(msg)
+
+    def test_no_alive_provider_skips_live_work(self):
+        self.assertIsNone(_done_guard_rejection(self._queue(), None, None))
 
 
 class TestValidateRepoHint(unittest.TestCase):

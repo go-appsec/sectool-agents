@@ -55,7 +55,6 @@ from tools import (
     DIRECTION_SELF_REVIEW_MAX_ROUNDS,
     DIRECTOR_TOOL_ALLOWED,
     MAX_AUTONOMOUS_BUDGET,
-    MIN_ITERATIONS_FOR_DONE,
     PHASE_DIRECTION,
     PHASE_VERIFICATION,
     VERIFIER_TOOL_ALLOWED,
@@ -167,15 +166,6 @@ def terminate_process(proc: subprocess.Popen, log_file: io.TextIOWrapper | None 
             proc.wait()
     if log_file is not None:
         log_file.close()
-
-
-def _is_premature_done(iteration: int, findings_count: int) -> bool:
-    """Reject `done` when the run has made no visible progress yet.
-
-    Mirrors secagent's MinIterationsForDone guard: local/weak models routinely
-    conflate `done` with `direction_done` on early iterations.
-    """
-    return iteration < MIN_ITERATIONS_FOR_DONE and findings_count == 0
 
 
 def _build_verifier_options(
@@ -1290,12 +1280,14 @@ async def run(config: Config) -> None:
         mcp_url = f"http://127.0.0.1:{config.mcp_port}/mcp"
         stderr_cb = (lambda line: log("claude", line.rstrip())) if config.verbose else None
 
-        # `workers` is mutated below as workers spawn and retire; the lambda
-        # closes over it so the `done` guard always sees the current alive set.
+        # `workers` is mutated below as workers spawn and retire; the lambdas
+        # close over it (and the loop's iteration counter) so the `done`
+        # guards always evaluate against live state.
         workers: list[WorkerState] = []
         orch_tools_server = build_orch_mcp_server(
             decisions,
             alive_worker_ids=lambda: [w.worker_id for w in workers if w.alive],
+            run_progress=lambda: (iteration, finding_writer.run_count),
         )
 
         base_options = ClaudeAgentOptions(
@@ -1522,20 +1514,12 @@ async def run(config: Config) -> None:
                     if w.alive and w.progress_none_streak >= STALL_WARN_AFTER:
                         w.stall_warned = True
 
-                # 7) Done? — guard against premature termination on weak models
-                # that conflate `done` with `direction_done`.
+                # 7) Done? — ends the entire run. Premature and live-work
+                # rejections already happened inside the done tool itself.
                 if decisions.done_summary is not None:
-                    if _is_premature_done(iteration, finding_writer.run_count):
-                        log(f"iter {iteration}",
-                            f"done ignored: premature "
-                            f"(iter {iteration} < {MIN_ITERATIONS_FOR_DONE}, "
-                            f"0 findings). Summary: "
-                            f"{_short(decisions.done_summary, 120)}")
-                        decisions.done_summary = None
-                    else:
-                        log(f"iter {iteration}",
-                            f"Director: done — {_short(decisions.done_summary, 120)}")
-                        break
+                    log(f"iter {iteration}",
+                        f"Director: done — {_short(decisions.done_summary, 120)}")
+                    break
 
                 # 8) Plan diff
                 if decisions.plan is not None:

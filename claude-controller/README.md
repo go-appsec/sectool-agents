@@ -125,7 +125,7 @@ The resolved or configured sectool is used for both the version check and the MC
 
    **Phase 3: Direction (multi-substep).** The director client receives the verification summary + every worker's autonomous-run transcript, and issues `continue_worker` / `expand_worker` / `stop_worker` / `plan_workers` decisions — each with an `autonomous_budget` for the next iteration. Up to `DIRECTION_MAX_SUBSTEPS` (4) substeps followed by one mandatory **self-review** substep prompting the director to check for uncovered or misassigned workers before closing the phase. Phase ends on `direction_done(summary)`, on `done(summary)` to end the run, when every alive worker has a decision, or at the cap.
 
-   A `done(summary)` called before iteration `MIN_ITERATIONS_FOR_DONE` (5) with zero findings filed is rejected as premature — this guards against models that confuse `done` with `direction_done` on early iterations.
+   A `done(summary)` guard is enforced inside the tool handler itself, so a rejected call returns an explicit error to the director instead of being silently voided by the controller afterwards. It rejects calls that would prematurely end the run — before iteration `MIN_ITERATIONS_FOR_DONE` (5) with zero findings filed, while alive workers lack stop decisions or plan coverage, or when no worker is alive and no plan exists (the empty set left behind by the iteration-1 recon teardown must not let the guard pass vacuously). This guards against models that confuse `done` with `direction_done` on early iterations.
 
    **Apply.** Controller applies the plan diff (spawn/retarget), sends each worker its instruction + updated budget, and starts the next iteration.
 
@@ -154,7 +154,7 @@ Plus the **full sectool tool surface** (same as workers): `flow_get`, `proxy_pol
 | `expand_worker(worker_id, instruction, progress, autonomous_budget?)` | Pivot worker N's plan. |
 | `stop_worker(worker_id, reason)` | Retire worker N. |
 | `direction_done(summary)` | Signal that all alive workers have a decision. |
-| `done(summary)` | End the run. |
+| `done(summary)` | End the run. Rejected in-call when premature or live work would be abandoned. |
 
 Calling a tool in the wrong phase returns an `is_error=True` response directing the orchestrator to transition phases first.
 

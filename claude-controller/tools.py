@@ -725,21 +725,104 @@ def _reject_wrong_phase(expected: str, current: str, tool_name: str) -> dict[str
     }
 
 
+def _is_premature_done(iteration: int, findings_count: int) -> bool:
+    """True when `done` would end a run with no visible progress yet.
+
+    Mirrors secagent's MinIterationsForDone guardrail: models routinely
+    confuse `done` with `direction_done` on early iterations.
+    """
+    return iteration < MIN_ITERATIONS_FOR_DONE and findings_count == 0
+
+
+def _done_guard_rejection(
+    decisions: DecisionQueue,
+    alive_worker_ids: Any | None,
+    run_progress: Any | None,
+) -> str | None:
+    """Rejection text for a `done` call, or None when the call may proceed.
+
+    Enforced at the point the tool call is decided so the director sees an
+    explicit error instead of the controller silently voiding the call:
+
+    - premature: before MIN_ITERATIONS_FOR_DONE with zero findings filed;
+    - live-work abandonment: alive workers lack a stop decision or plan
+      coverage. An empty alive set only passes when a plan exists — on
+      iteration 1 the recon worker is already torn down when direction
+      runs, so an empty set must not let the check pass vacuously.
+
+    `run_progress` is a 0-arg callable returning (iteration,
+    findings_count); `alive_worker_ids` is a 0-arg callable returning the
+    currently-alive worker IDs. Each guard runs only when its provider is
+    given.
+    """
+    if run_progress is not None:
+        iteration, findings_count = run_progress()
+        if _is_premature_done(iteration, findings_count):
+            return (
+                f"Rejected: `done` is premature (iteration {iteration}/"
+                f"{MIN_ITERATIONS_FOR_DONE}, {findings_count} findings filed "
+                "this run). Use `direction_done(summary)` to close this "
+                "iteration. `done` ends the ENTIRE run and is only for "
+                "exhausted assignments after findings have been filed."
+            )
+    if alive_worker_ids is None:
+        return None
+    alive = list(alive_worker_ids())
+    planned_ids = (
+        {p.worker_id for p in decisions.plan}
+        if decisions.plan is not None else set()
+    )
+    if not alive and not planned_ids:
+        return (
+            "Rejected: `done` would end a run with no workers alive and none "
+            "planned this iteration. Call `plan_workers(...)` to start new "
+            "work, or `direction_done(summary)` to close this iteration."
+        )
+    # `plan_workers` covers a worker via the spawn/retarget path —
+    # for the purpose of the done guard, treat it the same as a
+    # non-stop decision (work is still being scheduled).
+    by_wid = decisions.decisions_by_worker()
+    not_stopped = sorted(
+        w for w in alive
+        if (by_wid.get(w) and by_wid[w] != "stop") or w in planned_ids
+    )
+    no_decision = sorted(
+        w for w in alive if w not in by_wid and w not in planned_ids
+    )
+    if not not_stopped and not no_decision:
+        return None
+    parts: list[str] = []
+    if not_stopped:
+        parts.append(
+            f"workers {not_stopped} have decisions other than stop this iter"
+        )
+    if no_decision:
+        parts.append(
+            f"workers {no_decision} have no decision recorded this iter"
+        )
+    return (
+        "Rejected: `done` would abandon live work — "
+        + "; ".join(parts)
+        + ". Either stop them all via `stop_worker(worker_id, reason=...)` "
+        "in this iter and re-issue `done`, or call `direction_done(summary)` "
+        "to close this iter and let the workers continue next iter."
+    )
+
+
 def build_orch_mcp_server(
     decisions: DecisionQueue,
     alive_worker_ids: Any | None = None,
+    run_progress: Any | None = None,
 ) -> Any:
     """SDK MCP server with the orchestrator's decision + finding tools.
 
     Tools are phase-gated by `decisions.phase`; calling the wrong tool in the
     wrong phase returns an is_error=True response.
 
-    `alive_worker_ids`, when provided, is a 0-arg callable returning the list
-    of currently-alive worker IDs. It's consulted by the `done` handler to
-    reject `done` while live workers lack an explicit `stop_worker` — this
-    catches the common failure mode of the director queueing
-    `continue_worker` + `done` in the same phase and silently abandoning
-    in-progress investigations.
+    Both callables feed the `done` handler's guards (see
+    _done_guard_rejection): `alive_worker_ids` returns currently-alive worker
+    IDs; `run_progress` returns (iteration, findings_count) for the run so
+    far. Each guard runs only when its provider is given.
     """
 
     @tool(
@@ -1181,46 +1264,12 @@ def build_orch_mcp_server(
                 "content": [{"type": "text", "text": "Rejected: summary is required."}],
                 "is_error": True,
             }
-        if alive_worker_ids is not None:
-            alive = list(alive_worker_ids())
-            by_wid = decisions.decisions_by_worker()
-            planned_ids = (
-                {p.worker_id for p in decisions.plan}
-                if decisions.plan is not None else set()
-            )
-            # `plan_workers` covers a worker via the spawn/retarget path —
-            # for the purpose of the done guard, treat it the same as a
-            # non-stop decision (work is still being scheduled).
-            not_stopped = sorted(
-                w for w in alive
-                if (by_wid.get(w) and by_wid[w] != "stop") or w in planned_ids
-            )
-            no_decision = sorted(
-                w for w in alive if w not in by_wid and w not in planned_ids
-            )
-            if not_stopped or no_decision:
-                parts: list[str] = []
-                if not_stopped:
-                    parts.append(
-                        f"workers {not_stopped} have decisions other than stop this iter"
-                    )
-                if no_decision:
-                    parts.append(
-                        f"workers {no_decision} have no decision recorded this iter"
-                    )
-                return {
-                    "content": [{
-                        "type": "text",
-                        "text": (
-                            "Rejected: `done` would abandon live work — "
-                            + "; ".join(parts)
-                            + ". Either stop them all via `stop_worker(worker_id, reason=...)` "
-                            "in this iter and re-issue `done`, or call `direction_done(summary)` "
-                            "to close this iter and let the workers continue next iter."
-                        ),
-                    }],
-                    "is_error": True,
-                }
+        rejection = _done_guard_rejection(decisions, alive_worker_ids, run_progress)
+        if rejection is not None:
+            return {
+                "content": [{"type": "text", "text": rejection}],
+                "is_error": True,
+            }
         decisions.set_done(summary)
         return {"content": [{"type": "text", "text": "Run end signaled."}]}
 

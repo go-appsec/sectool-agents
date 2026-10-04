@@ -1949,23 +1949,6 @@ class TestDirectorOptionsBashGate(unittest.TestCase):
         self.assertEqual(set(opts.mcp_servers), {"orch_tools"})
 
 
-class TestPrematureDoneGuard(unittest.TestCase):
-    def test_truth_table(self):
-        from tools import MIN_ITERATIONS_FOR_DONE as MIN
-        cases = [
-            # (iter, findings, expected_premature)
-            (1, 0, True),
-            (MIN - 1, 0, True),
-            (1, 1, False),                  # any finding clears the guard
-            (2, 3, False),
-            (MIN, 0, False),                # at threshold, no longer premature
-            (MIN + 1, 0, False),
-        ]
-        for it, n, expected in cases:
-            with self.subTest(iteration=it, findings=n):
-                self.assertEqual(controller._is_premature_done(it, n), expected)
-
-
 # ---------------------------------------------------------------------------
 # Finding lifecycle (retained)
 # ---------------------------------------------------------------------------
