@@ -7,6 +7,7 @@ from tools import (
     CandidatePool,
     DecisionQueue,
     FindingFiled,
+    FindingMerged,
     PHASE_DIRECTION,
     PHASE_IDLE,
     PHASE_VERIFICATION,
@@ -129,7 +130,7 @@ class TestDecisionQueuePhases(unittest.TestCase):
         q = DecisionQueue()
         q.begin_phase(PHASE_DIRECTION)
         q.set_plan([PlanEntry(1, "x")])
-        q.add_decision(WorkerDecision(kind="continue", worker_id=1, instruction="i", progress="new"))
+        q.add_decision(WorkerDecision(kind="continue", worker_id=1, instruction="i"))
         q.begin_phase(PHASE_VERIFICATION)
         q.add_finding(FindingFiled(title="T", severity="high", endpoint="/", description="",
                                     reproduction_steps="", evidence="", impact="",
@@ -140,15 +141,29 @@ class TestDecisionQueuePhases(unittest.TestCase):
         q.set_direction_done("directed")
         q.set_done("wrap")
 
+        q.add_merge(FindingMerged(finding_id="F1", rationale="same bug"))
+
+        # Simulate the controller applying every queue record.
+        q.applied_findings.extend(q.findings)
+        q.applied_dismissals.extend(q.dismissals)
+        q.applied_merges.extend(q.merges)
+
         q.reset()
         self.assertIsNone(q.plan)
         self.assertEqual(q.worker_decisions, [])
         self.assertEqual(q.findings, [])
         self.assertEqual(q.dismissals, [])
+        self.assertEqual(q.applied_findings, [])
+        self.assertEqual(q.applied_dismissals, [])
+        self.assertEqual(q.applied_merges, [])
         self.assertIsNone(q.done_summary)
         self.assertIsNone(q.verification_done_summary)
         self.assertIsNone(q.direction_done_summary)
         self.assertEqual(q.phase, PHASE_IDLE)
+
+    def test_worker_decision_has_no_progress_field(self):
+        """Issue 24: the progress tag fed no logic — removed from the contract."""
+        self.assertNotIn("progress", WorkerDecision.__dataclass_fields__)
 
     def test_begin_phase_transitions(self):
         q = DecisionQueue()
@@ -173,8 +188,8 @@ class TestDecisionQueuePhases(unittest.TestCase):
     def test_decisions_by_worker_returns_latest_kind(self):
         q = DecisionQueue()
         q.begin_phase(PHASE_DIRECTION)
-        q.add_decision(WorkerDecision(kind="continue", worker_id=1, instruction="x", progress="new"))
-        q.add_decision(WorkerDecision(kind="continue", worker_id=2, instruction="y", progress="new"))
+        q.add_decision(WorkerDecision(kind="continue", worker_id=1, instruction="x"))
+        q.add_decision(WorkerDecision(kind="continue", worker_id=2, instruction="y"))
         # Same worker re-issued — latest wins.
         q.add_decision(WorkerDecision(kind="stop", worker_id=2, reason="done"))
         by_wid = q.decisions_by_worker()
@@ -334,7 +349,7 @@ class TestCoalesceDecisions(unittest.TestCase):
 
     def _dec(self, kind: str, wid: int, instruction: str = "go") -> WorkerDecision:
         return WorkerDecision(
-            kind=kind, worker_id=wid, instruction=instruction, progress="new",
+            kind=kind, worker_id=wid, instruction=instruction,
             reason="" if kind != "stop" else "r",
         )
 
@@ -508,7 +523,7 @@ class TestDoneGuardRejection(unittest.TestCase):
     def test_alive_worker_without_stop_rejected(self):
         q = self._queue()
         q.add_decision(WorkerDecision(
-            kind="continue", worker_id=4, instruction="go", progress="new"))
+            kind="continue", worker_id=4, instruction="go"))
         msg = _done_guard_rejection(
             q, lambda: [4], self._progress(MIN_ITERATIONS_FOR_DONE + 1, 0))
         self.assertIsNotNone(msg)

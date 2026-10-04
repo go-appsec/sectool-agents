@@ -664,7 +664,7 @@ class TestApplyDecision(unittest.TestCase):
     def test_continue_applies_budget_and_query(self):
         w = self._make_worker()
         d = WorkerDecision(kind="continue", worker_id=7, instruction="go",
-                           progress="new", autonomous_budget=7)
+                           autonomous_budget=7)
         _run(controller.apply_decision(d, w, iteration=5))
         self.assertEqual(w.last_instruction, "go")
         self.assertEqual(w.client.queries, ["go"])
@@ -675,7 +675,7 @@ class TestApplyDecision(unittest.TestCase):
         w.progress_none_streak = 4
         w.stall_warned = True
         d = WorkerDecision(kind="continue", worker_id=7, instruction="go",
-                           progress="new", autonomous_budget=5)
+                           autonomous_budget=5)
         _run(controller.apply_decision(d, w, iteration=5))
         self.assertEqual(w.progress_none_streak, 4)  # unchanged
         self.assertTrue(w.stall_warned)
@@ -689,7 +689,7 @@ class TestApplyDecision(unittest.TestCase):
     def test_budget_clamped(self):
         w = self._make_worker()
         d = WorkerDecision(kind="continue", worker_id=7, instruction="go",
-                           progress="new", autonomous_budget=999)
+                           autonomous_budget=999)
         _run(controller.apply_decision(d, w, iteration=5))
         self.assertLessEqual(w.autonomous_budget, 20)
 
@@ -698,7 +698,7 @@ class TestApplyDecision(unittest.TestCase):
         w = self._make_worker()
         w.max_autonomous_budget = 2  # mimics recon worker initialisation
         d = WorkerDecision(kind="expand", worker_id=7, instruction="dig deeper",
-                           progress="new", autonomous_budget=12)
+                           autonomous_budget=12)
         _run(controller.apply_decision(d, w, iteration=5))
         self.assertEqual(w.autonomous_budget, 2)
 
@@ -707,7 +707,7 @@ class TestApplyDecision(unittest.TestCase):
         w = self._make_worker()
         w.max_autonomous_budget = 4
         d = WorkerDecision(kind="continue", worker_id=7, instruction="ok",
-                           progress="new", autonomous_budget=2)
+                           autonomous_budget=2)
         _run(controller.apply_decision(d, w, iteration=5))
         self.assertEqual(w.autonomous_budget, 2)
 
@@ -731,7 +731,7 @@ class TestApplyDecision(unittest.TestCase):
         try:
             event = asyncio.Event()
             d = WorkerDecision(kind="continue", worker_id=7, instruction="go",
-                               progress="new", autonomous_budget=3)
+                               autonomous_budget=3)
             _run(controller.apply_decision(d, w, iteration=5, shutdown_event=event))
         finally:
             controller.attempt_worker_recovery = orig
@@ -1053,6 +1053,16 @@ class TestPromptFormatting(unittest.TestCase):
         self.assertIn("F2", msg)
         self.assertIn("same vuln, new endpoint", msg)
 
+    def test_pending_candidate_roster_shows_evidence_notes(self):
+        pool = CandidatePool()
+        pool.add(worker_id=2, title="XSS", severity="high", endpoint="/x",
+                 flow_ids=["aaaa11"], summary="Reflected payload",
+                 evidence_notes="payload echoed verbatim in body",
+                 reproduction_hint="")
+        msg = controller._format_pending_candidates_list(pool.pending())
+        self.assertIn("evidence:", msg)
+        self.assertIn("payload echoed verbatim in body", msg)
+
 
 # ---------------------------------------------------------------------------
 # Phase drivers (integration over FakeSDKClient)
@@ -1230,6 +1240,7 @@ class TestVerificationPhase(unittest.TestCase):
             ))
         self.assertEqual(summary, "attempted both")
         self.assertEqual(fw.run_count, 1)
+        self.assertEqual(len(decisions.applied_findings), 1)
         self.assertEqual(pool.get(cid_ok).status, "verified")
         # No file on disk for the failed write — its candidate stays pending.
         self.assertEqual(pool.get(cid_bad).status, "pending")
@@ -1265,6 +1276,52 @@ class TestVerificationPhase(unittest.TestCase):
             with open(fw.paths[0]) as f:
                 body = f.read()
         self.assertNotIn("Additional affected surfaces", body)
+
+    def test_continue_prompt_excludes_unapplied_records(self):
+        """Issue 24: prompts describe only records that actually took effect —
+        unknown-id dismissals and unresolved merges never render as done."""
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        still_pending = pool.add(worker_id=1, title="SQLi", severity="high",
+                                 endpoint="POST /login", flow_ids=["fl0w03"],
+                                 summary="", evidence_notes="", reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="Reflected XSS", severity="high", endpoint="/s",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="replayed fl0w01",
+                supersedes_candidate_ids=[cid],
+            ))
+            d.add_dismissal("c999", "bogus id")  # unknown — ignored by apply
+            d.add_merge(FindingMerged(
+                finding_id="F99", rationale="no such finding"))  # unresolved
+
+        def finish(d: DecisionQueue):
+            d.set_verification_done("one filed")
+
+        client = _OrchSideEffectClient([
+            _orch_tool_turn("file_finding", {}),
+            _orch_tool_turn("verification_done", {"summary": "x"}),
+        ], decisions, [action, finish])
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, summary = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(summary, "one filed")
+
+        # Second query is the substep-2 continue prompt.
+        msg = client.queries[1]
+        self.assertIn("Already filed this phase", msg)
+        self.assertIn("Reflected XSS", msg)
+        self.assertNotIn("c999", msg)
+        self.assertNotIn("F99", msg)
+        # The still-pending candidate is untouched and listed for work.
+        self.assertEqual(pool.get(still_pending).status, "pending")
+        self.assertIn("SQLi", msg)
 
     def test_file_finding_without_supersedes_auto_resolves_matching_candidate(self):
         pool = CandidatePool()
@@ -1712,9 +1769,9 @@ class TestDirectionPhase(unittest.TestCase):
 
         def action(d: DecisionQueue):
             d.add_decision(WorkerDecision(kind="continue", worker_id=1,
-                                          instruction="keep", progress="new"))
+                                          instruction="keep"))
             d.add_decision(WorkerDecision(kind="continue", worker_id=2,
-                                          instruction="keep", progress="new"))
+                                          instruction="keep"))
             # Note: NO direction_done called — driver should still exit because all covered.
 
         # Two scripted turns: the coverage turn + the mandatory self-review turn.
@@ -1725,7 +1782,7 @@ class TestDirectionPhase(unittest.TestCase):
         client = _OrchSideEffectClient(
             [
                 _orch_tool_turn("continue_worker",
-                                {"worker_id": 1, "instruction": "k", "progress": "new"}),
+                                {"worker_id": 1, "instruction": "k"}),
                 self_review_turn,
             ],
             decisions, [action, None],
@@ -1861,10 +1918,10 @@ class TestDirectionPhase(unittest.TestCase):
                 if len(self.queries) == 1:
                     decisions.add_decision(WorkerDecision(
                         kind="continue", worker_id=1,
-                        instruction="keep", progress="new"))
+                        instruction="keep"))
                     messages = _orch_tool_turn(
                         "continue_worker",
-                        {"worker_id": 1, "instruction": "k", "progress": "new"})
+                        {"worker_id": 1, "instruction": "k"})
 
                     async def gen():
                         for m in messages:
@@ -2965,6 +3022,43 @@ class TestVerifyDedup(unittest.TestCase):
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
             self.assertEqual(fw.run_count, 1)
+
+    def test_duplicate_filing_excluded_from_applied(self):
+        """Issue 24: dup-skipped burst filings never enter the applied records,
+        so the phase summary counts only findings actually written."""
+        pool = CandidatePool()
+        cid = pool.add(worker_id=1, title="A", severity="high", endpoint="GET /x",
+                       flow_ids=["aaaa11"], summary="", evidence_notes="",
+                       reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            for _ in range(2):
+                d.add_finding(FindingFiled(
+                    title="Reflected XSS", severity="high", endpoint="GET /x",
+                    description="d", reproduction_steps="r", evidence="e",
+                    impact="i", verification_notes="v",
+                    supersedes_candidate_ids=[cid],
+                ))
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("file_finding", {})],
+            decisions, [action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, summary = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(fw.run_count, 1)
+        self.assertEqual(len(decisions.applied_findings), 1)
+        self.assertEqual(
+            summary,
+            "Verification phase ended with 1 filed, 0 merged, 0 dismissed, "
+            "0 still pending.",
+        )
 
 
 class TestVerifyFallback(unittest.TestCase):

@@ -150,8 +150,8 @@ Plus the **full sectool tool surface** (same as workers): `flow_get`, `proxy_pol
 | Tool | Purpose |
 |------|---------|
 | `plan_workers(plans)` | Spawn/retarget workers. |
-| `continue_worker(worker_id, instruction, progress, autonomous_budget?)` | Keep worker N going with the specified budget. |
-| `expand_worker(worker_id, instruction, progress, autonomous_budget?)` | Pivot worker N's plan. |
+| `continue_worker(worker_id, instruction, autonomous_budget?)` | Keep worker N going with the specified budget. |
+| `expand_worker(worker_id, instruction, autonomous_budget?)` | Pivot worker N's plan. |
 | `stop_worker(worker_id, reason)` | Retire worker N. |
 | `direction_done(summary)` | Signal that all alive workers have a decision. |
 | `done(summary)` | End the run. Rejected in-call when premature or live work would be abandoned. |

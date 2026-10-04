@@ -16,7 +16,6 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 
 
 SEVERITIES = ("critical", "high", "medium", "low", "informational")
-PROGRESS_TAGS = ("none", "incremental", "new")
 DEFAULT_AUTONOMOUS_BUDGET = 8
 MAX_AUTONOMOUS_BUDGET = 20
 
@@ -195,7 +194,6 @@ class WorkerDecision:
     kind: str  # continue | expand | stop
     worker_id: int
     instruction: str = ""
-    progress: str = "none"
     reason: str = ""
     autonomous_budget: int = DEFAULT_AUTONOMOUS_BUDGET
 
@@ -366,6 +364,12 @@ class DecisionQueue:
         self.findings: list[FindingFiled] = []
         self.dismissals: list[CandidateDismissal] = []
         self.merges: list[FindingMerged] = []
+        # Queue records that actually took effect (file written, candidate
+        # marked, merge appended). Prompt material derives from these so the
+        # narrative never claims skipped or failed work.
+        self.applied_findings: list[FindingFiled] = []
+        self.applied_dismissals: list[CandidateDismissal] = []
+        self.applied_merges: list[FindingMerged] = []
         self.done_summary: str | None = None
         self.phase: str = PHASE_IDLE
         self.verification_done_summary: str | None = None
@@ -378,6 +382,9 @@ class DecisionQueue:
             self.findings = []
             self.dismissals = []
             self.merges = []
+            self.applied_findings = []
+            self.applied_dismissals = []
+            self.applied_merges = []
             self.done_summary = None
             self.phase = PHASE_IDLE
             self.verification_done_summary = None
@@ -921,12 +928,6 @@ def build_orch_mcp_server(
                 "is_error": True,
             }
         instruction = str(args.get("instruction", "")).strip()
-        progress = str(args.get("progress", "")).lower()
-        if progress not in PROGRESS_TAGS:
-            return {
-                "content": [{"type": "text", "text": f"Rejected: progress must be one of {PROGRESS_TAGS}."}],
-                "is_error": True,
-            }
         if not instruction:
             return {
                 "content": [{"type": "text", "text": "Rejected: instruction is required."}],
@@ -940,14 +941,14 @@ def build_orch_mcp_server(
         budget = max(1, min(MAX_AUTONOMOUS_BUDGET, budget))
         decisions.add_decision(WorkerDecision(
             kind=kind, worker_id=wid, instruction=instruction,
-            progress=progress, autonomous_budget=budget,
+            autonomous_budget=budget,
         ))
         return {
             "content": [{
                 "type": "text",
                 "text": (
                     f"{kind} recorded for worker {wid} "
-                    f"(progress={progress}, autonomous_budget={budget})."
+                    f"(autonomous_budget={budget})."
                 ),
             }],
         }
@@ -957,7 +958,6 @@ def build_orch_mcp_server(
         "properties": {
             "worker_id": {"type": "integer", "minimum": 1},
             "instruction": {"type": "string"},
-            "progress": {"type": "string", "enum": list(PROGRESS_TAGS)},
             "autonomous_budget": {
                 "type": "integer",
                 "minimum": 1,
@@ -970,16 +970,14 @@ def build_orch_mcp_server(
                 ),
             },
         },
-        "required": ["worker_id", "instruction", "progress"],
+        "required": ["worker_id", "instruction"],
     }
 
     @tool(
         "continue_worker",
         (
             "Tell worker N to keep going with its current plan. Use when its "
-            "work is productive and no pivot is needed. progress: 'none' if no "
-            "new information gained, 'incremental' for steady progress, 'new' "
-            "if a new attack surface opened."
+            "work is productive and no pivot is needed."
         ),
         _worker_directive_schema,
     )
@@ -990,8 +988,7 @@ def build_orch_mcp_server(
         "expand_worker",
         (
             "Pivot worker N with an adjusted plan. Use when results warrant a "
-            "new angle of attack or the current plan is exhausted. progress: "
-            "same semantics as continue_worker."
+            "new angle of attack or the current plan is exhausted."
         ),
         _worker_directive_schema,
     )

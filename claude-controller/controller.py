@@ -335,6 +335,7 @@ def _format_pending_candidates_list(pending: list[FindingCandidate]) -> str:
             f"  worker: {c.worker_id}\n"
             f"  flows: {', '.join(c.flow_ids) or '(none)'}\n"
             f"  summary: {_short(c.summary, 200)}\n"
+            f"  evidence: {_short(c.evidence_notes, 200)}\n"
             f"  reproduction hint: {_short(c.reproduction_hint, 200)}"
         )
     return "\n".join(lines)
@@ -419,9 +420,9 @@ def _build_verifier_continue_prompt(
 ) -> str:
     """Continue-prompt for the verifier between substeps.
 
-    Lists actual titles filed, finding_ids merged into, and candidate ids
-    dismissed this phase so the model stops re-announcing the same
-    dispositions each substep.
+    Summarizes applied records — titles actually filed, merges resolved,
+    candidate ids actually dismissed — so the narrative matches pool state
+    and the model stops re-announcing dispositions each substep.
     """
     parts = [
         (
@@ -468,7 +469,9 @@ def _format_follow_up_hints(
 ) -> str:
     """Collate optional verifier follow-up hints into a labeled block.
 
-    Returns "" when no hints are present so the caller can suppress the block.
+    Callers pass applied records (e.g. DecisionQueue.applied_*) so hints
+    never reference skipped or failed decisions. Returns "" when no hints
+    are present so the caller can suppress the block.
     """
     lines: list[str] = []
     for f in findings:
@@ -755,18 +758,19 @@ async def run_verification_phase(
             managed = fresh
             log("verify", f"Verifier client reset for iteration {iteration}.")
 
-    applied_findings = 0
-    applied_dismissals = 0
-    processed_merges = 0
-    successful_merges: list[FindingMerged] = []
+    drained_findings = 0
+    drained_dismissals = 0
+    drained_merges = 0
 
     def _apply_new_decisions() -> None:
         """Persist queue entries accepted since the previous call.
 
-        Idempotent via the applied counters, so it can run on every substep
-        exit — including error and abort — without double-writing.
+        Idempotent via the drain cursors, so it can run on every substep
+        exit — including error and abort — without double-writing. Records
+        that skip application (dedup, unknown ids, failed writes) never
+        enter the applied lists, keeping prompts truthful about effects.
         """
-        nonlocal applied_findings, applied_dismissals, processed_merges
+        nonlocal drained_findings, drained_dismissals, drained_merges
 
         # Apply new findings this substep produced. `seen_keys` dedups
         # burst `file_finding` calls within one response by title-slug plus
@@ -774,7 +778,7 @@ async def run_verification_phase(
         # the verifier's call (it can `merge_into_finding` instead of filing
         # a near-duplicate; see verifier prompt).
         seen_keys: set[str] = set()
-        for filed in decisions.findings[applied_findings:]:
+        for filed in decisions.findings[drained_findings:]:
             key = finding_dedup_key(filed)
             if key in seen_keys:
                 log("finding", f"Duplicate (same substep) skipped: {filed.title}")
@@ -790,6 +794,7 @@ async def run_verification_phase(
                 log("finding", f"Write failed for {_short(filed.title, 80)!r}: {exc}")
                 # No file on disk — its candidates must stay pending.
                 continue
+            decisions.applied_findings.append(filed)
             log("finding", f"Written: {path}")
             resolved = list(filed.supersedes_candidate_ids)
             if not resolved:
@@ -807,9 +812,9 @@ async def run_verification_phase(
                 resolved = auto
             for cid in resolved:
                 candidates.mark(cid, "verified")
-        applied_findings = len(decisions.findings)
+        drained_findings = len(decisions.findings)
 
-        for dm in decisions.dismissals[applied_dismissals:]:
+        for dm in decisions.dismissals[drained_dismissals:]:
             existing = candidates.get(dm.candidate_id)
             if existing is None:
                 log("finding",
@@ -821,12 +826,13 @@ async def run_verification_phase(
                 # dismisses the same candidate in one substep burst.
                 continue
             if candidates.mark(dm.candidate_id, "dismissed"):
+                decisions.applied_dismissals.append(dm)
                 log("finding",
                     f"Candidate {dm.candidate_id} dismissed: "
                     f"{_short(dm.reason, 80)}")
-        applied_dismissals = len(decisions.dismissals)
+        drained_dismissals = len(decisions.dismissals)
 
-        for mg in decisions.merges[processed_merges:]:
+        for mg in decisions.merges[drained_merges:]:
             try:
                 path = finding_writer.merge(
                     mg.finding_id,
@@ -843,12 +849,12 @@ async def run_verification_phase(
                 continue
             log("finding",
                 f"Merged into {mg.finding_id}: {_short(mg.rationale, 80)} → {path}")
-            successful_merges.append(mg)
+            decisions.applied_merges.append(mg)
             for cid in mg.supersedes_candidate_ids:
                 if candidates.mark(cid, "verified"):
                     log("finding",
                         f"Candidate {cid} marked verified via merge into {mg.finding_id}.")
-        processed_merges = len(decisions.merges)
+        drained_merges = len(decisions.merges)
 
     idle_streak = 0
     substep = 1
@@ -866,9 +872,9 @@ async def run_verification_phase(
         if substep > 1:
             user_content = _build_verifier_continue_prompt(
                 pending=pending,
-                filed_this_phase=decisions.findings[:applied_findings],
-                merged_this_phase=successful_merges,
-                dismissed_this_phase=decisions.dismissals[:applied_dismissals],
+                filed_this_phase=decisions.applied_findings,
+                merged_this_phase=decisions.applied_merges,
+                dismissed_this_phase=decisions.applied_dismissals,
                 substep=substep,
                 max_substeps=VERIFICATION_MAX_SUBSTEPS,
             )
@@ -940,8 +946,9 @@ async def run_verification_phase(
 
     summary = (
         decisions.verification_done_summary
-        or f"Verification phase ended with {applied_findings} filed, "
-           f"{len(successful_merges)} merged, {applied_dismissals} dismissed, "
+        or f"Verification phase ended with {len(decisions.applied_findings)} filed, "
+           f"{len(decisions.applied_merges)} merged, "
+           f"{len(decisions.applied_dismissals)} dismissed, "
            f"{len(candidates.pending())} still pending."
     )
     return managed, phase_cost, summary
@@ -1583,7 +1590,9 @@ async def run(config: Config) -> None:
                 # 6) Direction phase
                 stall_warnings = _format_stall_warnings(workers)
                 follow_up_hints = _format_follow_up_hints(
-                    decisions.findings, decisions.merges, decisions.dismissals,
+                    decisions.applied_findings,
+                    decisions.applied_merges,
+                    decisions.applied_dismissals,
                 )
                 director_managed, d_cost = await run_direction_phase(
                     director_managed, director_options, decisions, workers, worker_runs,
