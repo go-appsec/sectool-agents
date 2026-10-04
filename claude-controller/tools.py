@@ -608,10 +608,22 @@ def extract_flow_ids(*sources: Any) -> list[str]:
 
 
 _HTTP_METHOD_RE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b", re.I)
-_REPRO_KEYWORDS = ("replay", "curl", "request", "send", "POST", "GET")
+# Keywords must appear as whole words. Bare substring checks match inside
+# unrelated tokens ("budget" contains "get").
+_REPRO_KEYWORDS = ("replay", "curl", "request", "send", "post", "get")
+_REPRO_KEYWORD_RE = re.compile(
+    rf"\b(?:{'|'.join(map(re.escape, _REPRO_KEYWORDS))})\b", re.I)
 _MIN_REPRO_HINT_CHARS = 30
 _MIN_EVIDENCE_NOTES_CHARS = 20
 _MIN_SUMMARY_CHARS = 20
+
+
+def _references_flow_id(hint: str, flow_ids: list[str]) -> bool:
+    """True when a reported flow ID appears as a standalone token in hint."""
+    return any(
+        re.search(rf"\b{re.escape(fid)}\b", hint) is not None
+        for fid in flow_ids if fid
+    )
 
 
 def _validate_repro_hint(hint: str, flow_ids: list[str]) -> str | None:
@@ -631,9 +643,9 @@ def _validate_repro_hint(hint: str, flow_ids: list[str]) -> str | None:
             "'Replay flow ab12cd with id=124, expect 403' or "
             "'curl -X POST /api/x with body {…}, observe reflected payload'."
         )
-    has_flow_ref = any(fid and fid in hint for fid in flow_ids)
+    has_flow_ref = _references_flow_id(hint, flow_ids)
     has_method = bool(_HTTP_METHOD_RE.search(hint))
-    has_keyword = any(kw.lower() in hint.lower() for kw in _REPRO_KEYWORDS)
+    has_keyword = bool(_REPRO_KEYWORD_RE.search(hint))
     if not (has_flow_ref or has_method or has_keyword):
         return (
             "reproduction_hint must reference at least one of: a flow_id from "

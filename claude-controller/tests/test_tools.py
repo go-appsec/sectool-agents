@@ -652,6 +652,28 @@ class TestValidateRepoHint(unittest.TestCase):
         err = _validate_repro_hint("curl https://target/x?q=<script> and check the body for echo.", [])
         self.assertIsNone(err)
 
+    def test_keyword_inside_word_rejected(self):
+        """Issue 27: 'budget' must not satisfy the embedded 'get' keyword."""
+        from tools import _validate_repro_hint
+        hint = "Stay within budget while probing this endpoint for data leaks."
+        err = _validate_repro_hint(hint, ["aaaa11"])
+        self.assertIsNotNone(err)
+        self.assertIn("must reference", err)
+
+    def test_flow_id_inside_larger_token_rejected(self):
+        """Issue 27: an id-shaped fragment must not satisfy the flow check."""
+        from tools import _validate_repro_hint
+        hint = "The aaaa1100 response token repeats on every retry attempt now."
+        err = _validate_repro_hint(hint, ["aaaa11"])
+        self.assertIsNotNone(err)
+        self.assertIn("must reference", err)
+
+    def test_flow_id_with_punctuation_accepted(self):
+        from tools import _validate_repro_hint
+        err = _validate_repro_hint(
+            "Resend flow (aaaa11) twice and expect 403 on the second call.", ["aaaa11"])
+        self.assertIsNone(err)
+
 
 if __name__ == "__main__":
     unittest.main()
