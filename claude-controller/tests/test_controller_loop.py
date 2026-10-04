@@ -3109,6 +3109,27 @@ class TestReconPrompt(unittest.TestCase):
         self.assertIn("is your ONLY persistent output channel", regular)
 
 
+class TestWorkerReproHintGuidance(unittest.TestCase):
+    """Issue 21: candidate reproduction hints may (and should) cite proof
+    flow IDs — the verifier can replay those flows live. The session-
+    agnostic 'no flow IDs' rule applies only to filed findings, so the
+    worker prompt must not forbid flow IDs in candidate hints."""
+
+    def _repro_hint_line(self) -> str:
+        from prompts.worker import build_system_prompt
+        prompt = build_system_prompt(1, 1)
+        return next(
+            line for line in prompt.splitlines()
+            if line.lstrip().startswith("- `reproduction_hint`")
+        )
+
+    def test_hints_encourage_flow_ids(self):
+        self.assertIn("flow ID", self._repro_hint_line())
+
+    def test_hints_do_not_forbid_flow_ids(self):
+        self.assertNotIn("no flow IDs", self._repro_hint_line())
+
+
 class TestSynthesizeAndTeardownRecon(unittest.TestCase):
     """The post-recon synthesis call captures the surface map and discards
     the worker's transcript before iter 2."""

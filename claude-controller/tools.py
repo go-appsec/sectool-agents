@@ -604,10 +604,11 @@ def build_worker_mcp_server(candidates: CandidatePool, worker_id: int) -> Any:
             "Include proof flow IDs from your testing (replay_send, request_send, "
             "or proxy_poll). Do NOT write a full finding document — the "
             "orchestrator will reproduce the issue and file the formal finding. "
-            "reproduction_hint MUST be actionable: reference a flow_id, an "
-            "HTTP method, or a curl/replay command. The verifier does not "
-            "see your turn-by-turn run, so vague hints will be rejected. "
-            "Returns a candidate_id confirmation."
+            "reproduction_hint MUST be actionable: ideally cite one of the "
+            "report's flow_ids so the verifier can replay it directly, or at "
+            "minimum reference an HTTP method or a curl/replay command. The "
+            "verifier does not see your turn-by-turn run, so vague hints will "
+            "be rejected. Returns a candidate_id confirmation."
         ),
         {
             "type": "object",
@@ -635,8 +636,9 @@ def build_worker_mcp_server(candidates: CandidatePool, worker_id: int) -> Any:
                 "reproduction_hint": {
                     "type": "string",
                     "description": (
-                        "Step-by-step instruction the verifier will run. Must "
-                        "reference a flow_id, HTTP method, or curl/replay "
+                        "Step-by-step instruction the verifier will run. Ideally "
+                        "cite a flow_id from this report so the verifier can replay "
+                        "it directly, or reference an HTTP method or curl/replay "
                         "command. Example: 'Replay flow ab12cd with id=124; "
                         "expect 403, observe 200 + member roster.'"
                     ),

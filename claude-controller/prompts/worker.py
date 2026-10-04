@@ -25,7 +25,7 @@ Required fields:
 - `flow_ids` — at least one (from `proxy_poll` / `replay_send` / `request_send` / `crawl_poll`).
 - `endpoint` — method + path.
 - `evidence_notes` — why it's exploitable: response behavior, status codes, headers, reflected content.
-- `reproduction_hint` — how the verifier re-runs it: endpoint, method, payload, expected behavior — no flow IDs.
+- `reproduction_hint` — how the verifier re-runs it: endpoint, method, payload, expected behavior. Cite one of your proof flow IDs so the verifier can replay it directly.
 
 A separate verifier reproduces and files the formal finding; your deliverable is clear, verifiable candidates with proof flow IDs.
 
