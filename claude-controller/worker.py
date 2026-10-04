@@ -49,6 +49,12 @@ from bash_tool import BASH_BUILTIN_DENIED, BASH_TOOL_ALLOWED
 # Managed SDK client — isolates the SDK's internal anyio cancel scope
 # ---------------------------------------------------------------------------
 
+# Runner-task wait bounds (seconds). The runner's entry and exit paths are
+# SDK transport setup/teardown, which can hang on a stalled CLI process;
+# every wait is bounded so the event loop never blocks indefinitely.
+RUNNER_CONNECT_TIMEOUT = 60.0
+RUNNER_CLOSE_TIMEOUT = 30.0
+
 
 class ManagedSDKClient:
     """Owns a ClaudeSDKClient's lifecycle in a dedicated asyncio task.
@@ -86,17 +92,22 @@ class ManagedSDKClient:
         return self._client
 
     async def connect(self) -> ClaudeSDKClient:
-        """Start the runner task and return the entered underlying client."""
+        """Start the runner task and return the entered underlying client.
+
+        Raises TimeoutError when the SDK subprocess doesn't come up within
+        RUNNER_CONNECT_TIMEOUT — the runner is drained so nothing leaks.
+        """
         self._runner = asyncio.create_task(self._run())
         try:
-            await self._ready.wait()
+            await asyncio.wait_for(self._ready.wait(), timeout=RUNNER_CONNECT_TIMEOUT)
         except BaseException:
-            # Caller cancelled us mid-connect; make sure the runner doesn't leak.
+            # Caller cancelled us or connect timed out; make sure the runner
+            # doesn't leak.
             self._stop.set()
-            if self._runner is not None and not self._runner.done():
-                self._runner.cancel()
-                await asyncio.wait([self._runner])
+            runner = self._runner
             self._runner = None
+            if runner is not None:
+                await _await_runner(runner, RUNNER_CLOSE_TIMEOUT, cancel_first=True)
             raise
         if self._enter_exc is not None:
             # Propagate a failed __aenter__ so the caller can handle it.
@@ -106,11 +117,13 @@ class ManagedSDKClient:
         return self._client
 
     async def aclose(self) -> None:
-        """Signal the runner to exit and await its completion.
+        """Signal the runner to exit and await its completion, bounded.
 
-        Uses `asyncio.wait` rather than `await runner` so a CancelledError
-        raised inside the runner is captured as a task result instead of
-        propagating to the caller.
+        Uses `asyncio.wait` rather than awaiting the runner directly so a
+        CancelledError raised inside the runner is captured as a task result
+        instead of propagating. Past RUNNER_CLOSE_TIMEOUT the runner is
+        cancelled; if teardown still doesn't finish it's abandoned with a log
+        and this method proceeds rather than hanging the event loop.
         """
         if self._runner is None:
             self._client = None
@@ -118,8 +131,7 @@ class ManagedSDKClient:
         self._stop.set()
         runner = self._runner
         self._runner = None
-        if not runner.done():
-            await asyncio.wait([runner])
+        await _await_runner(runner, RUNNER_CLOSE_TIMEOUT)
         self._client = None
 
     async def _run(self) -> None:
@@ -135,6 +147,31 @@ class ManagedSDKClient:
             if not isinstance(exc, asyncio.CancelledError):
                 self._enter_exc = exc
             self._ready.set()
+
+
+async def _await_runner(
+    runner: asyncio.Task, timeout: float, *, cancel_first: bool = False,
+) -> bool:
+    """Await a runner task up to `timeout`, cancelling it when it overruns.
+
+    Uses `asyncio.wait` so a CancelledError raised inside the runner is
+    captured as a task result instead of propagating. `cancel_first` skips
+    the stop-signal grace period — used when aborting an SDK entry that never
+    completed and only cancellation unwinds. Returns False when the runner had
+    to be abandoned (still pending past cancel + timeout); callers proceed
+    rather than hanging the event loop.
+    """
+    if not runner.done() and not cancel_first:
+        await asyncio.wait([runner], timeout=timeout)
+    if runner.done():
+        return True
+    log("sdk", f"Runner task hung; cancelling (deadline {timeout:.0f}s).")
+    runner.cancel()
+    await asyncio.wait([runner], timeout=timeout)
+    if not runner.done():
+        log("sdk", "Runner task still hung after cancel; abandoning it.")
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -354,21 +391,29 @@ async def attempt_worker_recovery(
         return False
     await teardown_worker(state)
     for attempt in range(1, 3):
+        managed: ManagedSDKClient | None = None
         try:
             await asyncio.sleep(2)
             managed = ManagedSDKClient(options=state.options)
             client = await managed.connect()
-            state.managed = managed
-            state.client = client
-            state.alive = True
-            log(f"worker {state.worker_id}", f"Recovery succeeded (attempt {attempt})")
-            # Re-check at the billing gate: Ctrl-C can land mid-recovery.
+            # Resubmit before committing state so a failed resubmission can
+            # never strand the freshly connected client. Re-check at the
+            # billing gate too: Ctrl-C can land mid-recovery.
             shutting_down = shutdown_event is not None and shutdown_event.is_set()
             if state.last_instruction and not shutting_down:
                 await submit_query(client, state.last_instruction)
-            return True
         except Exception as exc:
             log(f"worker {state.worker_id}", f"Recovery attempt {attempt} failed: {exc}")
+            # The client was never committed to `state`; close it here or its
+            # runner task and subprocess leak for the rest of the run.
+            if managed is not None:
+                await managed.aclose()
+            continue
+        state.managed = managed
+        state.client = client
+        state.alive = True
+        log(f"worker {state.worker_id}", f"Recovery succeeded (attempt {attempt})")
+        return True
     state.alive = False
     return False
 

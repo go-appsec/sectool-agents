@@ -1103,6 +1103,7 @@ async def apply_plan_diff(
                 continue
             num_workers_total = max(1, total_after)
             log(f"worker {p.worker_id}", f"Spawning: {snippet}")
+            new_w = None
             try:
                 new_w = await create_worker(
                     p.worker_id, num_workers_total, candidates, mcp_url, base_options,
@@ -1124,11 +1125,16 @@ async def apply_plan_diff(
                 else:
                     kickoff = p.assignment
                 await submit_query(new_w.client, kickoff)
+            except Exception as exc:
+                log(f"worker {p.worker_id}", f"Spawn failed: {exc}")
+                if new_w is not None:
+                    # Created but uncommitted (never added to `workers`); tear
+                    # it down here or its runner task and subprocess leak.
+                    await teardown_worker(new_w)
+            else:
                 workers.append(new_w)
                 existing_ids.add(p.worker_id)
                 log(f"worker {p.worker_id}", "Connected and assigned.")
-            except Exception as exc:
-                log(f"worker {p.worker_id}", f"Spawn failed: {exc}")
 
 
 async def apply_decision(
@@ -1626,9 +1632,11 @@ async def run(config: Config) -> None:
 
         finally:
             alive_count = sum(1 for w in workers if w.alive)
+            # Teardown is idempotent — run it on dead entries too so a worker
+            # that died mid-iteration can never exit the run holding an open
+            # subprocess.
             for w in workers:
-                if w.alive:
-                    await teardown_worker(w)
+                await teardown_worker(w)
             for managed in (verifier_managed, director_managed):
                 if managed is not None:
                     await managed.aclose()

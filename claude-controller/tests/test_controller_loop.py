@@ -2003,6 +2003,195 @@ class TestManagedSDKClientScopeIsolation(unittest.TestCase):
             worker_mod.ClaudeSDKClient = orig
 
 
+class TestManagedSDKClientBoundedWaits(unittest.TestCase):
+    """Runner-task waits are bounded: a hung CLI process must stall connect
+    or aclose for at most the configured deadline, never the event loop."""
+
+    def test_connect_timeout_drains_runner(self):
+        orig = worker_mod.ClaudeSDKClient
+        orig_t = worker_mod.RUNNER_CONNECT_TIMEOUT
+
+        class _HangingEnterClient:
+            # Simulates a CLI process that spawns but never completes its
+            # startup handshake.
+            def __init__(self, options):
+                pass
+
+            async def __aenter__(self):
+                await asyncio.Event().wait()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        worker_mod.ClaudeSDKClient = _HangingEnterClient  # type: ignore[assignment]
+        worker_mod.RUNNER_CONNECT_TIMEOUT = 0.05
+        self.addCleanup(setattr, worker_mod, "ClaudeSDKClient", orig)
+        self.addCleanup(setattr, worker_mod, "RUNNER_CONNECT_TIMEOUT", orig_t)
+
+        async def body():
+            m = controller.ManagedSDKClient(options=object())
+            with self.assertRaises(asyncio.TimeoutError):
+                await m.connect()
+            # The runner task was drained — nothing left pending.
+            return [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+        self.assertEqual(_run(body()), [])
+
+    def test_aclose_cancels_hung_runner(self):
+        orig = worker_mod.ClaudeSDKClient
+        orig_t = worker_mod.RUNNER_CLOSE_TIMEOUT
+
+        class _HungExitClient:
+            def __init__(self, options):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                # Simulates SDK transport teardown stuck on a stalled CLI.
+                await asyncio.Event().wait()
+
+        worker_mod.ClaudeSDKClient = _HungExitClient  # type: ignore[assignment]
+        worker_mod.RUNNER_CLOSE_TIMEOUT = 0.05
+        self.addCleanup(setattr, worker_mod, "ClaudeSDKClient", orig)
+        self.addCleanup(setattr, worker_mod, "RUNNER_CLOSE_TIMEOUT", orig_t)
+
+        async def body():
+            m = controller.ManagedSDKClient(options=object())
+            await m.connect()
+            # Pre-fix this awaited the hung runner forever.
+            await asyncio.wait_for(m.aclose(), timeout=5)
+            return m.client is None
+
+        self.assertTrue(_run(body()))
+
+
+class TestWorkerRecoveryClientLeak(unittest.TestCase):
+    """Recovery must never strand a freshly connected client on a failure
+    path: the resubmission runs before state commit and every uncommitted
+    client is closed exactly once."""
+
+    def _install_fakes(self, fail_first_submit=False, fail_all_submits=False):
+        built = []
+        queries = []
+
+        class _FakeManaged:
+            def __init__(self, options):
+                self.client = _StubClient()
+                self.aclosed = False
+                built.append(self)
+
+            async def connect(self):
+                return self.client
+
+            async def aclose(self):
+                self.aclosed = True
+
+        submit_calls = {"n": 0}
+
+        async def fake_submit(client, prompt):
+            submit_calls["n"] += 1
+            if fail_all_submits or (fail_first_submit and submit_calls["n"] == 1):
+                raise RuntimeError("resubmit boom")
+            queries.append(prompt)
+
+        async def instant_sleep(_delay):
+            return None
+
+        orig_managed = worker_mod.ManagedSDKClient
+        orig_submit = worker_mod.submit_query
+        orig_sleep = asyncio.sleep
+        worker_mod.ManagedSDKClient = _FakeManaged
+        worker_mod.submit_query = fake_submit
+        asyncio.sleep = instant_sleep  # skip recovery's reconnect backoff
+        self.addCleanup(setattr, worker_mod, "ManagedSDKClient", orig_managed)
+        self.addCleanup(setattr, worker_mod, "submit_query", orig_submit)
+        self.addCleanup(setattr, asyncio, "sleep", orig_sleep)
+        return built, queries
+
+    def _worker(self) -> controller.WorkerState:
+        w = controller.WorkerState(worker_id=3, options=None)
+        w.last_instruction = "continue probing"
+        return w
+
+    def test_resubmit_failure_closes_uncommitted_client(self):
+        built, queries = self._install_fakes(fail_first_submit=True)
+        w = self._worker()
+
+        result = _run(worker_mod.attempt_worker_recovery(w))
+
+        # Attempt 2 rebuilt and committed a fresh client.
+        self.assertTrue(result)
+        self.assertEqual(len(built), 2)
+        self.assertTrue(built[0].aclosed)
+        self.assertFalse(built[1].aclosed)
+        self.assertIs(w.managed, built[1])
+        self.assertEqual(queries, ["continue probing"])
+
+    def test_final_failure_leaves_no_held_client(self):
+        built, queries = self._install_fakes(fail_all_submits=True)
+        w = self._worker()
+
+        result = _run(worker_mod.attempt_worker_recovery(w))
+
+        self.assertFalse(result)
+        self.assertFalse(w.alive)
+        # No connected client survives the failed recovery.
+        self.assertIsNone(w.client)
+        self.assertIsNone(w.managed)
+        self.assertTrue(all(m.aclosed for m in built))
+
+
+class TestApplyPlanDiffSpawnFailureTeardown(unittest.TestCase):
+    """A worker whose kickoff submission fails is never added to the roster;
+    its client must be torn down on the spot or the subprocess leaks."""
+
+    def test_kickoff_failure_tears_down_created_worker(self):
+        from tools import PlanEntry
+
+        class _Managed:
+            def __init__(self):
+                self.aclosed = False
+
+            async def aclose(self):
+                self.aclosed = True
+
+        created: list[controller.WorkerState] = []
+        managed_of: dict[int, Any] = {}
+
+        async def fake_create_worker(*args, **kwargs):
+            w = controller.WorkerState(worker_id=args[0], options=None)
+            w.client = object()
+            w.managed = _Managed()
+            w.alive = True
+            created.append(w)
+            managed_of[w.worker_id] = w.managed
+            return w
+
+        async def failing_submit(client, prompt):
+            raise RuntimeError("kickoff boom")
+
+        orig_create = controller.create_worker
+        orig_submit = controller.submit_query
+        controller.create_worker = fake_create_worker
+        controller.submit_query = failing_submit
+        try:
+            plan = [PlanEntry(worker_id=2, assignment="probe the surface")]
+            workers: list[controller.WorkerState] = []
+            _run(controller.apply_plan_diff(
+                plan, workers, CandidatePool(), "http://x", None, None,
+                max_workers=4,
+            ))
+        finally:
+            controller.create_worker = orig_create
+            controller.submit_query = orig_submit
+
+        self.assertEqual(workers, [])
+        self.assertEqual(len(created), 1)
+        self.assertTrue(managed_of[2].aclosed)
+
+
 class TestVerifierOptionsBashGate(unittest.TestCase):
     """The verifier's tool surface must honor --allow-bash exactly like the
     worker/recon surfaces (it was previously granted unconditionally)."""
