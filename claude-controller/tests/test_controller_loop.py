@@ -900,7 +900,7 @@ class TestVerificationPhase(unittest.TestCase):
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
         self.assertEqual(summary, "one filed")
-        self.assertEqual(fw.count, 1)
+        self.assertEqual(fw.run_count, 1)
         self.assertEqual(pool.get(cid).status, "verified")
 
     def test_ends_when_no_pending_left(self):
@@ -951,7 +951,7 @@ class TestVerificationPhase(unittest.TestCase):
                 
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
-        self.assertEqual(fw.count, 1)
+        self.assertEqual(fw.run_count, 1)
         self.assertEqual(pool.get(cid).status, "verified")
 
     def test_file_finding_without_supersedes_leaves_unrelated_candidate_pending(self):
@@ -1060,7 +1060,7 @@ class TestVerificationPhase(unittest.TestCase):
                 
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
-        self.assertEqual(fw.count, 1)
+        self.assertEqual(fw.run_count, 1)
         self.assertEqual(pool.get(c_first).status, "verified")
         self.assertEqual(pool.get(c_second).status, "verified")
 
@@ -1107,7 +1107,7 @@ class TestVerificationPhase(unittest.TestCase):
         self.assertEqual(len(client.queries), 3)  # initial compose + one nudge per idle drain
         for q in client.queries[1:]:
             self.assertIn("no tool calls", q)
-        self.assertEqual(fw.count, 1)
+        self.assertEqual(fw.run_count, 1)
         self.assertEqual(pool.get(cid).status, "verified")
         self.assertEqual(summary, "filed after idle")
 
@@ -1720,7 +1720,7 @@ class TestFindingLifecycle(unittest.TestCase):
             for dm in decisions.dismissals:
                 pool.mark(dm.candidate_id, "dismissed")
 
-        self.assertEqual(fw.count, 1)
+        self.assertEqual(fw.run_count, 1)
         self.assertEqual(pool.get(c1).status, "verified")
         self.assertEqual(pool.get(c2).status, "dismissed")
         self.assertEqual(pool.pending(), [])
@@ -1769,7 +1769,7 @@ class TestFindingLifecycle(unittest.TestCase):
                 for cid in mg.supersedes_candidate_ids:
                     pool.mark(cid, "verified")
 
-        self.assertEqual(fw.count, 1)
+        self.assertEqual(fw.run_count, 1)
         self.assertEqual(pool.get(c1).status, "verified")
         self.assertEqual(pool.get(c2).status, "verified")
         self.assertEqual(pool.pending(), [])
@@ -1878,7 +1878,7 @@ class TestVerifyDedup(unittest.TestCase):
                 
                 iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
             ))
-            self.assertEqual(fw.count, 1)
+            self.assertEqual(fw.run_count, 1)
 
 
 class TestVerifyFallback(unittest.TestCase):

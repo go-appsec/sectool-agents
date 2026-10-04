@@ -12,12 +12,40 @@ from tools import FindingCandidate, FindingFiled
 
 _ADDENDUM_HEADING = "## Additional affected surfaces"
 
+_FINDING_SEQ_RE = re.compile(r"^finding-(\d+)-.*\.md$")
+_UNVERIFIED_SEQ_RE = re.compile(r"^unverified-(\d+)-.*\.md$")
+
 
 def slugify(text: str) -> str:
     text = text.lower().strip()
     text = re.sub(r"[^\w\s-]", "", text)
     text = re.sub(r"[-\s]+", "-", text)
     return text.strip("-")
+
+
+def _max_sequence(findings_dir: str, pattern: re.Pattern[str]) -> int:
+    """Return the highest sequence number among matching filenames in dir.
+
+    Returns 0 when the directory does not exist yet. Other read failures
+    propagate: writing on top of an unknown sequence could truncate files.
+    """
+    try:
+        names = os.listdir(findings_dir)
+    except FileNotFoundError:
+        return 0
+    highest = 0
+    for name in names:
+        m = pattern.match(name)
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return highest
+
+
+def _file_slug(title: str) -> str:
+    slug = slugify(title) or "untitled"
+    if len(slug) > 60:
+        slug = slug[:60].rstrip("-")
+    return slug
 
 
 def _canonical_endpoint(endpoint: str) -> str:
@@ -140,11 +168,21 @@ _UNVERIFIED_TEMPLATE = """\
 
 
 class FindingWriter:
-    """Persists verified findings from `FindingFiled` records."""
+    """Persists verified findings from `FindingFiled` records.
+
+    Numbering continues from the highest on-disk sequence so rerunning into
+    an existing directory appends new files instead of overwriting prior ones.
+    """
 
     def __init__(self, findings_dir: str) -> None:
         self.findings_dir = findings_dir
-        self.count = 0
+        # Highest finding-NN / unverified-NN sequences already on disk.
+        # New writes continue from these, mirroring secagent's FindingWriter.
+        self.count = _max_sequence(findings_dir, _FINDING_SEQ_RE)
+        self._unverified_count = _max_sequence(findings_dir, _UNVERIFIED_SEQ_RE)
+        # Filed this run only. Prior-run files stay on disk unindexed, so
+        # reporting and the premature-done guard track just this run.
+        self.run_count = 0
         self.paths: list[str] = []
         self._index: list[dict] = []
 
@@ -213,15 +251,19 @@ class FindingWriter:
             lines.append(f"- {entry['title']} — {ep}")
         return "Findings filed so far — do not re-file:\n" + "\n".join(lines)
 
+    def _allocate_path(self, prefix: str, seq: int, slug: str) -> tuple[str, int]:
+        """Return the first unused `prefix-NN-slug.md` path at or after seq,
+        along with its sequence number."""
+        path = os.path.join(self.findings_dir, f"{prefix}-{seq:02d}-{slug}.md")
+        while os.path.exists(path):
+            seq += 1
+            path = os.path.join(self.findings_dir, f"{prefix}-{seq:02d}-{slug}.md")
+        return path, seq
+
     def write(self, filed: FindingFiled) -> str:
         os.makedirs(self.findings_dir, exist_ok=True)
-        self.count += 1
-
-        slug = slugify(filed.title) or "untitled"
-        if len(slug) > 60:
-            slug = slug[:60].rstrip("-")
-        filename = f"finding-{self.count:02d}-{slug}.md"
-        filepath = os.path.join(self.findings_dir, filename)
+        slug = _file_slug(filed.title)
+        filepath, seq = self._allocate_path("finding", self.count + 1, slug)
 
         body = _MARKDOWN_TEMPLATE.format(
             title=filed.title,
@@ -233,9 +275,12 @@ class FindingWriter:
             impact=filed.impact or "(none)",
             verification_notes=filed.verification_notes or "(none)",
         )
-        with open(filepath, "w") as f:
+        # "x" refuses to truncate should a file appear after allocation.
+        with open(filepath, "x") as f:
             f.write(body)
 
+        self.count = seq
+        self.run_count += 1
         self.paths.append(filepath)
         self._index.append({
             "finding_id": f"F{self.count}",
@@ -256,11 +301,8 @@ class FindingWriter:
         mistake it for a confirmed finding.
         """
         os.makedirs(self.findings_dir, exist_ok=True)
-        slug = slugify(candidate.title) or "untitled"
-        if len(slug) > 60:
-            slug = slug[:60].rstrip("-")
-        filename = f"unverified-{candidate.candidate_id}-{slug}.md"
-        filepath = os.path.join(self.findings_dir, filename)
+        slug = _file_slug(candidate.title)
+        filepath, seq = self._allocate_path("unverified", self._unverified_count + 1, slug)
 
         body = _UNVERIFIED_TEMPLATE.format(
             title=candidate.title or "(no title)",
@@ -273,9 +315,10 @@ class FindingWriter:
             evidence_notes=candidate.evidence_notes or "(none)",
             reproduction_hint=candidate.reproduction_hint or "(none)",
         )
-        with open(filepath, "w") as f:
+        with open(filepath, "x") as f:
             f.write(body)
 
+        self._unverified_count = seq
         self.paths.append(filepath)
         return filepath
 

@@ -189,6 +189,8 @@ findings/
 └── ...
 ```
 
+Numbering continues from the highest sequence already on disk, so rerunning into the same `--findings-dir` appends new files instead of overwriting earlier findings.
+
 Each file has Title, Severity, Affected Endpoint, Description, Reproduction Steps, Evidence, Impact, and a **Verification** section in which the orchestrator records the flow IDs and tool calls it used to confirm the issue.
 
 ## Safety Bounds
@@ -215,7 +217,7 @@ A `rate_limit` response from Claude auto-engages the same gate; the status line 
 The controller installs a triple-Ctrl-C handler so an in-flight run can be wound down without losing already-collected work:
 
 1. **First Ctrl-C** — cancels in-flight worker tasks and skips the next direction phase, but still runs final verification on whatever candidates were already filed. Verified findings are written to `--findings-dir` as normal.
-2. **Second Ctrl-C** — aborts the current verification (or direction) substep mid-flight and dumps every still-pending candidate to disk as an `unverified-<candidate_id>-<slug>.md` file with a clear `UNVERIFIED` header. Useful when verification is taking too long but you don't want to lose the worker's evidence.
+2. **Second Ctrl-C** — aborts the current verification (or direction) substep mid-flight and dumps every still-pending candidate to disk as an `unverified-NN-<slug>.md` file with a clear `UNVERIFIED` header. Useful when verification is taking too long but you don't want to lose the worker's evidence.
 3. **Third Ctrl-C** — force-exits via `os._exit(130)`. No teardown, no further writes.
 
 Still-pending candidates are also dumped to disk (same `unverified-` format) on every normal exit — director `done`, `--max-iterations` exhaustion, or the cost ceiling — so worker evidence is never silently dropped regardless of how the run ends.

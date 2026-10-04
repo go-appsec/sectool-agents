@@ -247,6 +247,65 @@ class TestFindingWriterSummaryForWorker(unittest.TestCase):
             self.assertNotIn("high", out)
 
 
+class TestFindingWriterResume(unittest.TestCase):
+    """Reruns into an existing dir continue numbering without truncating."""
+
+    def _seed(self, td: str, name: str, body: str = "prior\n") -> None:
+        with open(os.path.join(td, name), "w") as f:
+            f.write(body)
+
+    def test_count_seeded_from_disk(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._seed(td, "finding-01-x.md")
+            self._seed(td, "finding-03-y.md")
+            w = FindingWriter(td)
+            self.assertEqual(w.count, 3)
+
+    def test_rerun_continues_numbering(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._seed(td, "finding-01-reflected-xss.md", "# prior\n")
+            w = FindingWriter(td)
+            path = w.write(_make("Reflected XSS"))
+            self.assertEqual(os.path.basename(path), "finding-02-reflected-xss.md")
+            with open(os.path.join(td, "finding-01-reflected-xss.md")) as f:
+                self.assertEqual(f.read(), "# prior\n")
+
+    def test_write_bumps_past_new_collision(self):
+        """Files created after construction must not be truncated either."""
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            self._seed(td, "finding-01-same-slug.md")
+            path = w.write(_make("Same Slug"))
+            self.assertEqual(os.path.basename(path), "finding-02-same-slug.md")
+            with open(os.path.join(td, "finding-01-same-slug.md")) as f:
+                self.assertEqual(f.read(), "prior\n")
+
+    def test_run_count_tracks_this_run_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._seed(td, "finding-05-prior.md")
+            w = FindingWriter(td)
+            w.write(_make("New finding"))
+            self.assertEqual(w.count, 6)
+            self.assertEqual(w.run_count, 1)
+            self.assertIn("F6. [high] New finding", w.summary_for_orchestrator())
+
+    def test_unverified_rerun_continues_numbering(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._seed(td, "unverified-01-old.md", "# prior\n")
+            w = FindingWriter(td)
+            path = w.write_unverified_candidate(_candidate("c001", "Old dump", "/x"))
+            self.assertEqual(os.path.basename(path), "unverified-02-old-dump.md")
+            with open(os.path.join(td, "unverified-01-old.md")) as f:
+                self.assertEqual(f.read(), "# prior\n")
+
+    def test_unverified_bumps_past_new_collision(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            self._seed(td, "unverified-01-old-dump.md")
+            path = w.write_unverified_candidate(_candidate("c001", "Old dump", "/x"))
+            self.assertEqual(os.path.basename(path), "unverified-02-old-dump.md")
+
+
 class TestWriteUnverifiedCandidate(unittest.TestCase):
     """write_unverified_candidate writes a clearly-marked UNVERIFIED file."""
 
@@ -276,15 +335,18 @@ class TestWriteUnverifiedCandidate(unittest.TestCase):
             self.assertIn("worker", body.lower())
             self.assertIn("fl0w01", body)
             self.assertIn("Replay flow fl0w01", body)
-            # Filed-finding count must NOT advance — unverified is not a finding.
-            self.assertEqual(fw.count, 0)
+            # Unverified writes never advance the filed-finding counter.
+            self.assertEqual(fw.run_count, 0)
 
-    def test_filename_includes_candidate_id(self):
+    def test_sequential_filenames(self):
         with tempfile.TemporaryDirectory() as td:
             fw = FindingWriter(td)
-            path = fw.write_unverified_candidate(self._candidate())
-            self.assertIn("unverified", os.path.basename(path))
-            self.assertIn("c042", os.path.basename(path))
+            path1 = fw.write_unverified_candidate(self._candidate())
+            path2 = fw.write_unverified_candidate(self._candidate())
+            self.assertEqual(os.path.basename(path1),
+                             "unverified-01-possible-idor-on-apiorgsid.md")
+            self.assertEqual(os.path.basename(path2),
+                             "unverified-02-possible-idor-on-apiorgsid.md")
 
 
 if __name__ == "__main__":

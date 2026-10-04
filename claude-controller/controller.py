@@ -761,7 +761,7 @@ async def run_verification_phase(
                 iteration=iteration, max_iter=max_iter,
                 total_cost=total_cost + phase_cost,
                 max_cost=max_cost,
-                findings_count=finding_writer.count,
+                findings_count=finding_writer.run_count,
             )
 
         decisions_before = (
@@ -1440,7 +1440,7 @@ async def run(config: Config) -> None:
                     candidates.pending(),
                     v_summary, finding_writer.summary_for_orchestrator(),
                     iteration, config.max_iterations, total_cost, config.max_cost,
-                    finding_writer.count, stall_warnings, follow_up_hints, config.verbose,
+                    finding_writer.run_count, stall_warnings, follow_up_hints, config.verbose,
                     config.max_workers,
                     config.prompt,
                     recon_summary=recon_summary,
@@ -1470,7 +1470,7 @@ async def run(config: Config) -> None:
                 # 7) Done? — guard against premature termination on weak models
                 # that conflate `done` with `direction_done`.
                 if decisions.done_summary is not None:
-                    if _is_premature_done(iteration, finding_writer.count):
+                    if _is_premature_done(iteration, finding_writer.run_count):
                         log(f"iter {iteration}",
                             f"done ignored: premature "
                             f"(iter {iteration} < {MIN_ITERATIONS_FOR_DONE}, "
@@ -1563,7 +1563,7 @@ async def run(config: Config) -> None:
         print()
         log("summary",
             f"Workers: {alive_count}/{len(workers)} | Iterations: {iteration} | "
-            f"Findings: {finding_writer.count} | Cost: ${total_cost:.2f}")
+            f"Findings: {finding_writer.run_count} | Cost: ${total_cost:.2f}")
         if finding_writer.paths:
             log("summary", "Finding files:")
             for path in finding_writer.paths:
