@@ -695,6 +695,10 @@ async def run_verification_phase(
     of consuming the cap. Exits when the verifier calls
     `verification_done`, when no pending candidates remain, or at the cap.
 
+    Decisions accepted by tool handlers are applied exactly once regardless
+    of how a substep ends — success, error, or abort (drain-then-exit); an
+    aborted or errored final substep never discards already-accepted work.
+
     Resets the verifier client before iteration ≥ 2 to drop the prior
     iteration's context. This is a cost-vs-context trade-off: carrying
     the prior iteration's transcript would help the verifier recognise
@@ -725,66 +729,13 @@ async def run_verification_phase(
     processed_merges = 0
     successful_merges: list[FindingMerged] = []
 
-    idle_streak = 0
-    substep = 1
-    while substep <= VERIFICATION_MAX_SUBSTEPS:
-        if abort_event is not None and abort_event.is_set():
-            log("verify",
-                f"Aborted by user at substep {substep}; "
-                f"{len(candidates.pending())} candidate(s) still pending.")
-            break
+    def _apply_new_decisions() -> None:
+        """Persist queue entries accepted since the previous call.
 
-        pending = candidates.pending()
-        if not pending:
-            break
-
-        if substep > 1:
-            user_content = _build_verifier_continue_prompt(
-                pending=pending,
-                filed_this_phase=decisions.findings[:applied_findings],
-                merged_this_phase=successful_merges,
-                dismissed_this_phase=decisions.dismissals[:applied_dismissals],
-                substep=substep,
-                max_substeps=VERIFICATION_MAX_SUBSTEPS,
-            )
-            if idle_streak > 0:
-                user_content += "\n\n" + _build_verifier_idle_nudge(
-                    VERIFICATION_IDLE_RETRIES - idle_streak)
-        elif idle_streak > 0:
-            # initial compose is already installed; nudge only
-            user_content = _build_verifier_idle_nudge(
-                VERIFICATION_IDLE_RETRIES - idle_streak)
-        else:
-            user_content = _build_verifier_prompt(
-                pending=pending,
-                findings_summary=finding_writer.summary_for_verifier(),
-                iteration=iteration, max_iter=max_iter,
-                total_cost=total_cost + phase_cost,
-                max_cost=max_cost,
-                findings_count=finding_writer.run_count,
-            )
-
-        decisions_before = (
-            len(decisions.findings) + len(decisions.dismissals) + len(decisions.merges))
-
-        result, aborted = await _race_with_abort(
-            run_phase_substep(
-                managed.client, user_content, PHASE_VERIFICATION, iteration, substep, verbose,
-            ),
-            abort_event,
-        )
-        if aborted:
-            log("verify", f"Substep {substep} aborted by user mid-flight.")
-            break
-        ok, cost, saw_tool = result
-        if not ok:
-            new_managed = await attempt_client_recovery(managed, options, "verify")
-            if new_managed is not None:
-                managed = new_managed
-            log("verify", f"Aborting verification phase at substep {substep}.")
-            break
-        if cost is not None:
-            phase_cost += cost
+        Idempotent via the applied counters, so it can run on every substep
+        exit — including error and abort — without double-writing.
+        """
+        nonlocal applied_findings, applied_dismissals, processed_merges
 
         # Apply new findings this substep produced. `seen_titles` dedups
         # burst `file_finding` calls within one response — cross-finding dedup
@@ -859,6 +810,69 @@ async def run_verification_phase(
                         f"Candidate {cid} marked verified via merge into {mg.finding_id}.")
         processed_merges = len(decisions.merges)
 
+    idle_streak = 0
+    substep = 1
+    while substep <= VERIFICATION_MAX_SUBSTEPS:
+        if abort_event is not None and abort_event.is_set():
+            log("verify",
+                f"Aborted by user at substep {substep}; "
+                f"{len(candidates.pending())} candidate(s) still pending.")
+            break
+
+        pending = candidates.pending()
+        if not pending:
+            break
+
+        if substep > 1:
+            user_content = _build_verifier_continue_prompt(
+                pending=pending,
+                filed_this_phase=decisions.findings[:applied_findings],
+                merged_this_phase=successful_merges,
+                dismissed_this_phase=decisions.dismissals[:applied_dismissals],
+                substep=substep,
+                max_substeps=VERIFICATION_MAX_SUBSTEPS,
+            )
+            if idle_streak > 0:
+                user_content += "\n\n" + _build_verifier_idle_nudge(
+                    VERIFICATION_IDLE_RETRIES - idle_streak)
+        elif idle_streak > 0:
+            # initial compose is already installed; nudge only
+            user_content = _build_verifier_idle_nudge(
+                VERIFICATION_IDLE_RETRIES - idle_streak)
+        else:
+            user_content = _build_verifier_prompt(
+                pending=pending,
+                findings_summary=finding_writer.summary_for_verifier(),
+                iteration=iteration, max_iter=max_iter,
+                total_cost=total_cost + phase_cost,
+                max_cost=max_cost,
+                findings_count=finding_writer.run_count,
+            )
+
+        decisions_before = (
+            len(decisions.findings) + len(decisions.dismissals) + len(decisions.merges))
+
+        result, aborted = await _race_with_abort(
+            run_phase_substep(
+                managed.client, user_content, PHASE_VERIFICATION, iteration, substep, verbose,
+            ),
+            abort_event,
+        )
+        if aborted:
+            log("verify", f"Substep {substep} aborted by user mid-flight.")
+            break
+        ok, cost, saw_tool = result
+        if not ok:
+            new_managed = await attempt_client_recovery(managed, options, "verify")
+            if new_managed is not None:
+                managed = new_managed
+            log("verify", f"Aborting verification phase at substep {substep}.")
+            break
+        if cost is not None:
+            phase_cost += cost
+
+        _apply_new_decisions()
+
         if decisions.verification_done_summary is not None:
             break
 
@@ -879,6 +893,10 @@ async def run_verification_phase(
             log("verify", "Idle drain limit reached; ending verification phase "
                 f"with {len(candidates.pending())} candidate(s) still pending.")
             break
+
+    # Drain-then-exit: persist whatever tool handlers accepted during a final
+    # aborted or errored substep; no-op on other exits.
+    _apply_new_decisions()
 
     summary = (
         decisions.verification_done_summary

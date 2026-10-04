@@ -1265,6 +1265,100 @@ class TestVerificationPhase(unittest.TestCase):
         self.assertEqual(pool.get(c2).status, "pending")
         self.assertIn("1 still pending", summary)
 
+    def test_error_exit_still_applies_decisions(self):
+        """Issue 06: a connection error mid-phase must not discard decisions
+        tool handlers already accepted during the failed substep."""
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="XSS", severity="high", endpoint="/s",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="replayed fl0w01",
+                supersedes_candidate_ids=[cid],
+            ))
+
+        class _HandlersThenErrorClient:
+            """Tool handlers queue decisions, then the stream dies."""
+
+            def __init__(self):
+                self.queries: list[str] = []
+
+            async def query(self, content: str) -> None:
+                self.queries.append(content)
+                action(decisions)
+
+            def receive_response(self):
+                async def gen():
+                    raise RuntimeError("connection reset")
+                return gen()
+
+        async def fake_recovery(managed, options, tag):
+            return managed
+
+        orig = controller.attempt_client_recovery
+        controller.attempt_client_recovery = fake_recovery
+        self.addCleanup(setattr, controller, "attempt_client_recovery", orig)
+
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, summary = _run(controller.run_verification_phase(
+                _FakeManaged(_HandlersThenErrorClient()), None, decisions,
+                pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(fw.run_count, 1)
+        self.assertEqual(pool.get(cid).status, "verified")
+        self.assertIn("0 still pending", summary)
+
+    def test_abort_exit_still_applies_decisions(self):
+        """Issue 06: a mid-flight abort must not discard decisions tool
+        handlers already accepted during the aborted substep."""
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        decisions = DecisionQueue()
+        abort = asyncio.Event()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="XSS", severity="high", endpoint="/s",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="replayed fl0w01",
+                supersedes_candidate_ids=[cid],
+            ))
+
+        class _AcceptThenHangClient:
+            """Tool handlers queue decisions at query time, then the drain
+            hangs — so the abort race cancels it after acceptance."""
+
+            def __init__(self):
+                self.queries: list[str] = []
+
+            async def query(self, content: str) -> None:
+                self.queries.append(content)
+                action(decisions)
+                abort.set()
+
+            def receive_response(self):
+                async def gen():
+                    await asyncio.Event().wait()  # never set — hangs until cancelled
+                    yield None
+                return gen()
+
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, summary = _run(controller.run_verification_phase(
+                _FakeManaged(_AcceptThenHangClient()), None, decisions,
+                pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+                abort_event=abort,
+            ))
+        self.assertEqual(fw.run_count, 1)
+        self.assertEqual(pool.get(cid).status, "verified")
+        self.assertIn("0 still pending", summary)
+
     def test_aborts_when_abort_event_set_before_loop(self):
         """If abort_event is already set entering the phase, the substep loop
         breaks immediately without sending any prompts."""
