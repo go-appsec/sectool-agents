@@ -71,6 +71,7 @@ When present, the verifier may attach one-line hints about related angles. Treat
 - `infra` — the turn died on an infrastructure failure (auth, billing, execution error); the
   cause is attached to the run summary below. Re-issue the instruction if the cause looks
   transient; stop the worker and surface it in your summary if it persists.
+- `rate_limit` — the provider rate-limited a turn; remaining autonomous budget was dropped for this iteration and the run auto-paused until manually resumed. Continue on the same angle after resume, or narrow scope — do not expand while throughput is degraded.
 
 ## Parallelism budget
 

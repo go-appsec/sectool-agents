@@ -3146,6 +3146,34 @@ class TestDirectorPromptBudgetGuidance(unittest.TestCase):
         )
 
 
+class TestDirectorPromptEscalationLegend(unittest.TestCase):
+    """Issue 23: every escalation reason the autonomous loop can produce must
+    be documented in the director's legend — rate_limit previously appeared in
+    run summaries with no documented semantics, forcing the director to guess
+    at steering exactly when throughput was degraded."""
+
+    def test_legend_documents_all_reasons(self):
+        from prompts import orchestrator_director
+        from worker import ESCALATION_REASONS
+
+        prompt = orchestrator_director.build_system_prompt(max_workers=4)
+        for reason in ESCALATION_REASONS:
+            with self.subTest(reason=reason):
+                self.assertIn(f"`{reason}`", prompt)
+
+    def test_rate_limit_guidance_present(self):
+        from prompts import orchestrator_director
+
+        prompt = orchestrator_director.build_system_prompt(max_workers=4)
+        line = next(
+            line for line in prompt.splitlines() if line.startswith("- `rate_limit`")
+        )
+        # Steering must cover the mechanics (budget drop, auto-pause) and the
+        # appropriate response (continue or narrow, never expand).
+        self.assertIn("budget", line)
+        self.assertIn("resum", line)
+
+
 class TestSynthesizeAndTeardownRecon(unittest.TestCase):
     """The post-recon synthesis call captures the surface map and discards
     the worker's transcript before iter 2."""

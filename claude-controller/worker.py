@@ -572,16 +572,34 @@ async def reset_orchestrator_client(
 # Autonomous worker runs
 # ---------------------------------------------------------------------------
 
+# Termination reasons surfaced to the director via WorkerState.escalation_reason.
+ESCALATION_CANDIDATE = "candidate"
+ESCALATION_SILENT = "silent"
+ESCALATION_INFRA = "infra"
+ESCALATION_ERROR = "error"
+ESCALATION_RATE_LIMIT = "rate_limit"
+ESCALATION_BUDGET = "budget"
+
+# Every observable value; the director prompt legend documents each.
+ESCALATION_REASONS = (
+    ESCALATION_CANDIDATE,
+    ESCALATION_SILENT,
+    ESCALATION_INFRA,
+    ESCALATION_ERROR,
+    ESCALATION_RATE_LIMIT,
+    ESCALATION_BUDGET,
+)
+
 
 def _classify_escalation(summary: WorkerTurnSummary) -> str | None:
     """Return an escalation reason, or None if the turn was productive."""
     if summary.candidate_ids:
-        return "candidate"
+        return ESCALATION_CANDIDATE
     if summary.infra_error:
         # Infrastructure failures must not read as silent stalls.
-        return "infra"
+        return ESCALATION_INFRA
     if not summary.tool_calls and not summary.flow_ids_touched:
-        return "silent"
+        return ESCALATION_SILENT
     return None
 
 
@@ -605,17 +623,17 @@ async def run_worker_autonomous_turn(
         )
     except Exception as exc:
         log(f"worker {worker.worker_id}", f"Connection lost: {exc}")
-        return None, "error"
+        return None, ESCALATION_ERROR
 
     if summary.rate_limited:
         engage_rate_limit_pause(summary.rate_limit_text)
         # Drop this worker's remaining autonomous budget for the iteration.
         # The iteration's verify+direct still runs on whatever candidates the
         # surviving turns produced; the pause holds before the next iteration.
-        return summary, "rate_limit"
+        return summary, ESCALATION_RATE_LIMIT
 
     reason = _classify_escalation(summary)
-    if reason == "infra":
+    if reason == ESCALATION_INFRA:
         log(f"worker {worker.worker_id}", f"Infrastructure failure: {summary.infra_error}")
     return summary, reason
 
@@ -651,7 +669,7 @@ async def run_worker_until_escalation(
                 )
             except Exception as exc:
                 log(f"worker {worker.worker_id}", f"Continue query failed: {exc}")
-                worker.escalation_reason = "error"
+                worker.escalation_reason = ESCALATION_ERROR
                 return run_turns
 
         summary, reason = await run_worker_autonomous_turn(
@@ -664,7 +682,7 @@ async def run_worker_until_escalation(
             worker.escalation_reason = reason
             return run_turns
 
-    worker.escalation_reason = "budget"
+    worker.escalation_reason = ESCALATION_BUDGET
     return run_turns
 
 
@@ -709,7 +727,7 @@ async def run_all_workers_until_escalation(
             # and rebuild on the next iteration's error-recovery pass.
             log(f"worker {w.worker_id}",
                 "Autonomous task cancelled; marking for recovery next iteration.")
-            w.escalation_reason = "error"
+            w.escalation_reason = ESCALATION_ERROR
             # Drop the broken client reference so the main-loop recovery path
             # (`if w.escalation_reason == "error" and w.client is None`) fires.
             # Keep alive=True — the worker slot is conceptually still occupied.
@@ -768,7 +786,7 @@ async def run_all_workers_until_escalation(
         except asyncio.CancelledError as exc:
             _note_task_cancellation(exc)
         except Exception as exc:
-            w.escalation_reason = "error"
+            w.escalation_reason = ESCALATION_ERROR
             failures.append(f"worker {w.worker_id} failed: {_short(repr(exc), 160)}")
 
     if failures:

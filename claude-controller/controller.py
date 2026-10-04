@@ -73,6 +73,10 @@ from tools import (
     coalesce_decisions,
 )
 from worker import (
+    ESCALATION_BUDGET,
+    ESCALATION_CANDIDATE,
+    ESCALATION_ERROR,
+    ESCALATION_SILENT,
     ManagedSDKClient,
     WorkerState,
     _race_with_abort,
@@ -1241,14 +1245,14 @@ def update_worker_streaks(workers: list[WorkerState]) -> None:
         if not w.alive:
             continue
         produced_flows = any(t.flow_ids_touched for t in w.autonomous_turns)
-        if w.escalation_reason in ("silent", "error"):
+        if w.escalation_reason in (ESCALATION_SILENT, ESCALATION_ERROR):
             # Flows don't rescue these: a worker that touched a flow but
             # escalated silent/error is still stalling.
             w.progress_none_streak += 1
-        elif w.escalation_reason == "candidate" or produced_flows:
+        elif w.escalation_reason == ESCALATION_CANDIDATE or produced_flows:
             w.progress_none_streak = 0
             w.stall_warned = False
-        elif w.escalation_reason == "budget":
+        elif w.escalation_reason == ESCALATION_BUDGET:
             # No verifiable progress; every non-productive reason must move
             # the streak so quiet workers can reach warn/stop.
             w.progress_none_streak += 1
@@ -1269,7 +1273,7 @@ async def recover_errored_workers(
         log("ctrl-c", "Shutdown requested; skipping worker error-recovery.")
         return
     for w in alive:
-        if w.escalation_reason == "error" and w.client is None:
+        if w.escalation_reason == ESCALATION_ERROR and w.client is None:
             recovered = await attempt_worker_recovery(w, shutdown_event)
             if recovered:
                 log(f"worker {w.worker_id}", "Recovered after autonomous run error.")
