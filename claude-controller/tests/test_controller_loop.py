@@ -1314,6 +1314,81 @@ class TestVerificationPhase(unittest.TestCase):
         self.assertEqual(pool.get(c_first).status, "verified")
         self.assertEqual(pool.get(c_second).status, "verified")
 
+    def test_same_title_different_endpoints_both_written(self):
+        """Issue 19: same-substep dedup keys on title + canonical endpoint.
+
+        Two genuinely distinct findings sharing a title on different endpoints
+        must both be written, each auto-resolving its own candidate."""
+        pool = CandidatePool()
+        c_search = pool.add(worker_id=1, title="SQL injection", severity="high",
+                            endpoint="GET /search", flow_ids=["fl0w01"],
+                            summary="", evidence_notes="", reproduction_hint="")
+        c_login = pool.add(worker_id=1, title="SQL injection", severity="high",
+                           endpoint="POST /login", flow_ids=["fl0w02"],
+                           summary="", evidence_notes="", reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="SQL injection", severity="high", endpoint="GET /search",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="v", supersedes_candidate_ids=[],
+            ))
+            d.add_finding(FindingFiled(
+                title="SQL injection", severity="high", endpoint="POST /login",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="v", supersedes_candidate_ids=[],
+            ))
+            d.set_verification_done("done")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("verification_done", {"summary": "x"})],
+            decisions, [action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, _ = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(fw.run_count, 2)
+        self.assertEqual(pool.get(c_search).status, "verified")
+        self.assertEqual(pool.get(c_login).status, "verified")
+
+    def test_same_title_endpoint_variants_collide(self):
+        """Canonicalized-endpoint parity: formatting-only endpoint differences
+        still dedup as the same burst duplicate."""
+        pool = CandidatePool()
+        cid = pool.add(worker_id=1, title="SQL injection", severity="high",
+                       endpoint="GET /search", flow_ids=["fl0w01"],
+                       summary="", evidence_notes="", reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="SQL injection", severity="high", endpoint="GET /search",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="v", supersedes_candidate_ids=[cid],
+            ))
+            d.add_finding(FindingFiled(
+                title="sql INJECTION", severity="high", endpoint="get /Search/?q=1",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="v", supersedes_candidate_ids=[],
+            ))
+            d.set_verification_done("done")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("verification_done", {"summary": "x"})],
+            decisions, [action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _, _, _ = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(fw.run_count, 1)
+
     def test_skips_phase_when_no_pending(self):
         pool = CandidatePool()
         decisions = DecisionQueue()

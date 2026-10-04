@@ -108,6 +108,16 @@ def _titles_similar(a: str, b: str) -> bool:
     return overlap > 0.5
 
 
+def finding_dedup_key(filed: FindingFiled) -> str:
+    """Return the same-substep duplicate key for a filed finding.
+
+    Slugified title joined with canonicalized endpoint (mirrors secagent's
+    verification dedup) so distinct findings sharing a title on different
+    endpoints stay separate.
+    """
+    return f"{slugify(filed.title) or filed.title}|{_canonical_endpoint(filed.endpoint)}"
+
+
 def match_pending_candidates(
     filed: FindingFiled, pending: list[FindingCandidate],
 ) -> list[str]:

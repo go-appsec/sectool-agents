@@ -7,6 +7,7 @@ import unittest
 from findings import (
     FindingWriter,
     _canonical_endpoint,
+    finding_dedup_key,
     match_pending_candidates,
     slugify,
 )
@@ -195,6 +196,41 @@ def _candidate(cid: str, title: str, endpoint: str) -> FindingCandidate:
         endpoint=endpoint, flow_ids=["aaaa11"], summary="s",
         evidence_notes="e", reproduction_hint="r",
     )
+
+
+class TestFindingDedupKey(unittest.TestCase):
+    def test_same_title_different_endpoints_differ(self):
+        """Issue 19: same-titled findings on distinct endpoints must both write."""
+        a = finding_dedup_key(_make("SQL injection", endpoint="GET /search"))
+        b = finding_dedup_key(_make("SQL injection", endpoint="POST /login"))
+        self.assertNotEqual(a, b)
+
+    def test_same_title_same_endpoint_collide(self):
+        # Case, method casing, trailing slash, and query strings normalize away.
+        a = finding_dedup_key(_make("SQL injection", endpoint="GET /search"))
+        b = finding_dedup_key(_make("sql INJECTION", endpoint="get /Search/?q=1"))
+        self.assertEqual(a, b)
+
+    def test_numeric_endpoint_ids_collide(self):
+        a = finding_dedup_key(_make("IDOR on org roster", endpoint="GET /api/orgs/123"))
+        b = finding_dedup_key(_make("IDOR on org roster", endpoint="/api/orgs/456"))
+        self.assertEqual(a, b)
+
+    def test_title_punctuation_normalizes(self):
+        # Slug parity: hyphen/underscore/case variants are the same title.
+        a = finding_dedup_key(_make("plaintext client-secret exposure", endpoint="GET /x"))
+        b = finding_dedup_key(_make("Plaintext Client_Secret Exposure", endpoint="GET /x"))
+        self.assertEqual(a, b)
+
+    def test_unsluggable_title_falls_back_to_raw(self):
+        a = finding_dedup_key(_make("!!!", endpoint="GET /x"))
+        b = finding_dedup_key(_make("???", endpoint="GET /x"))
+        self.assertNotEqual(a, b)
+
+    def test_empty_endpoint_keys_distinct_from_root(self):
+        a = finding_dedup_key(_make("XSS", endpoint=""))
+        b = finding_dedup_key(_make("XSS", endpoint="/"))
+        self.assertNotEqual(a, b)
 
 
 class TestMatchPendingCandidates(unittest.TestCase):

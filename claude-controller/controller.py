@@ -30,7 +30,7 @@ from claude_agent_sdk import (
 )
 
 from config import Config, parse_args
-from findings import FindingWriter, match_pending_candidates
+from findings import FindingWriter, finding_dedup_key, match_pending_candidates
 from keypress import start_spacebar_listener
 from prompts import orchestrator_director as director_prompts
 from prompts import orchestrator_verifier as verifier_prompts
@@ -759,22 +759,22 @@ async def run_verification_phase(
         """
         nonlocal applied_findings, applied_dismissals, processed_merges
 
-        # Apply new findings this substep produced. `seen_titles` dedups
-        # burst `file_finding` calls within one response — cross-finding dedup
-        # is the verifier's call (it can `merge_into_finding` instead of
-        # filing a near-duplicate; see verifier prompt).
-        seen_titles: set[str] = set()
+        # Apply new findings this substep produced. `seen_keys` dedups
+        # burst `file_finding` calls within one response by title-slug plus
+        # canonicalized endpoint (mirrors secagent) — cross-finding dedup is
+        # the verifier's call (it can `merge_into_finding` instead of filing
+        # a near-duplicate; see verifier prompt).
+        seen_keys: set[str] = set()
         for filed in decisions.findings[applied_findings:]:
-            title_key = filed.title.strip().lower()
-            if title_key and title_key in seen_titles:
+            key = finding_dedup_key(filed)
+            if key in seen_keys:
                 log("finding", f"Duplicate (same substep) skipped: {filed.title}")
                 # Duplicate within the substep: skip the write but still honor
                 # explicit candidate links.
                 for cid in filed.supersedes_candidate_ids:
                     candidates.mark(cid, "verified")
                 continue
-            if title_key:
-                seen_titles.add(title_key)
+            seen_keys.add(key)
             path = finding_writer.write(filed)
             log("finding", f"Written: {path}")
             resolved = list(filed.supersedes_candidate_ids)
