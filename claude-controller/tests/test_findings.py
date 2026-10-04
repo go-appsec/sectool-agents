@@ -49,6 +49,30 @@ class TestCanonicalEndpoint(unittest.TestCase):
         self.assertEqual(_canonical_endpoint("GET /"), "/")
         self.assertEqual(_canonical_endpoint("GET /?q=1"), "/")
 
+    def test_numeric_segments_rewrite_to_id(self):
+        self.assertEqual(_canonical_endpoint("GET /users/123"), "/users/:id")
+        self.assertEqual(_canonical_endpoint("/Users/42"), "/users/:id")
+        self.assertEqual(
+            _canonical_endpoint("/api/orgs/123/v2/items/9"),
+            "/api/orgs/:id/v2/items/:id",
+        )
+
+    def test_non_numeric_segments_stay_literal(self):
+        # Mirrors Go's ParseUint: names, signs, and template segments
+        # never rewrite.
+        self.assertEqual(_canonical_endpoint("/users/alice"), "/users/alice")
+        self.assertEqual(_canonical_endpoint("/files/-1"), "/files/-1")
+        self.assertEqual(_canonical_endpoint("/api/orgs/{id}"), "/api/orgs/{id}")
+
+    def test_numeric_rewrite_uint64_bound(self):
+        # Boundary parity with Go's strconv.ParseUint overflow rejection.
+        self.assertEqual(
+            _canonical_endpoint("/n/18446744073709551615"), "/n/:id")
+        self.assertEqual(
+            _canonical_endpoint("/n/99999999999999999999"),
+            "/n/99999999999999999999",
+        )
+
 
 class TestFindingWriter(unittest.TestCase):
     def test_write_structured_produces_markdown(self):
@@ -226,6 +250,13 @@ class TestMatchPendingCandidates(unittest.TestCase):
     def test_root_endpoint_matches_root(self):
         filed = _make("Reflected XSS", endpoint="GET /")
         pending = [_candidate("c001", "Reflected XSS in root", "///")]
+        self.assertEqual(match_pending_candidates(filed, pending), ["c001"])
+
+    def test_different_ids_still_match(self):
+        """The issue-18 failure mode: concrete IDs on the same route must
+        not block candidate auto-resolution."""
+        filed = _make("IDOR on org roster", endpoint="GET /api/orgs/456")
+        pending = [_candidate("c001", "IDOR on org roster", "get /api/orgs/123")]
         self.assertEqual(match_pending_candidates(filed, pending), ["c001"])
 
     def test_root_endpoint_never_matches_missing(self):

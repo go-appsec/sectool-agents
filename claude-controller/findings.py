@@ -54,8 +54,18 @@ def _file_slug(title: str) -> str:
     return slug
 
 
+# Mirrors secagent's CanonicalEndpoint numeric-segment rewrite; the uint64
+# bound matches strconv.ParseUint so both agents emit identical output.
+_NUMERIC_SEGMENT_RE = re.compile(r"[0-9]+")
+_UINT64_MAX = (1 << 64) - 1
+
+
 def _canonical_endpoint(endpoint: str) -> str:
-    """Normalize an endpoint string for dedup comparison."""
+    """Normalize an endpoint string for dedup comparison.
+
+    Mirrors secagent's CanonicalEndpoint: numeric path segments rewrite to
+    ":id" so endpoints match regardless of concrete ID values.
+    """
     if not endpoint:
         return ""
     # Strip method prefix if present
@@ -69,7 +79,12 @@ def _canonical_endpoint(endpoint: str) -> str:
     # Slash-only paths are the root endpoint, not a missing one
     if path and not path.strip("/"):
         return "/"
-    return path.rstrip("/")
+    path = path.rstrip("/")
+    segments = path.split("/")
+    for i, seg in enumerate(segments):
+        if _NUMERIC_SEGMENT_RE.fullmatch(seg) and int(seg) <= _UINT64_MAX:
+            segments[i] = ":id"
+    return "/".join(segments)
 
 
 def _titles_similar(a: str, b: str) -> bool:
