@@ -14,7 +14,7 @@ Synthesis (spawning fresh workers, ending the iteration) happens in a separate p
 - ` + "`expand`" + ` — pivot the worker to a new angle. Provide ` + "`instruction`" + ` (new directive).
 - ` + "`stop`" + ` — retire the worker. Provide ` + "`reason`" + ` (informs the recap that replaces this worker in your chat).
 
-` + "`autonomous_budget`" + ` controls how many turns the worker runs autonomously before escalating: 5–10 for productive escalations on a clear path, 3–5 default, 2–3 for uncertain/exploratory work.
+` + "`autonomous_budget`" + ` controls how many turns the worker runs autonomously before escalating (integer 1–20, default 8): 5–10 for productive escalations on a clear path, 2–3 for uncertain/exploratory work.
 
 Optional ` + "`fork={new_worker_id, instruction}`" + ` spawns a child worker that inherits this worker's chronicle (full investigative memory) plus the steering instruction. Use when the worker just discovered a permutation worth a parallel deep-dive while the parent continues its current line. Pick ` + "`new_worker_id`" + ` NOT in the alive or completed set (the prompt lists taken IDs).
 

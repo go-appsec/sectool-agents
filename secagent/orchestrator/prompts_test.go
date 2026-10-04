@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/go-appsec/sectool-agents/secagent/agent"
+	"github.com/go-appsec/sectool-agents/secagent/orchestrator/prompts"
 )
 
 func TestFormatToolCalls(t *testing.T) {
@@ -98,6 +99,15 @@ func TestFormatCompletedRoster(t *testing.T) {
 				"recent worker %d must be rendered", i)
 		}
 	})
+}
+
+func TestDirectorPromptBudgetGuidance(t *testing.T) {
+	t.Parallel()
+
+	// Prompt prose must track the code constants; drift under-budgets workers.
+	prompt := prompts.BuildDirectorDecisionSystemPrompt(4, false)
+	assert.Contains(t, prompt,
+		fmt.Sprintf("integer 1–%d, default %d", maxAutonomousBudget, defaultAutonomousBudget))
 }
 
 func TestFormatPendingCandidates(t *testing.T) {

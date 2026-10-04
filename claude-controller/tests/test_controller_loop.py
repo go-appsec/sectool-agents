@@ -3130,6 +3130,22 @@ class TestWorkerReproHintGuidance(unittest.TestCase):
         self.assertNotIn("no flow IDs", self._repro_hint_line())
 
 
+class TestDirectorPromptBudgetGuidance(unittest.TestCase):
+    """Issue 22: the director prompt must state the implementation default and
+    range for autonomous_budget — a stale "3–5 default" band under-budgeted
+    workers against the real default of 8."""
+
+    def test_prompt_states_code_default_and_range(self):
+        from prompts import orchestrator_director
+        from tools import DEFAULT_AUTONOMOUS_BUDGET, MAX_AUTONOMOUS_BUDGET
+
+        prompt = orchestrator_director.build_system_prompt(max_workers=4)
+        self.assertIn(
+            f"(integer 1–{MAX_AUTONOMOUS_BUDGET}, default {DEFAULT_AUTONOMOUS_BUDGET})",
+            prompt,
+        )
+
+
 class TestSynthesizeAndTeardownRecon(unittest.TestCase):
     """The post-recon synthesis call captures the surface map and discards
     the worker's transcript before iter 2."""

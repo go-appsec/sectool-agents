@@ -162,8 +162,7 @@ Calling a tool in the wrong phase returns an `is_error=True` response directing 
 
 `continue_worker` and `expand_worker` accept an optional `autonomous_budget` (integer, 1–20, default 8) that sets how many consecutive autonomous turns the worker may run before escalating back. Typical values:
 
-- **5–10** — productive workers on a clear exploitation path (default 8).
-- **3–5** — general exploration.
+- **5–10** — productive workers on a clear exploitation path.
 - **2–3** — exploratory/uncertain assignments where you want to review sooner.
 
 ## Worker Tool

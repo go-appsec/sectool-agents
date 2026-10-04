@@ -244,9 +244,8 @@ Calling a tool in the wrong phase returns an `is_error=true` response directing 
 
 `decide_worker` accepts an optional `autonomous_budget` (integer, 1–20, default 8) that sets how many consecutive autonomous turns the worker may run before escalating back. Typical values:
 
-- **8–15** — productive workers on a clear exploitation path.
-- **5–8** — general exploration (default).
-- **2–4** — exploratory/uncertain assignments where you want to review sooner.
+- **5–10** — productive workers on a clear exploitation path.
+- **2–3** — exploratory/uncertain assignments where you want to review sooner.
 
 ## What the director sees
 

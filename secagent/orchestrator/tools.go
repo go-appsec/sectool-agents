@@ -526,11 +526,21 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logg
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"worker_id":         map[string]any{"type": "integer", "minimum": 1},
-					"action":            map[string]any{"type": "string", "enum": []string{"continue", "expand", "stop"}},
-					"instruction":       map[string]any{"type": "string", "description": "Required for continue/expand."},
-					"reason":            map[string]any{"type": "string", "description": "Required for stop."},
-					"autonomous_budget": map[string]any{"type": "integer", "minimum": 1, "maximum": 20},
+					"worker_id":   map[string]any{"type": "integer", "minimum": 1},
+					"action":      map[string]any{"type": "string", "enum": []string{"continue", "expand", "stop"}},
+					"instruction": map[string]any{"type": "string", "description": "Required for continue/expand."},
+					"reason":      map[string]any{"type": "string", "description": "Required for stop."},
+					"autonomous_budget": map[string]any{
+						"type":    "integer",
+						"minimum": 1,
+						"maximum": maxAutonomousBudget,
+						"description": fmt.Sprintf(
+							"Consecutive autonomous turns this worker may run before escalating back "+
+								"for review. Use 5-10 for productive workers on a clear path, 2-3 for "+
+								"exploratory or uncertain assignments. Default %d.",
+							defaultAutonomousBudget,
+						),
+					},
 					"fork": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -666,8 +676,8 @@ func DecisionToolDefs(decisions *DecisionQueue, takenIDs TakenIDsFunc, log *Logg
 				if budget <= 0 {
 					budget = defaultAutonomousBudget
 				}
-				if budget > 20 {
-					budget = 20
+				if budget > maxAutonomousBudget {
+					budget = maxAutonomousBudget
 				}
 				decisions.AddDecision(WorkerDecision{
 					Kind:             action,

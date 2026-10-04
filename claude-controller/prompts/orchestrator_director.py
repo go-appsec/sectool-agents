@@ -6,6 +6,8 @@ and decides what every alive worker should do next — including how long each
 may run autonomously before escalating back.
 """
 
+from tools import DEFAULT_AUTONOMOUS_BUDGET, MAX_AUTONOMOUS_BUDGET
+
 _BASE_PROMPT = """\
 You are the **director**. Verification has already run this iteration; your job is to decide what each alive worker does next and whether to spawn more.
 
@@ -38,7 +40,7 @@ Tailor the exclusion list to each worker's slice — don't blanket-paste every c
 
 - **Cover every alive worker** with exactly one of continue / expand / stop, or include them in a `plan_workers` entry.
 - **Spawn aggressively up to the parallelism budget.** `plan_workers` with new worker_ids is additive to per-worker decisions — use both in the same phase when uncovered surface remains. 3–4 parallel workers on a broad target beats one doing everything.
-- `autonomous_budget` per worker: 5–10 for productive escalations on a clear path, 3–5 default, 2–3 for uncertain or exploratory.
+- `autonomous_budget` per worker (integer 1–{budget_max}, default {budget_default}): 5–10 for productive escalations on a clear path, 2–3 for uncertain or exploratory.
 - **Angle exhaustion:** if a worker's recent-history block shows the same or near-identical angle across 2+ iterations with no finding filed, treat it as exhausted. Stop the worker or pivot to a materially different vector — never re-issue a lightly-reworded variant.
 - **Cross-worker context transfer:** each worker has its own private investigative memory; workers do NOT see each other's tool calls or evidence. When retargeting a worker onto a vector that depends on context another worker discovered (a captured token, a mapped endpoint, an OAST callback), embed that context verbatim in the instruction. The receiving worker has no other way to learn it.
 - **`reason` is NOT a findings channel.** If a worker's chat shows it discovered a vulnerability but never called `report_finding_candidate`, do NOT stop the worker with a finding-shaped reason — `reason` is logged and discarded; only filed candidates persist. Issue `continue_worker` with `instruction="You discovered <X>; call report_finding_candidate now with the evidence flow IDs before any further work."` Stop only after the candidate is filed, or stop with a non-finding reason like "exhausted" or "blocked."
@@ -84,7 +86,11 @@ Workers have a `bash` tool with unrestricted shell execution on the host. When a
 
 
 def build_system_prompt(max_workers: int, allow_bash: bool = False) -> str:
-    out = _BASE_PROMPT.format(max_workers=max_workers)
+    out = _BASE_PROMPT.format(
+        max_workers=max_workers,
+        budget_max=MAX_AUTONOMOUS_BUDGET,
+        budget_default=DEFAULT_AUTONOMOUS_BUDGET,
+    )
     if allow_bash:
         out += _WORKER_BASH_NOTE
     return out

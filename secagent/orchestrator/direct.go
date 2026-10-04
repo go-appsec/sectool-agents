@@ -173,8 +173,8 @@ func applyDecisionAndFire(ctx context.Context,
 		if budget <= 0 {
 			budget = defaultAutonomousBudget
 		}
-		if budget > 20 {
-			budget = 20
+		if budget > maxAutonomousBudget {
+			budget = maxAutonomousBudget
 		}
 		w.AutonomousBudget = budget
 		w.LastInstruction = d.Instruction

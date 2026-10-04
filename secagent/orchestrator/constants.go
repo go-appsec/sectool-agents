@@ -3,6 +3,9 @@ package orchestrator
 // defaultAutonomousBudget is the default per-iteration autonomous-run budget.
 const defaultAutonomousBudget = 8
 
+// maxAutonomousBudget caps decide_worker's autonomous_budget at the tool boundary.
+const maxAutonomousBudget = 20
+
 // noneSentinel is the placeholder rendered where a list has no items.
 const noneSentinel = "(none)"
 
