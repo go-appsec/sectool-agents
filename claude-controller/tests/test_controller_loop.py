@@ -492,6 +492,27 @@ class TestUpdateWorkerStreaks(unittest.TestCase):
         controller.update_worker_streaks([w])
         self.assertEqual(w.progress_none_streak, 3)
 
+    def test_error_increments_like_silent(self):
+        """Connection-failed runs feed the same threshold as silent."""
+        w = self._make()
+        w.progress_none_streak = 2
+        w.stall_warned = True
+        w.escalation_reason = "error"
+        w.autonomous_turns = [WorkerTurnSummary(worker_id=1, iteration=1)]
+        controller.update_worker_streaks([w])
+        self.assertEqual(w.progress_none_streak, 3)
+        self.assertTrue(w.stall_warned)  # only a reset clears the latch
+
+    def test_silent_wins_over_flows(self):
+        """A silent escalation still increments despite flow activity."""
+        w = self._make()
+        w.escalation_reason = "silent"
+        s = WorkerTurnSummary(worker_id=1, iteration=1)
+        s.flow_ids_touched = ["aaaa11"]
+        w.autonomous_turns = [s]
+        controller.update_worker_streaks([w])
+        self.assertEqual(w.progress_none_streak, 1)
+
     def test_candidate_resets_streak(self):
         w = self._make()
         w.progress_none_streak = 3
@@ -514,14 +535,23 @@ class TestUpdateWorkerStreaks(unittest.TestCase):
         self.assertEqual(w.progress_none_streak, 0)
         self.assertFalse(w.stall_warned)
 
-    def test_budget_without_flows_unchanged(self):
-        """Budget escalation with no flow activity leaves streak intact."""
+    def test_budget_without_flows_increments(self):
+        """Quiet budget exhaustion must move the streak toward warn/stop."""
         w = self._make()
         w.progress_none_streak = 1
         w.escalation_reason = "budget"
         w.autonomous_turns = [WorkerTurnSummary(worker_id=1, iteration=1)]
         controller.update_worker_streaks([w])
-        self.assertEqual(w.progress_none_streak, 1)
+        self.assertEqual(w.progress_none_streak, 2)
+
+    def test_rate_limit_without_flows_unchanged(self):
+        """Provider throttles are excluded from the stall count like infra."""
+        w = self._make()
+        w.progress_none_streak = 2
+        w.escalation_reason = "rate_limit"
+        w.autonomous_turns = [WorkerTurnSummary(worker_id=1, iteration=1)]
+        controller.update_worker_streaks([w])
+        self.assertEqual(w.progress_none_streak, 2)
 
     def test_infra_without_flows_unchanged(self):
         """Infra escalations are excluded from the silent-streak count."""
@@ -2682,6 +2712,43 @@ class TestApplyPlanDiffRetiredWorkerId(unittest.TestCase):
             controller.attempt_worker_recovery = orig
 
         self.assertEqual(seen, [event])
+
+
+class TestApplyPlanDiffRetargetStallState(unittest.TestCase):
+    """Retargeting clears stall state only after a productive turn — an idle
+    worker cannot be kept below the warn/stop thresholds by re-planning its
+    id every iteration (mirrors the Go twin's plan handling)."""
+
+    @staticmethod
+    def _stalled() -> controller.WorkerState:
+        w = controller.WorkerState(worker_id=2, options=None)
+        w.client = _StubClient()
+        w.progress_none_streak = 3
+        w.stall_warned = True
+        return w
+
+    def _retarget(self, worker: controller.WorkerState) -> None:
+        from tools import PlanEntry
+        _run(controller.apply_plan_diff(
+            [PlanEntry(worker_id=2, assignment="new directive")], [worker],
+            CandidatePool(), "http://x", None, None, max_workers=4,
+        ))
+
+    def test_idle_run_keeps_streak(self):
+        w = self._stalled()
+        w.autonomous_turns = [WorkerTurnSummary(worker_id=2, iteration=1)]
+        self._retarget(w)
+        self.assertEqual(w.progress_none_streak, 3)
+        self.assertTrue(w.stall_warned)
+
+    def test_productive_run_resets(self):
+        w = self._stalled()
+        s = WorkerTurnSummary(worker_id=2, iteration=1)
+        s.flow_ids_touched = ["aaaa11"]
+        w.autonomous_turns = [s]
+        self._retarget(w)
+        self.assertEqual(w.progress_none_streak, 0)
+        self.assertFalse(w.stall_warned)
 
 
 class CostCeilingReachedTests(unittest.TestCase):

@@ -1084,8 +1084,11 @@ async def apply_plan_diff(
             log(f"worker {p.worker_id}", f"Retargeting: {snippet}")
             w.assignment = p.assignment
             w.last_instruction = p.assignment
-            w.progress_none_streak = 0
-            w.stall_warned = False
+            # Stall state survives retargeting an idle worker — only a
+            # productive run earns a reset.
+            if _has_productive_turn(w.autonomous_turns):
+                w.progress_none_streak = 0
+                w.stall_warned = False
             try:
                 await submit_query(w.client, p.assignment)
             except Exception:
@@ -1165,22 +1168,35 @@ async def apply_decision(
         await attempt_worker_recovery(worker, shutdown_event)
 
 
+def _has_productive_turn(turns: list[WorkerTurnSummary]) -> bool:
+    """Whether any turn issued a tool call or touched a flow id."""
+    return any(t.tool_calls or t.flow_ids_touched for t in turns)
+
+
 def update_worker_streaks(workers: list[WorkerState]) -> None:
     """Update progress_none_streak from escalation_reason after autonomous runs.
 
-    Infra escalations never increment the streak — their cause surfaces in
-    logs and the director prompt instead. Genuine flow activity still resets
-    it via the shared branch below.
+    Mirrors the Go twin's stall semantics: silent/error always increment;
+    budget exhaustion increments once no flow activity disproves stalling;
+    candidate escalations or genuine flow activity reset it. Infra and
+    rate_limit escalations never move the streak — their cause surfaces in
+    logs and the director prompt instead.
     """
     for w in workers:
         if not w.alive:
             continue
         produced_flows = any(t.flow_ids_touched for t in w.autonomous_turns)
-        if w.escalation_reason == "silent":
+        if w.escalation_reason in ("silent", "error"):
+            # Flows don't rescue these: a worker that touched a flow but
+            # escalated silent/error is still stalling.
             w.progress_none_streak += 1
         elif w.escalation_reason == "candidate" or produced_flows:
             w.progress_none_streak = 0
             w.stall_warned = False
+        elif w.escalation_reason == "budget":
+            # No verifiable progress; every non-productive reason must move
+            # the streak so quiet workers can reach warn/stop.
+            w.progress_none_streak += 1
 
 
 async def recover_errored_workers(
