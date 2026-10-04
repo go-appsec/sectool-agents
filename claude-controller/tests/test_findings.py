@@ -427,5 +427,37 @@ class TestWriteUnverifiedCandidate(unittest.TestCase):
                              "unverified-02-possible-idor-on-apiorgsid.md")
 
 
+class TestFindingWriterUtf8(unittest.TestCase):
+    """Evidence files are UTF-8 regardless of ambient locale."""
+
+    def _read_bytes(self, path: str) -> bytes:
+        with open(path, "rb") as f:
+            return f.read()
+
+    def test_write_encodes_non_ascii_content(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            path = w.write(_make("Header injection — CRLF évidence"))
+            self.assertIn("—".encode("utf-8"), self._read_bytes(path))
+
+    def test_unverified_template_encodes_em_dash(self):
+        # The template's own em dash must encode under a non-UTF-8 locale.
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            path = w.write_unverified_candidate(
+                _candidate("c001", "Old dump — évidence", "/x"))
+            self.assertIn("—".encode("utf-8"), self._read_bytes(path))
+
+    def test_merge_appends_utf8(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = FindingWriter(td)
+            w.write(_make("XSS"))
+            path = w.merge("F1", rationale="évidence — same surface")
+            self.assertIn(
+                "évidence — same surface".encode("utf-8"),
+                self._read_bytes(path),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

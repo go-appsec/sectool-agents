@@ -29,6 +29,7 @@ from tools import (
     CandidatePool,
     DecisionQueue,
     FindingFiled,
+    FindingMerged,
     ToolCallRecord,
     WorkerDecision,
     WorkerTurnSummary,
@@ -1120,6 +1121,26 @@ class _OrchSideEffectClient(FakeSDKClient):
         return gen()
 
 
+class _FailingWriter(FindingWriter):
+    """FindingWriter whose write fails for one specific title."""
+
+    def __init__(self, findings_dir: str, fail_title: str):
+        super().__init__(findings_dir)
+        self.fail_title = fail_title
+
+    def write(self, filed: FindingFiled) -> str:
+        if filed.title == self.fail_title:
+            raise OSError("disk full")
+        return super().write(filed)
+
+
+class _MergingFailureWriter(FindingWriter):
+    """FindingWriter whose merge always fails."""
+
+    def merge(self, *args, **kwargs) -> str | None:
+        raise OSError("disk full")
+
+
 class TestVerificationPhase(unittest.TestCase):
     def _seed_pool(self, pool: CandidatePool) -> str:
         return pool.add(worker_id=1, title="XSS", severity="high", endpoint="/s",
@@ -1172,6 +1193,78 @@ class TestVerificationPhase(unittest.TestCase):
             ))
         self.assertIn("dismissed", summary)
         self.assertEqual(pool.get(cid).status, "dismissed")
+
+    def test_write_failure_does_not_abort_phase(self):
+        """A failed finding write is skipped; other findings still land."""
+        pool = CandidatePool()
+        cid_ok = pool.add(worker_id=1, title="Good finding", severity="high",
+                          endpoint="GET /ok", flow_ids=["fl0w01"],
+                          summary="", evidence_notes="", reproduction_hint="")
+        cid_bad = pool.add(worker_id=1, title="Doomed finding", severity="high",
+                           endpoint="GET /bad", flow_ids=["fl0w02"],
+                           summary="", evidence_notes="", reproduction_hint="")
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="Doomed finding", severity="high", endpoint="GET /bad",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="replayed fl0w02",
+            ))
+            d.add_finding(FindingFiled(
+                title="Good finding", severity="high", endpoint="GET /ok",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="replayed fl0w01",
+            ))
+            d.set_verification_done("attempted both")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("verification_done", {"summary": "x"})],
+            decisions, [action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = _FailingWriter(td, fail_title="Doomed finding")
+            _, _, summary = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(summary, "attempted both")
+        self.assertEqual(fw.run_count, 1)
+        self.assertEqual(pool.get(cid_ok).status, "verified")
+        # No file on disk for the failed write — its candidate stays pending.
+        self.assertEqual(pool.get(cid_bad).status, "pending")
+
+    def test_merge_failure_does_not_abort_phase(self):
+        """A failed merge append is isolated; the finding file stays intact."""
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_finding(FindingFiled(
+                title="XSS", severity="high", endpoint="/s",
+                description="d", reproduction_steps="r", evidence="e", impact="i",
+                verification_notes="replayed fl0w01",
+                supersedes_candidate_ids=[cid],
+            ))
+            d.add_merge(FindingMerged(finding_id="F1", rationale="same surface"))
+            d.set_verification_done("filed then merged")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("verification_done", {"summary": "x"})],
+            decisions, [action],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fw = _MergingFailureWriter(td)
+            _, _, summary = _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+            self.assertEqual(summary, "filed then merged")
+            self.assertEqual(fw.run_count, 1)
+            with open(fw.paths[0]) as f:
+                body = f.read()
+        self.assertNotIn("Additional affected surfaces", body)
 
     def test_file_finding_without_supersedes_auto_resolves_matching_candidate(self):
         pool = CandidatePool()
@@ -3379,6 +3472,27 @@ class DumpUnverifiedCandidatesTests(unittest.TestCase):
             self.assertEqual(
                 controller._dump_unverified_candidates(CandidatePool(), writer), 0)
             self.assertEqual(writer.paths, [])
+
+    def test_write_failure_isolated(self):
+        """A failed dump write is skipped; the rest still dumps."""
+        with tempfile.TemporaryDirectory() as d:
+            writer = FindingWriter(d)
+            pool = self._pool()
+            ids = [c.candidate_id for c in pool.pending()]
+            real_write = writer.write_unverified_candidate
+
+            def flaky(candidate):
+                if candidate.candidate_id == ids[0]:
+                    raise OSError("disk full")
+                return real_write(candidate)
+
+            writer.write_unverified_candidate = flaky
+            dumped = controller._dump_unverified_candidates(pool, writer, tag="exit")
+            self.assertEqual(dumped, 1)
+            self.assertEqual(len(writer.paths), 1)
+            # Only the succeeded write is marked; the failed candidate stays
+            # pending so a later dump call (exit-path finally) can retry it.
+            self.assertEqual([c.candidate_id for c in pool.pending()], [ids[0]])
 
 
 if __name__ == "__main__":

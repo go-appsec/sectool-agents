@@ -103,6 +103,11 @@ DIRECTION_MAX_SUBSTEPS = 4
 # idle retries don't consume VERIFICATION_MAX_SUBSTEPS.
 VERIFICATION_IDLE_RETRIES = 3
 
+# Finding/dump writes fail isolated per record — one bad write must never
+# abort a phase, mask an in-flight exception from the exit path, or lose the
+# rest of the evidence (mirrors secagent's per-write error handling).
+_FINDING_WRITE_ERRORS = (OSError, UnicodeEncodeError)
+
 
 # ---------------------------------------------------------------------------
 # Build and server lifecycle
@@ -775,7 +780,12 @@ async def run_verification_phase(
                     candidates.mark(cid, "verified")
                 continue
             seen_keys.add(key)
-            path = finding_writer.write(filed)
+            try:
+                path = finding_writer.write(filed)
+            except _FINDING_WRITE_ERRORS as exc:
+                log("finding", f"Write failed for {_short(filed.title, 80)!r}: {exc}")
+                # No file on disk — its candidates must stay pending.
+                continue
             log("finding", f"Written: {path}")
             resolved = list(filed.supersedes_candidate_ids)
             if not resolved:
@@ -813,12 +823,16 @@ async def run_verification_phase(
         applied_dismissals = len(decisions.dismissals)
 
         for mg in decisions.merges[processed_merges:]:
-            path = finding_writer.merge(
-                mg.finding_id,
-                rationale=mg.rationale,
-                additional_endpoint=mg.additional_endpoint,
-                evidence_note=mg.evidence_note,
-            )
+            try:
+                path = finding_writer.merge(
+                    mg.finding_id,
+                    rationale=mg.rationale,
+                    additional_endpoint=mg.additional_endpoint,
+                    evidence_note=mg.evidence_note,
+                )
+            except _FINDING_WRITE_ERRORS as exc:
+                log("finding", f"Merge into {mg.finding_id} failed: {exc}")
+                continue
             if path is None:
                 log("finding",
                     f"Merge skipped: unknown finding_id {mg.finding_id!r}.")
@@ -1274,18 +1288,26 @@ def _dump_unverified_candidates(
 
     Called on every run exit path (double-Ctrl-C abort, shutdown, normal
     end) so candidate evidence is never silently lost. Each candidate is
-    marked dismissed after its write, so repeat calls are no-ops. Returns
-    the number of candidates dumped.
+    marked dismissed after its write, so repeat calls are no-ops; failed
+    writes stay pending for the next call to retry. Returns the number of
+    candidates dumped.
     """
     pending = candidates.pending()
     if not pending:
         return 0
     log(tag, f"Dumping {len(pending)} unverified candidate(s) to disk.")
+    written = 0
     for c in pending:
-        path = finding_writer.write_unverified_candidate(c)
+        try:
+            path = finding_writer.write_unverified_candidate(c)
+        except _FINDING_WRITE_ERRORS as exc:
+            # Per-write isolation: keep dumping the remaining evidence.
+            log(tag, f"Unverified dump failed for {c.candidate_id}: {exc}")
+            continue
         candidates.mark(c.candidate_id, "dismissed")
+        written += 1
         log(tag, f"Wrote unverified {c.candidate_id} → {path}")
-    return len(pending)
+    return written
 
 
 # ---------------------------------------------------------------------------

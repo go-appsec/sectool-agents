@@ -2,7 +2,8 @@
 
 Findings are written from the orchestrator's structured `file_finding` tool
 call. The legacy text-based parser has been removed — the orchestrator
-produces well-formed fields directly.
+produces well-formed fields directly. All reads and writes are UTF-8
+regardless of ambient locale.
 """
 
 import os
@@ -307,7 +308,7 @@ class FindingWriter:
             verification_notes=filed.verification_notes or "(none)",
         )
         # "x" refuses to truncate should a file appear after allocation.
-        with open(filepath, "x") as f:
+        with open(filepath, "x", encoding="utf-8") as f:
             f.write(body)
 
         self.count = seq
@@ -346,7 +347,7 @@ class FindingWriter:
             evidence_notes=candidate.evidence_notes or "(none)",
             reproduction_hint=candidate.reproduction_hint or "(none)",
         )
-        with open(filepath, "x") as f:
+        with open(filepath, "x", encoding="utf-8") as f:
             f.write(body)
 
         self._unverified_count = seq
@@ -382,12 +383,12 @@ class FindingWriter:
         line = f"{bullet}\n  - {note}" if note else bullet
 
         path = entry["path"]
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             body = f.read()
         needs_heading = _ADDENDUM_HEADING not in body
         leading_nl = "" if body.endswith("\n") else "\n"
         heading_block = f"\n{_ADDENDUM_HEADING}\n\n" if needs_heading else ""
-        with open(path, "a") as f:
+        with open(path, "a", encoding="utf-8") as f:
             f.write(f"{leading_nl}{heading_block}{line}\n")
 
         # Reflect merged content in the verifier-facing roster so the next
