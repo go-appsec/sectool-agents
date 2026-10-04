@@ -1,2 +1,2 @@
 # Generated from pyproject.toml — install with: pip install -r requirements.txt
-claude-agent-sdk>=0.1.0
+claude-agent-sdk>=0.2

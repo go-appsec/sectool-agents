@@ -19,9 +19,7 @@ import threading
 import time
 from typing import Any
 
-from claude_agent_sdk import tool
-
-from sdk_mcp import build_sdk_mcp_server
+from claude_agent_sdk import create_sdk_mcp_server, tool
 
 
 # Bounded kill_all wait so shutdown can never hang on a process stuck in
@@ -261,7 +259,7 @@ def build_bash_mcp_server(bg: BashBackground | None = None) -> Any:
     async def bash(args: dict[str, Any]) -> dict[str, Any]:
         return await dispatch_bash(args, bg)
 
-    return build_sdk_mcp_server(
+    return create_sdk_mcp_server(
         name="bash_tools",
         version="1.0.0",
         tools=[bash],

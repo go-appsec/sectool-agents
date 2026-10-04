@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Autonomous security exploration controller using Claude Agent SDK"
 requires-python = ">=3.10"
 dependencies = [
-    "claude-agent-sdk>=0.1.0",
+    "claude-agent-sdk>=0.2",
 ]
 
 [build-system]

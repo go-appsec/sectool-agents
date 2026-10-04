@@ -12,9 +12,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from claude_agent_sdk import tool
-
-from sdk_mcp import build_sdk_mcp_server
+from claude_agent_sdk import create_sdk_mcp_server, tool
 
 
 SEVERITIES = ("critical", "high", "medium", "low", "informational")
@@ -841,7 +839,7 @@ def build_worker_mcp_server(candidates: CandidatePool, worker_id: int) -> Any:
             }],
         }
 
-    return build_sdk_mcp_server(
+    return create_sdk_mcp_server(
         name="worker_tools",
         version="1.0.0",
         tools=[report_finding_candidate],
@@ -1549,7 +1547,7 @@ def build_orch_mcp_server(
         decisions.set_direction_done(summary)
         return {"content": [{"type": "text", "text": "Direction phase complete."}]}
 
-    return build_sdk_mcp_server(
+    return create_sdk_mcp_server(
         name="orch_tools",
         version="1.0.0",
         tools=[
