@@ -6,6 +6,7 @@ scripted fake ClaudeSDKClient (no network, no real SDK).
 """
 
 import asyncio
+import os
 import tempfile
 import unittest
 from typing import Any
@@ -1064,6 +1065,21 @@ class TestPromptFormatting(unittest.TestCase):
         self.assertIn("evidence:", msg)
         self.assertIn("payload echoed verbatim in body", msg)
 
+    def test_pending_candidate_roster_shows_failed_attempts(self):
+        """Issue 28: the verifier must see a candidate's failed history — its
+        client is reset every iteration and carries no memory of prior tries."""
+        pool = CandidatePool()
+        pool.add(worker_id=2, title="Stale", severity="high", endpoint="/x",
+                 flow_ids=["aaaa11"], summary="", evidence_notes="",
+                 reproduction_hint="")
+        pool.bump_verify_attempts()  # stale candidate failed one phase
+        pool.add(worker_id=2, title="Fresh", severity="low", endpoint="/y",
+                 flow_ids=["bbbb22"], summary="", evidence_notes="",
+                 reproduction_hint="")
+        msg = controller._format_pending_candidates_list(pool.pending())
+        self.assertIn("failed verification iterations: 1", msg)
+        self.assertEqual(msg.count("failed verification iterations"), 1)
+
 
 # ---------------------------------------------------------------------------
 # Phase drivers (integration over FakeSDKClient)
@@ -1755,6 +1771,70 @@ class TestVerificationPhase(unittest.TestCase):
         self.assertEqual(cost, 0.0)
         # Pending candidate must remain pending (verifier never ran).
         self.assertEqual(len(pool.pending()), 1)
+
+    def _run_idle_phase(self, pool, fw) -> str:
+        """Drive one verification phase that ends via the idle-drain limit,
+        leaving every pending candidate unresolved."""
+        decisions = DecisionQueue()
+        n = controller.VERIFICATION_IDLE_RETRIES
+        client = _OrchSideEffectClient(
+            [_prose_turn("...") for _ in range(n)], decisions, [None] * n)
+        _, _, summary = _run(controller.run_verification_phase(
+            _FakeManaged(client), None, decisions, pool, fw,
+            iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+        ))
+        return summary
+
+    def test_phase_end_counts_failed_attempts(self):
+        """Issue 28: each verification phase leaves one failed attempt on
+        candidates the verifier never resolved."""
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            self._run_idle_phase(pool, fw)
+        self.assertEqual(pool.get(cid).verify_attempts, 1)
+        self.assertEqual(pool.get(cid).status, "pending")
+
+    def test_resolved_candidates_never_accumulate_attempts(self):
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        decisions = DecisionQueue()
+
+        def action(d: DecisionQueue):
+            d.add_dismissal(cid, "false positive")
+
+        client = _OrchSideEffectClient(
+            [_orch_tool_turn("dismiss_candidate", {"candidate_id": cid, "reason": "fp"})],
+            decisions, [action])
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            _run(controller.run_verification_phase(
+                _FakeManaged(client), None, decisions, pool, fw,
+                iteration=1, max_iter=10, total_cost=0.0, max_cost=None, verbose=False,
+            ))
+        self.assertEqual(pool.get(cid).verify_attempts, 0)
+
+    def test_unresolved_candidates_age_out_at_cap(self):
+        """Issue 28: a candidate unresolved across CANDIDATE_MAX_VERIFY_ATTEMPTS
+        verification phases is dumped as UNVERIFIED and dismissed instead of
+        circulating forever."""
+        pool = CandidatePool()
+        cid = self._seed_pool(pool)
+        with tempfile.TemporaryDirectory() as td:
+            fw = FindingWriter(td)
+            for attempt in range(1, controller.CANDIDATE_MAX_VERIFY_ATTEMPTS):
+                self._run_idle_phase(pool, fw)
+                self.assertEqual(pool.get(cid).status, "pending")
+                self.assertEqual(pool.get(cid).verify_attempts, attempt)
+
+            # Final failed phase ages the candidate out within the same call.
+            summary = self._run_idle_phase(pool, fw)
+            self.assertEqual(pool.get(cid).status, "dismissed")
+            self.assertIn("aged out", summary)
+            self.assertIn(cid, summary)
+        unverified = [p for p in fw.paths if "unverified-" in os.path.basename(p)]
+        self.assertEqual(len(unverified), 1)
 
 
 class TestDirectionPhase(unittest.TestCase):

@@ -107,6 +107,12 @@ DIRECTION_MAX_SUBSTEPS = 4
 # idle retries don't consume VERIFICATION_MAX_SUBSTEPS.
 VERIFICATION_IDLE_RETRIES = 3
 
+# Verification phases a candidate may survive unresolved before it ages out
+# (dumped to disk as UNVERIFIED and dismissed). Caps the prompt growth and
+# endless re-reproduction of unreproducible candidates by fresh verifier
+# clients that carry no memory of prior attempts.
+CANDIDATE_MAX_VERIFY_ATTEMPTS = 3
+
 # Finding/dump writes fail isolated per record — one bad write must never
 # abort a phase, mask an in-flight exception from the exit path, or lose the
 # rest of the evidence (mirrors secagent's per-write error handling).
@@ -330,9 +336,14 @@ def _format_pending_candidates_list(pending: list[FindingCandidate]) -> str:
         return "No pending finding candidates."
     lines = ["**Pending finding candidates (awaiting verification):**"]
     for c in pending:
+        attempts = (
+            f"\n  failed verification iterations: {c.verify_attempts}"
+            if c.verify_attempts else ""
+        )
         lines.append(
             f"- `{c.candidate_id}` [{c.severity}] {c.title} — {c.endpoint}\n"
-            f"  worker: {c.worker_id}\n"
+            f"  worker: {c.worker_id}"
+            f"{attempts}\n"
             f"  flows: {', '.join(c.flow_ids) or '(none)'}\n"
             f"  summary: {_short(c.summary, 200)}\n"
             f"  evidence: {_short(c.evidence_notes, 200)}\n"
@@ -733,6 +744,11 @@ async def run_verification_phase(
     of how a substep ends — success, error, or abort (drain-then-exit); an
     aborted or errored final substep never discards already-accepted work.
 
+    At phase end every still-pending candidate ages one failed verification
+    attempt; candidates past CANDIDATE_MAX_VERIFY_ATTEMPTS age out — dumped
+    to disk as UNVERIFIED and dismissed — so unreproducible candidates stop
+    circulating across iterations.
+
     Resets the verifier client before iteration ≥ 2 to drop the prior
     iteration's context. This is a cost-vs-context trade-off: carrying
     the prior iteration's transcript would help the verifier recognise
@@ -944,6 +960,8 @@ async def run_verification_phase(
     # aborted or errored substep; no-op on other exits.
     _apply_new_decisions()
 
+    aged = _age_out_candidates(candidates, finding_writer)
+
     summary = (
         decisions.verification_done_summary
         or f"Verification phase ended with {len(decisions.applied_findings)} filed, "
@@ -951,6 +969,12 @@ async def run_verification_phase(
            f"{len(decisions.applied_dismissals)} dismissed, "
            f"{len(candidates.pending())} still pending."
     )
+    if aged:
+        summary += (
+            f" {len(aged)} candidate(s) aged out after "
+            f"{CANDIDATE_MAX_VERIFY_ATTEMPTS} failed verification iterations: "
+            f"{', '.join(aged)}."
+        )
     return managed, phase_cost, summary
 
 
@@ -1320,6 +1344,39 @@ async def recover_errored_workers(
 # ---------------------------------------------------------------------------
 
 
+def _age_out_candidates(
+    candidates: CandidatePool, finding_writer: FindingWriter,
+) -> list[str]:
+    """Age out pending candidates past CANDIDATE_MAX_VERIFY_ATTEMPTS.
+
+    Called once per verification-phase end after the final drain; every
+    candidate still pending has failed one more full verifier pass. Aged-out
+    candidates are written to disk as UNVERIFIED first (same contract as
+    _dump_unverified_candidates) so aging out never drops evidence, then
+    marked dismissed. Failed writes stay pending and retry next phase.
+    Returns the aged-out candidate ids in pool order.
+    """
+    attempts = candidates.bump_verify_attempts()
+    stale_ids = [
+        cid for cid, n in attempts.items() if n >= CANDIDATE_MAX_VERIFY_ATTEMPTS]
+    aged: list[str] = []
+    for cid in stale_ids:
+        c = candidates.get(cid)
+        if c is None or c.status != "pending":
+            continue
+        try:
+            path = finding_writer.write_unverified_candidate(c)
+        except _FINDING_WRITE_ERRORS as exc:
+            log("verify", f"Age-out dump failed for {cid}: {exc}")
+            continue
+        candidates.mark(cid, "dismissed")
+        aged.append(cid)
+        log("verify",
+            f"Aged out {cid} after {CANDIDATE_MAX_VERIFY_ATTEMPTS} failed "
+            f"verification iterations → {path}")
+    return aged
+
+
 def _dump_unverified_candidates(
     candidates: CandidatePool, finding_writer: FindingWriter,
     tag: str = "ctrl-c",
@@ -1426,6 +1483,7 @@ async def run(config: Config) -> None:
             decisions,
             alive_worker_ids=lambda: [w.worker_id for w in workers if w.alive],
             run_progress=lambda: (iteration, finding_writer.run_count),
+            pending_candidate_ids=lambda: [c.candidate_id for c in candidates.pending()],
         )
 
         base_options = ClaudeAgentOptions(

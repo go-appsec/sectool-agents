@@ -17,6 +17,8 @@ from tools import (
     _is_premature_done,
     _parse_plan_args,
     _reject_wrong_phase,
+    _unresolved_pending_ids,
+    _verification_done_rejection,
     coalesce_decisions,
     extract_flow_ids,
 )
@@ -618,6 +620,137 @@ class TestDoneGuardRejection(unittest.TestCase):
 
     def test_no_alive_provider_skips_live_work(self):
         self.assertIsNone(_done_guard_rejection(self._queue(), None, None))
+
+
+class TestBumpVerifyAttempts(unittest.TestCase):
+    """Issue 28: failed verification attempts accumulate per pending candidate."""
+
+    def _pool_with(self, *titles: str) -> tuple[CandidatePool, list[str]]:
+        p = CandidatePool()
+        ids = [
+            p.add(worker_id=1, title=t, severity="low", endpoint="/x",
+                  flow_ids=["aaaa11"], summary="", evidence_notes="",
+                  reproduction_hint="")
+            for t in titles
+        ]
+        return p, ids
+
+    def test_counts_only_pending(self):
+        p, [c1, c2] = self._pool_with("a", "b")
+        p.mark(c2, "verified")
+        out = p.bump_verify_attempts()
+        self.assertEqual(out, {c1: 1})
+        self.assertEqual(p.get(c1).verify_attempts, 1)
+        self.assertEqual(p.get(c2).verify_attempts, 0)
+
+    def test_attempts_accumulate(self):
+        p, [c1] = self._pool_with("a")
+        p.bump_verify_attempts()
+        out = p.bump_verify_attempts()
+        self.assertEqual(out, {c1: 2})
+
+    def test_no_pending_returns_empty(self):
+        p, _ = self._pool_with()
+        self.assertEqual(p.bump_verify_attempts(), {})
+
+    def test_terminal_candidates_never_resume_counting(self):
+        """Terminal candidates are never bumped again."""
+        p, [c1] = self._pool_with("a")
+        p.bump_verify_attempts()
+        p.mark(c1, "dismissed")
+        self.assertEqual(p.bump_verify_attempts(), {})
+
+
+class TestUnresolvedPendingIds(unittest.TestCase):
+    """Issue 28: verification_done must see through queue records that the
+    post-substep drain will apply — same-burst file/dismiss + done is honest."""
+
+    def _queue(self) -> DecisionQueue:
+        q = DecisionQueue()
+        q.begin_phase(PHASE_VERIFICATION)
+        return q
+
+    def _pending_provider(self, *cids: str):
+        return lambda: list(cids)
+
+    def test_no_provider_means_nothing_unresolved(self):
+        self.assertEqual(_unresolved_pending_ids(self._queue(), None), [])
+
+    def test_pending_without_resolution_listed(self):
+        ids = _unresolved_pending_ids(
+            self._queue(), self._pending_provider("c001", "c002"))
+        self.assertEqual(ids, ["c001", "c002"])
+
+    def test_queued_dismissal_resolves(self):
+        q = self._queue()
+        q.add_dismissal("c001", "false positive")
+        ids = _unresolved_pending_ids(q, self._pending_provider("c001", "c002"))
+        self.assertEqual(ids, ["c002"])
+
+    def test_queued_finding_supersedes_resolves(self):
+        q = self._queue()
+        q.add_finding(FindingFiled(
+            title="T", severity="high", endpoint="/x", description="d",
+            reproduction_steps="r", evidence="e", impact="i",
+            verification_notes="v", supersedes_candidate_ids=["c001"]))
+        ids = _unresolved_pending_ids(q, self._pending_provider("c001", "c002"))
+        self.assertEqual(ids, ["c002"])
+
+    def test_queued_merge_supersedes_resolves(self):
+        q = self._queue()
+        q.add_merge(FindingMerged(
+            finding_id="F1", rationale="same bug",
+            supersedes_candidate_ids=["c001"]))
+        ids = _unresolved_pending_ids(q, self._pending_provider("c001"))
+        self.assertEqual(ids, [])
+
+    def test_supersedes_only_resolves_listed_candidates(self):
+        """A finding linked to one candidate leaves others unresolved."""
+        q = self._queue()
+        q.add_finding(FindingFiled(
+            title="T", severity="high", endpoint="/x", description="d",
+            reproduction_steps="r", evidence="e", impact="i",
+            verification_notes="v", supersedes_candidate_ids=["c001"]))
+        ids = _unresolved_pending_ids(q, self._pending_provider("c002"))
+        self.assertEqual(ids, ["c002"])
+
+
+class TestVerificationDoneRejection(unittest.TestCase):
+    """Issue 28: completing verification with unresolved candidates requires
+    an explicit confirm_open acknowledgment."""
+
+    def _queue(self) -> DecisionQueue:
+        q = DecisionQueue()
+        q.begin_phase(PHASE_VERIFICATION)
+        return q
+
+    def test_unresolved_without_confirm_rejected(self):
+        msg = _verification_done_rejection(
+            self._queue(), lambda: ["c001", "c002"], False)
+        self.assertIsNotNone(msg)
+        self.assertIn("c001, c002", msg)
+        self.assertIn("confirm_open=true", msg)
+
+    def test_confirm_open_acknowledges(self):
+        msg = _verification_done_rejection(
+            self._queue(), lambda: ["c001"], True)
+        self.assertIsNone(msg)
+
+    def test_no_candidates_accepted(self):
+        msg = _verification_done_rejection(
+            self._queue(), lambda: [], False)
+        self.assertIsNone(msg)
+
+    def test_queued_resolution_accepted_without_confirm(self):
+        q = self._queue()
+        q.add_dismissal("c001", "fp")
+        msg = _verification_done_rejection(q, lambda: ["c001"], False)
+        self.assertIsNone(msg)
+
+    def test_no_provider_accepted(self):
+        msg = _verification_done_rejection(
+            self._queue(), None, False)
+        self.assertIsNone(msg)
 
 
 class TestValidateRepoHint(unittest.TestCase):

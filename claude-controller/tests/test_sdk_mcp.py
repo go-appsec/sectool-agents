@@ -14,7 +14,13 @@ import warnings
 
 from claude_agent_sdk._internal.query import Query
 
-from tools import CandidatePool, build_orch_mcp_server, build_worker_mcp_server
+from tools import (
+    CandidatePool,
+    DecisionQueue,
+    PHASE_VERIFICATION,
+    build_orch_mcp_server,
+    build_worker_mcp_server,
+)
 
 
 _VALID_REPORT = {
@@ -127,6 +133,55 @@ class TestOrchToolErrorPropagation(unittest.TestCase):
         message = resp["error"]["message"]
         self.assertIn("not allowed in phase 'idle'", message)
         self.assertIn("Expected phase 'verification'", message)
+
+
+class TestVerificationDonePendingGuard(unittest.TestCase):
+    """Issue 28: verification_done with unresolved pending candidates is
+    rejected through the real dispatch path unless confirm_open is set."""
+
+    def _config(self, decisions: DecisionQueue, pending: list[str]):
+        return build_orch_mcp_server(
+            decisions,
+            pending_candidate_ids=lambda: pending,
+        )
+
+    def _verification_queue(self) -> DecisionQueue:
+        q = DecisionQueue()
+        q.begin_phase(PHASE_VERIFICATION)
+        return q
+
+    def test_unresolved_pending_rejected_as_errored_response(self):
+        decisions = self._verification_queue()
+        config = self._config(decisions, ["c001"])
+        resp = _call_tool(
+            config, "orch_tools", "verification_done", {"summary": "done"})
+        self.assertIn("error", resp)
+        message = resp["error"]["message"]
+        self.assertIn("1 pending candidate(s) unresolved: c001", message)
+        self.assertIn("confirm_open=true", message)
+        # The guard must not have ended the phase.
+        self.assertIsNone(decisions.verification_done_summary)
+
+    def test_confirm_open_accepted_and_acknowledges(self):
+        decisions = self._verification_queue()
+        config = self._config(decisions, ["c001"])
+        resp = _call_tool(
+            config, "orch_tools", "verification_done",
+            {"summary": "done", "confirm_open": True})
+        self.assertNotIn("error", resp)
+        text = resp["result"]["content"][0]["text"]
+        self.assertIn("Verification phase complete", text)
+        self.assertIn("c001", text)
+        self.assertEqual(decisions.verification_done_summary, "done")
+
+    def test_resolved_pending_accepted_without_confirm(self):
+        decisions = self._verification_queue()
+        config = self._config(decisions, [])
+        resp = _call_tool(
+            config, "orch_tools", "verification_done", {"summary": "done"})
+        self.assertNotIn("error", resp)
+        text = resp["result"]["content"][0]["text"]
+        self.assertEqual(text, "Verification phase complete.")
 
 
 if __name__ == "__main__":

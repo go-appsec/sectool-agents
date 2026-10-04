@@ -83,6 +83,9 @@ class FindingCandidate:
     evidence_notes: str
     reproduction_hint: str
     status: str = "pending"  # pending | verified | dismissed
+    # Completed verification phases where this candidate stayed unresolved;
+    # drives deterministic age-out (controller policy).
+    verify_attempts: int = 0
 
 
 class CandidatePool:
@@ -157,6 +160,21 @@ class CandidatePool:
                 return False
             c.status = status
             return True
+
+    def bump_verify_attempts(self) -> dict[str, int]:
+        """Count one failed verification phase for every pending candidate.
+
+        Returns candidate_id → updated attempt count; terminal candidates are
+        untouched so a resolved candidate's history never grows.
+        """
+        with self._lock:
+            out: dict[str, int] = {}
+            for i in self._order:
+                c = self._by_id[i]
+                if c.status == "pending":
+                    c.verify_attempts += 1
+                    out[c.candidate_id] = c.verify_attempts
+            return out
 
     def ids_since(self, counter_before: int) -> list[str]:
         """IDs minted after `counter_before`."""
@@ -909,20 +927,66 @@ def _done_guard_rejection(
     )
 
 
+def _unresolved_pending_ids(
+    decisions: DecisionQueue,
+    pending_candidate_ids: Any | None,
+) -> list[str]:
+    """Pending candidate IDs with no resolution recorded this phase.
+
+    Queue records count as resolved — the controller applies them in the
+    post-substep drain, after a tool handler returns. `pending_candidate_ids`
+    is a 0-arg callable returning the pool's pending IDs; None (no provider)
+    yields an empty list so the guard no-ops.
+    """
+    if pending_candidate_ids is None:
+        return []
+    resolved: set[str] = {d.candidate_id for d in decisions.dismissals}
+    for rec in (*decisions.findings, *decisions.merges):
+        resolved.update(rec.supersedes_candidate_ids)
+    return [cid for cid in pending_candidate_ids() if cid not in resolved]
+
+
+def _verification_done_rejection(
+    decisions: DecisionQueue,
+    pending_candidate_ids: Any | None,
+    confirm_open: bool,
+) -> str | None:
+    """Rejection text for `verification_done`, or None when it may proceed.
+
+    Completing verification with unresolved candidates requires an explicit
+    `confirm_open` acknowledgment so a lazy verifier cannot silently
+    downgrade them to unverified.
+    """
+    if confirm_open:
+        return None
+    unresolved = _unresolved_pending_ids(decisions, pending_candidate_ids)
+    if not unresolved:
+        return None
+    return (
+        f"Rejected: {len(unresolved)} pending candidate(s) unresolved: "
+        f"{', '.join(unresolved)}. Resolve each via `file_finding`, "
+        "`merge_into_finding`, or `dismiss_candidate`; if a candidate must "
+        "stay open, re-call with confirm_open=true to acknowledge it."
+    )
+
+
 def build_orch_mcp_server(
     decisions: DecisionQueue,
     alive_worker_ids: Any | None = None,
     run_progress: Any | None = None,
+    pending_candidate_ids: Any | None = None,
 ) -> Any:
     """SDK MCP server with the orchestrator's decision + finding tools.
 
     Tools are phase-gated by `decisions.phase`; calling the wrong tool in the
     wrong phase returns an is_error=True response.
 
-    Both callables feed the `done` handler's guards (see
-    _done_guard_rejection): `alive_worker_ids` returns currently-alive worker
-    IDs; `run_progress` returns (iteration, findings_count) for the run so
-    far. Each guard runs only when its provider is given.
+    Callables feed guards so rejections fire at the tool call (the model sees
+    why, instead of the controller silently voiding work): `alive_worker_ids`
+    returns currently-alive worker IDs; `run_progress` returns (iteration,
+    findings_count) for the run so far; `pending_candidate_ids` returns the
+    pool's pending candidate IDs. Each guard runs only when its provider is
+    given.
     """
 
     @tool(
@@ -1370,13 +1434,26 @@ def build_orch_mcp_server(
         (
             "Signal that the verification phase is complete. Call this after "
             "every pending candidate has been resolved via `file_finding` or "
-            "`dismiss_candidate`. Provide a 1-3 sentence summary of what you "
-            "verified, dismissed, and any open questions to pass along to the "
-            "direction phase."
+            "`dismiss_candidate`; unresolved candidates reject the call "
+            "unless `confirm_open` acknowledges them. Provide a 1-3 sentence "
+            "summary of what you verified, dismissed, and any open questions "
+            "to pass along to the direction phase."
         ),
         {
             "type": "object",
-            "properties": {"summary": {"type": "string"}},
+            "properties": {
+                "summary": {"type": "string"},
+                "confirm_open": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Acknowledge leaving pending candidates unresolved and "
+                        "end verification anyway. Required while any candidate "
+                        "is still pending; acknowledged candidates age out of "
+                        "the run after repeated failed iterations."
+                    ),
+                },
+            },
             "required": ["summary"],
         },
     )
@@ -1389,8 +1466,23 @@ def build_orch_mcp_server(
                 "content": [{"type": "text", "text": "Rejected: summary is required."}],
                 "is_error": True,
             }
+        confirm_open = bool(args.get("confirm_open", False))
+        rejection = _verification_done_rejection(
+            decisions, pending_candidate_ids, confirm_open)
+        if rejection is not None:
+            return {
+                "content": [{"type": "text", "text": rejection}],
+                "is_error": True,
+            }
+        unresolved = _unresolved_pending_ids(decisions, pending_candidate_ids)
         decisions.set_verification_done(summary)
-        return {"content": [{"type": "text", "text": "Verification phase complete."}]}
+        text = "Verification phase complete."
+        if unresolved:
+            text += (
+                f" {len(unresolved)} candidate(s) left pending by explicit "
+                f"acknowledgment: {', '.join(unresolved)}."
+            )
+        return {"content": [{"type": "text", "text": text}]}
 
     @tool(
         "direction_done",
