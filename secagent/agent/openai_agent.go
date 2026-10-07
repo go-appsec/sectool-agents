@@ -24,8 +24,14 @@ type OpenAIAgentConfig struct {
 	TurnTimeout       time.Duration
 	PerToolTimeout    time.Duration // per-tool-call timeout; 0 disables.
 	MaxParallelTools  int           // bound on concurrent tool dispatch; <=1 runs serial.
-	DrainRetryMax     int
-	DrainRetryBackoff time.Duration
+	DrainRetryMax     int           // retry cap for transient net/5xx errors
+	DrainRetryBackoff time.Duration // doubling base for transient retries
+	// RateLimitRetryBackoff is the first rung of the 429 backoff ladder; each
+	// retry doubles up to the final rung. Default 30s yields
+	// 30s -> 60s -> 2m -> 4m -> 8m -> 16m.
+	RateLimitRetryBackoff time.Duration
+	// RateLimitRetryMax is the number of 429 retry waits before propagating.
+	RateLimitRetryMax int
 	MaxTurnsPerAgent  int // hard cap on tool-dispatch rounds per Drain
 	// KeepThinkTurns is the count of recent assistant messages that retain
 	// <think> blocks on replay. 0 strips all. Inline handler only.
@@ -139,6 +145,12 @@ func NewOpenAIAgent(cfg OpenAIAgentConfig) *OpenAIAgent {
 	}
 	if cfg.DrainRetryBackoff == 0 {
 		cfg.DrainRetryBackoff = 2 * time.Second
+	}
+	if cfg.RateLimitRetryBackoff == 0 {
+		cfg.RateLimitRetryBackoff = 30 * time.Second
+	}
+	if cfg.RateLimitRetryMax <= 0 {
+		cfg.RateLimitRetryMax = 6
 	}
 	if cfg.MaxTurnsPerAgent <= 0 {
 		cfg.MaxTurnsPerAgent = 100
@@ -625,8 +637,10 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 	var retries int
 
 	// backoff sleeps draw from a fixed budget so a hostile Retry-After
-	// cannot pin the turn well past the per-turn timeout
-	waitCtx, cancelWait := context.WithTimeout(ctx, a.cfg.TurnTimeout)
+	// cannot pin the turn indefinitely; the rate-limit ladder buys extra
+	// budget on top of the per-turn timeout
+	waitCtx, cancelWait := context.WithTimeout(ctx,
+		a.cfg.TurnTimeout+ladderBudget(a.cfg.RateLimitRetryBackoff, a.cfg.RateLimitRetryMax))
 	defer cancelWait()
 
 	for attempt := 0; ; attempt++ {
@@ -667,10 +681,21 @@ func (a *OpenAIAgent) sendWithRetry(ctx context.Context) (ChatResponse, error) {
 			continue
 
 		case ErrRateLimit, ErrTransientNet:
-			if retries >= a.cfg.DrainRetryMax {
+			base, capWait, maxRetries := a.cfg.DrainRetryBackoff, transientBackoffCap, a.cfg.DrainRetryMax
+			maxWait := a.cfg.TurnTimeout
+			if cat == ErrRateLimit {
+				base = a.cfg.RateLimitRetryBackoff
+				maxRetries = a.cfg.RateLimitRetryMax
+				capWait = ladderCap(base, maxRetries)
+				// the final rung must survive the clamp
+				if capWait > maxWait {
+					maxWait = capWait
+				}
+			}
+			if retries >= maxRetries {
 				return ChatResponse{}, err
 			}
-			wait := BackoffFor(cat, retries, retryAfter, a.cfg.DrainRetryBackoff, a.cfg.TurnTimeout, a.cfg.Rand)
+			wait := BackoffFor(cat, retries, retryAfter, base, capWait, maxWait, a.cfg.Rand)
 			if retryAfter > wait && a.cfg.OnRetryWaitClamped != nil {
 				a.cfg.OnRetryWaitClamped(retryAfter, wait)
 			}

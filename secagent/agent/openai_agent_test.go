@@ -462,7 +462,8 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 	})
 
 	t.Run("rate_limit_retry_after", func(t *testing.T) {
-		// 429 with Retry-After ms hint: must wait at least that long before retry
+		// 429 with Retry-After ms hint: the hint raises the wait above the
+		// scheduled rung before retry
 		apiErr := &openai.APIError{HTTPStatusCode: 429, Message: "slow down; retry after 100 ms"}
 		client := &fakeChatClient{
 			responses: []ChatResponse{{}, {Content: "ok"}},
@@ -470,7 +471,7 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 		}
 		a := NewOpenAIAgent(OpenAIAgentConfig{
 			Model: "m", Pool: newPoolWith(client),
-			DrainRetryMax: 1, DrainRetryBackoff: time.Microsecond,
+			RateLimitRetryBackoff: time.Microsecond,
 		})
 		a.Query("go")
 		start := time.Now()
@@ -495,8 +496,8 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 		var requested, effective time.Duration
 		a := NewOpenAIAgent(OpenAIAgentConfig{
 			Model: "m", Pool: newPoolWith(client),
-			DrainRetryMax: 1, DrainRetryBackoff: time.Microsecond,
-			TurnTimeout: 60 * time.Millisecond,
+			RateLimitRetryBackoff: time.Microsecond,
+			TurnTimeout:           60 * time.Millisecond,
 			OnRetryWaitClamped: func(req, eff time.Duration) {
 				requested, effective = req, eff
 			},
@@ -526,8 +527,8 @@ func TestOpenAIAgent_SendWithRetry(t *testing.T) {
 		}
 		a := NewOpenAIAgent(OpenAIAgentConfig{
 			Model: "m", Pool: newPoolWith(client),
-			DrainRetryMax: 5, DrainRetryBackoff: time.Microsecond,
-			TurnTimeout: 100 * time.Millisecond,
+			RateLimitRetryBackoff: time.Microsecond,
+			TurnTimeout:           100 * time.Millisecond,
 		})
 		a.Query("go")
 		start := time.Now()

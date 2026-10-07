@@ -91,8 +91,18 @@ func TestParseRetryAfter(t *testing.T) {
 func TestBackoffFor_RateLimitRetryAfter(t *testing.T) {
 	t.Parallel()
 
-	got := BackoffFor(ErrRateLimit, 0, 500*time.Millisecond, time.Second, 0, rand.New(rand.NewSource(1)))
-	assert.Equal(t, 500*time.Millisecond, got)
+	t.Run("short_hint_ignored", func(t *testing.T) {
+		// a hint below the scheduled rung cannot shorten the wait
+		got := BackoffFor(ErrRateLimit, 0, 500*time.Millisecond, 30*time.Second, 16*time.Minute, 0,
+			rand.New(rand.NewSource(1)))
+		assert.GreaterOrEqual(t, got, 24*time.Second)
+		assert.Less(t, got, 36*time.Second)
+	})
+	t.Run("hint_raises_wait", func(t *testing.T) {
+		got := BackoffFor(ErrRateLimit, 0, 5*time.Minute, 30*time.Second, 16*time.Minute, 0,
+			rand.New(rand.NewSource(1)))
+		assert.Equal(t, 5*time.Minute, got)
+	})
 }
 
 func TestBackoffFor_NonRetryable(t *testing.T) {
@@ -101,7 +111,7 @@ func TestBackoffFor_NonRetryable(t *testing.T) {
 	cats := []ErrCategory{ErrOther, ErrDeadline, ErrContextOverflow, ErrModelError}
 	for _, cat := range cats {
 		t.Run(fmt.Sprintf("category_%d", cat), func(t *testing.T) {
-			got := BackoffFor(cat, 0, 0, time.Second, 0, rand.New(rand.NewSource(1)))
+			got := BackoffFor(cat, 0, 0, time.Second, 30*time.Second, 0, rand.New(rand.NewSource(1)))
 			assert.Zero(t, got)
 		})
 	}
@@ -111,19 +121,23 @@ func TestBackoffFor_Clamped(t *testing.T) {
 	t.Parallel()
 
 	t.Run("rate_limit_hint", func(t *testing.T) {
-		got := BackoffFor(ErrRateLimit, 0, 24*time.Hour, time.Second, 30*time.Second, rand.New(rand.NewSource(1)))
+		got := BackoffFor(ErrRateLimit, 0, 24*time.Hour, 30*time.Second, 16*time.Minute, 30*time.Second,
+			rand.New(rand.NewSource(1)))
 		assert.Equal(t, 30*time.Second, got)
 	})
 	t.Run("rate_limit_hint_within_ceiling", func(t *testing.T) {
-		got := BackoffFor(ErrRateLimit, 0, 5*time.Second, time.Second, 30*time.Second, rand.New(rand.NewSource(1)))
+		got := BackoffFor(ErrRateLimit, 0, 5*time.Second, time.Second, 16*time.Minute, 30*time.Second,
+			rand.New(rand.NewSource(1)))
 		assert.Equal(t, 5*time.Second, got)
 	})
 	t.Run("exponential", func(t *testing.T) {
-		got := BackoffFor(ErrTransientNet, 20, 0, time.Second, 10*time.Second, rand.New(rand.NewSource(1)))
+		got := BackoffFor(ErrTransientNet, 20, 0, time.Second, 30*time.Second, 10*time.Second,
+			rand.New(rand.NewSource(1)))
 		assert.Equal(t, 10*time.Second, got)
 	})
 	t.Run("zero_ceiling_unbounded", func(t *testing.T) {
-		got := BackoffFor(ErrRateLimit, 0, 24*time.Hour, time.Second, 0, rand.New(rand.NewSource(1)))
+		got := BackoffFor(ErrRateLimit, 0, 24*time.Hour, 30*time.Second, 24*time.Hour, 0,
+			rand.New(rand.NewSource(1)))
 		assert.Equal(t, 24*time.Hour, got)
 	})
 }
@@ -136,25 +150,26 @@ func TestBackoffFor_JitteredExponential(t *testing.T) {
 		cat     ErrCategory
 		attempt int
 		base    time.Duration
+		cap     time.Duration
 		wantMin time.Duration
 		wantMax time.Duration
 	}{
 		// attempt 2: base * 2^2 = 400ms before jitter; jitter +/-20% -> [320ms, 480ms)
-		{name: "rate_limit_no_hint", cat: ErrRateLimit, attempt: 2, base: 100 * time.Millisecond,
+		{name: "rate_limit_no_hint", cat: ErrRateLimit, attempt: 2, base: 100 * time.Millisecond, cap: 16 * time.Minute,
 			wantMin: 320 * time.Millisecond, wantMax: 480 * time.Millisecond},
 		// attempt 0: base * 2^0 = 200ms before jitter -> [160ms, 240ms)
-		{name: "transient_attempt_zero", cat: ErrTransientNet, base: 200 * time.Millisecond,
+		{name: "transient_attempt_zero", cat: ErrTransientNet, base: 200 * time.Millisecond, cap: 30 * time.Second,
 			wantMin: 160 * time.Millisecond, wantMax: 240 * time.Millisecond},
 		// attempt 20: exponential capped at 30s, then jittered +/-20% -> [24s, 36s)
-		{name: "transient_capped", cat: ErrTransientNet, attempt: 20, base: time.Second,
+		{name: "transient_capped", cat: ErrTransientNet, attempt: 20, base: time.Second, cap: 30 * time.Second,
 			wantMin: 24 * time.Second, wantMax: 36 * time.Second},
-		// rate-limit cap is 60s; attempt 20 saturates and jitters -> [48s, 72s)
-		{name: "rate_limit_capped", cat: ErrRateLimit, attempt: 20, base: time.Second,
-			wantMin: 48 * time.Second, wantMax: 72 * time.Second},
+		// rate-limit cap is 16m; attempt 20 saturates and jitters -> [12.8m, 19.2m)
+		{name: "rate_limit_capped", cat: ErrRateLimit, attempt: 20, base: time.Second, cap: 16 * time.Minute,
+			wantMin: 768 * time.Second, wantMax: 1152 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := BackoffFor(tc.cat, tc.attempt, 0, tc.base, 0, rand.New(rand.NewSource(1)))
+			got := BackoffFor(tc.cat, tc.attempt, 0, tc.base, tc.cap, 0, rand.New(rand.NewSource(1)))
 			assert.GreaterOrEqual(t, got, tc.wantMin)
 			assert.Less(t, got, tc.wantMax)
 		})
@@ -167,6 +182,19 @@ func TestExpBackoff_OverflowSafe(t *testing.T) {
 	// huge attempt counts must saturate at cap, not overflow negative
 	got := expBackoff(time.Second, 10_000, 30*time.Second)
 	assert.Equal(t, 30*time.Second, got)
+}
+
+func TestLadder(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default_rungs", func(t *testing.T) {
+		assert.Equal(t, 30*time.Second, ladderCap(30*time.Second, 1))
+		assert.Equal(t, 16*time.Minute, ladderCap(30*time.Second, 6))
+	})
+	t.Run("budget", func(t *testing.T) {
+		// 30+60+120+240+480+960 = 1890s, plus 20% jitter headroom
+		assert.Equal(t, 37*time.Minute+48*time.Second, ladderBudget(30*time.Second, 6))
+	})
 }
 
 // fakeNetErr implements net.Error so Classify exercises the timeout branch.

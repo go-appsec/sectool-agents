@@ -25,7 +25,8 @@ const (
 	// ErrContextOverflow is the upstream model rejecting for context-length.
 	// Handled by the in-flight hard-truncate fast-path, not by retry.
 	ErrContextOverflow
-	// ErrRateLimit is a 429. Honor Retry-After when present.
+	// ErrRateLimit is a 429. Waits double along a dedicated ladder; a larger
+	// Retry-After hint raises a rung but never shortens it.
 	ErrRateLimit
 	// ErrTransientNet is 5xx, net timeout, or connection reset. Retry with exponential backoff + jitter.
 	ErrTransientNet
@@ -140,20 +141,20 @@ func parseRetryAfter(message string) time.Duration {
 }
 
 // BackoffFor returns the wait time for retry category cat at the
-// 0-indexed attempt. retryAfter is the endpoint Retry-After hint (0 when
-// absent). maxWait caps the result when positive. rng may be nil to use
-// package-level randomness.
-func BackoffFor(cat ErrCategory, attempt int, retryAfter, base, maxWait time.Duration, rng *rand.Rand) time.Duration {
+// 0-indexed attempt: jittered exponential from base to cap. retryAfter is
+// the endpoint Retry-After hint (0 when absent); for rate limits it raises
+// but never shortens the scheduled wait. maxWait caps the result when
+// positive. rng may be nil to use package-level randomness.
+func BackoffFor(cat ErrCategory, attempt int, retryAfter, base, cap, maxWait time.Duration, rng *rand.Rand) time.Duration {
 	var d time.Duration
 	switch cat {
 	case ErrRateLimit:
-		if retryAfter > 0 {
+		d = jitter(expBackoff(base, attempt, cap), rng)
+		if retryAfter > d {
 			d = retryAfter
-		} else {
-			d = jitter(expBackoff(base, attempt, 60*time.Second), rng)
 		}
 	case ErrTransientNet:
-		d = jitter(expBackoff(base, attempt, 30*time.Second), rng)
+		d = jitter(expBackoff(base, attempt, cap), rng)
 	}
 	return clampWait(d, maxWait)
 }
@@ -164,6 +165,33 @@ func clampWait(d, maxWait time.Duration) time.Duration {
 		return maxWait
 	}
 	return d
+}
+
+const (
+	// transientBackoffCap bounds the transient net/5xx retry wait.
+	transientBackoffCap = 30 * time.Second
+	// maxBackoffCap is the absolute ceiling for any computed ladder rung.
+	maxBackoffCap = 24 * time.Hour
+)
+
+// ladderCap returns the final rung of a steps-long doubling ladder from
+// base, serving as the per-wait ceiling for rate-limit waits.
+func ladderCap(base time.Duration, steps int) time.Duration {
+	if steps <= 1 {
+		return base
+	}
+	return expBackoff(base, steps-1, maxBackoffCap)
+}
+
+// ladderBudget returns the cumulative wait of a steps-long doubling ladder
+// from base plus 20% jitter headroom, sizing the per-send backoff budget.
+func ladderBudget(base time.Duration, steps int) time.Duration {
+	cap := ladderCap(base, steps)
+	var total time.Duration
+	for i := range steps {
+		total += expBackoff(base, i, cap)
+	}
+	return total + total/5
 }
 
 func expBackoff(base time.Duration, attempt int, cap time.Duration) time.Duration {
