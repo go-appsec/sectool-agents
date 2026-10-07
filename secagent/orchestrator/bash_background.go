@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -19,7 +18,6 @@ type BashBackground struct {
 	ctx    context.Context // run lifetime; canceled when Run ends or KillAll fires
 	cancel context.CancelCauseFunc
 	wg     sync.WaitGroup
-	active atomic.Int32
 }
 
 // NewBashBackground returns a tracker whose processes are killed when parent
@@ -29,13 +27,9 @@ func NewBashBackground(parent context.Context) *BashBackground {
 	return &BashBackground{ctx: ctx, cancel: cancel}
 }
 
-// Len returns the number of still-running background processes.
-func (b *BashBackground) Len() int {
-	return int(b.active.Load())
-}
-
-// killWaitTimeout bounds KillAll so the stage-3 kill path can never hang on
-// a process stuck in uninterruptible sleep (D state ignores SIGKILL).
+// killWaitTimeout bounds group-kill waits so a process stuck in
+// uninterruptible sleep (D state ignores SIGKILL) can't hang KillAll or a
+// timeout-killed foreground bash call.
 const killWaitTimeout = 5 * time.Second
 
 // KillAll kills every tracked process group and waits for the stopped lines
@@ -82,32 +76,43 @@ func (b *BashBackground) Start(ctx context.Context, command string) (string, err
 	cmd := exec.CommandContext(context.WithoutCancel(ctx), "bash", "-c", command)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	// own process group so the reap kill takes out the whole child tree
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// own process group so kills take out the whole child tree; the tracker's
+	// ctx never fires, so Cancel stays dormant and reap does the group kill
+	armProcessGroup(cmd, killWaitTimeout)
 
 	b.wg.Add(1)
-	b.active.Add(1)
 	if b.ctx.Err() != nil {
 		// re-check after registering so KillAll can't miss this process
 		discardTemp(stdout)
 		discardTemp(stderr)
-		b.active.Add(-1)
 		b.wg.Done()
 		return "", errors.New("background execution is shut down")
 	}
 	if err := cmd.Start(); err != nil {
 		discardTemp(stdout)
 		discardTemp(stderr)
-		b.active.Add(-1)
 		b.wg.Done()
 		return "", err
 	}
 	go b.reap(cmd, stdout, stderr)
 	return fmt.Sprintf(
 		"Background process started: pid %d\nstdout log: %s\nstderr log: %s\n"+
-			"Tail the log files to review progress; `kill %d` stops it (children share process group %d).",
+			"Tail the log files to review progress; `kill -- -%d` stops it and all "+
+			"children (negative pid targets process group %d).",
 		cmd.Process.Pid, stdout.Name(), stderr.Name(), cmd.Process.Pid, cmd.Process.Pid,
 	), nil
+}
+
+// armProcessGroup stages cmd in its own process group with a group-wide
+// SIGKILL on context cancelation, so a timeout takes out detached
+// grandchildren instead of orphaning them. waitDelay bounds Wait if a
+// survivor holds the output pipes.
+func armProcessGroup(cmd *exec.Cmd, waitDelay time.Duration) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = waitDelay
 }
 
 // reap waits for the process to exit naturally or for the tracker's lifetime
@@ -125,7 +130,6 @@ func (b *BashBackground) reap(cmd *exec.Cmd, stdout, stderr *os.File) {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		err = <-waited
 	}
-	b.active.Add(-1)
 	line := fmt.Sprintf("=== background process stopped (%s) at %s\n",
 		waitStatus(err), time.Now().Format(time.RFC3339))
 	_, _ = stdout.WriteString(line)

@@ -218,7 +218,7 @@ func BashToolDef(maxResultBytes int, bg *BashBackground) agent.ToolDef {
 				},
 				"background": map[string]any{
 					"type":        "boolean",
-					"description": "Run detached and return immediately with the pid plus stdout/stderr log file paths. Only use when necessary — when a command must outlive this tool call (long polls, listeners, servers). Tail the returned logs to review progress and kill the pid when done.",
+					"description": "Run detached and return immediately with the pid plus stdout/stderr log file paths. Only use when necessary — when a command must outlive this tool call (long polls, listeners, servers). Tail the returned logs to review progress; stop the job with `kill -- -PID` (targets the whole process group) when done.",
 				},
 			},
 			"required": []string{"command"},
@@ -257,6 +257,9 @@ func BashToolDef(maxResultBytes int, bg *BashBackground) agent.ToolDef {
 				return agent.ToolResult{Text: text}
 			}
 			cmd := exec.CommandContext(ctx, "bash", "-c", in.Command)
+			// own process group so the per-tool timeout kills the whole child
+			// tree, not just the bash child it can see
+			armProcessGroup(cmd, killWaitTimeout)
 			var combined bytes.Buffer
 			cmd.Stdout = &combined
 			cmd.Stderr = &combined
