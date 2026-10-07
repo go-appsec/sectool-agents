@@ -73,10 +73,11 @@ func TestPublishJoins(t *testing.T) {
 			Workers: []*WorkerState{w1}, Fire: fire,
 		}, nil)
 
+		log, _ := newTestLogger(t)
 		inflight := map[int]workerRun{}
 		publishJoins(inflight, res)
 		require.Len(t, inflight, 1)
-		assert.Equal(t, []agent.TurnSummary{{AssistantText: "w1 iter+1"}}, harvestInflight(inflight)[1])
+		assert.Equal(t, []agent.TurnSummary{{AssistantText: "w1 iter+1"}}, harvestInflight(t.Context(), inflight, log)[1])
 	})
 
 	t.Run("nil_result_noop", func(t *testing.T) {

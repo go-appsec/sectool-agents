@@ -16,6 +16,10 @@ const (
 	EscalationCandidate = "candidate"
 	// EscalationContextExhausted mirrors agent drain's context-overflow escalation.
 	EscalationContextExhausted = "context_exhausted"
+	// EscalationAbandoned marks a run result that never landed — the join
+	// gave up on a goroutine wedged outside ctx's reach and applied this
+	// placeholder instead.
+	EscalationAbandoned = "abandoned"
 )
 
 // UpdateStallStreaks adjusts each alive worker's ProgressNoneStreak from

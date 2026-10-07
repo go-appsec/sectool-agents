@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,12 +25,12 @@ func stubSpawn(counter *int) workerSpawnFunc {
 }
 
 // stubFire returns a fire callback that records every fired worker id and yields an empty run result on join.
-func stubFire(t *testing.T) (func(context.Context, *WorkerState) func() workerRunResult, *[]int) {
+func stubFire(t *testing.T) (FireWorkerFunc, *[]int) {
 	t.Helper()
 	fired := []int{}
-	return func(_ context.Context, w *WorkerState) func() workerRunResult {
+	return func(_ context.Context, w *WorkerState) WorkerJoinFunc {
 		fired = append(fired, w.ID)
-		return func() workerRunResult { return workerRunResult{} }
+		return func(context.Context) (workerRunResult, bool) { return workerRunResult{}, true }
 	}, &fired
 }
 
@@ -151,22 +152,45 @@ func TestRefireAlive(t *testing.T) {
 func TestHarvestInflight(t *testing.T) {
 	t.Parallel()
 
-	w1 := &WorkerState{ID: 1}
-	w2 := &WorkerState{ID: 2}
-	inflight := map[int]workerRun{
-		1: {w: w1, join: func() workerRunResult {
-			return workerRunResult{
-				EscalationReason: "budget",
-				AutonomousTurns:  []agent.TurnSummary{{AssistantText: "w1"}},
-			}
-		}},
-		2: {w: w2, join: func() workerRunResult { return workerRunResult{} }},
-	}
-	out := harvestInflight(inflight)
-	assert.Len(t, out, 2)
-	require.Len(t, out[1], 1)
-	assert.Equal(t, "w1", out[1][0].AssistantText)
-	// harvest applies each run result to its worker
-	assert.Equal(t, "budget", w1.EscalationReason)
-	assert.Len(t, w1.AutonomousTurns, 1)
+	t.Run("applies_results", func(t *testing.T) {
+		log, _ := newTestLogger(t)
+
+		w1 := &WorkerState{ID: 1}
+		w2 := &WorkerState{ID: 2}
+		inflight := map[int]workerRun{
+			1: {w: w1, join: func(context.Context) (workerRunResult, bool) {
+				return workerRunResult{
+					EscalationReason: "budget",
+					AutonomousTurns:  []agent.TurnSummary{{AssistantText: "w1"}},
+				}, true
+			}},
+			2: {w: w2, join: func(context.Context) (workerRunResult, bool) {
+				return workerRunResult{}, true
+			}},
+		}
+		out := harvestInflight(t.Context(), inflight, log)
+		assert.Len(t, out, 2)
+		require.Len(t, out[1], 1)
+		assert.Equal(t, "w1", out[1][0].AssistantText)
+		// harvest applies each run result to its worker
+		assert.Equal(t, "budget", w1.EscalationReason)
+		assert.Len(t, w1.AutonomousTurns, 1)
+	})
+
+	t.Run("abandoned_join_applies_placeholder", func(t *testing.T) {
+		log, _ := newTestLogger(t)
+
+		w := &WorkerState{ID: 3}
+		ctx, cancel := context.WithCancel(t.Context())
+		inflight := map[int]workerRun{
+			3: {w: w, join: func(ctx context.Context) (workerRunResult, bool) {
+				return workerJoinWait(ctx, t.Context(), make(chan workerRunResult), time.Millisecond)
+			}},
+		}
+		cancel()
+		out := harvestInflight(ctx, inflight, log)
+		assert.Empty(t, out[3])
+		// the abandoned placeholder is applied so worker state stays coherent
+		assert.Equal(t, EscalationAbandoned, w.EscalationReason)
+	})
 }

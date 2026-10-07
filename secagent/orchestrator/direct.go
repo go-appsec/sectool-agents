@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-analyze/bulk"
 
@@ -18,21 +19,58 @@ import (
 // FireWorkerFunc starts one worker's iter+1 autonomous run and returns a
 // join function that blocks for the run result. The controller applies the
 // result to the worker at join time.
-type FireWorkerFunc func(ctx context.Context, w *WorkerState) (joinFn func() workerRunResult)
+type FireWorkerFunc func(ctx context.Context, w *WorkerState) (joinFn WorkerJoinFunc)
+
+// WorkerJoinFunc blocks for one fired run's result. ok is false when the
+// wait was abandoned — the run or caller context fired without a result
+// landing — and the returned result is an abandoned placeholder.
+type WorkerJoinFunc func(ctx context.Context) (workerRunResult, bool)
 
 // workerRun pairs a fired run's join with its worker so joining also applies
 // the run result to the shared WorkerState on the controller goroutine.
 type workerRun struct {
 	w    *WorkerState
-	join func() workerRunResult
+	join WorkerJoinFunc
 }
 
-// joinAndApply blocks for the run result, applies it to the worker, and
-// returns the run's turn summaries.
-func (r workerRun) joinAndApply() []agent.TurnSummary {
-	res := r.join()
+// joinAndApply waits for the run result and applies it to the worker.
+// ok is false when the join was abandoned; the placeholder result is
+// applied anyway so worker state stays coherent for teardown paths.
+func (r workerRun) joinAndApply(ctx context.Context) ([]agent.TurnSummary, bool) {
+	res, ok := r.join(ctx)
 	r.w.ApplyRunResult(res)
-	return res.AutonomousTurns
+	return res.AutonomousTurns, ok
+}
+
+// joinSalvageWait bounds how long a canceled run may keep the join waiting
+// for its result. Healthy runs land a result within moments of ctx
+// cancellation, so only a goroutine wedged outside ctx's reach burns the
+// full grace before the join abandons it.
+const joinSalvageWait = 3 * time.Second
+
+// workerJoinWait blocks for one run result, giving up when the caller ctx,
+// the run ctx (after a salvage grace), or both fire first. A result already
+// in the channel always wins over abandonment.
+func workerJoinWait(ctx, runCtx context.Context,
+	resultCh <-chan workerRunResult, grace time.Duration) (workerRunResult, bool) {
+	select {
+	case res := <-resultCh:
+		return res, true
+	default:
+	}
+	select {
+	case res := <-resultCh:
+		return res, true
+	case <-ctx.Done():
+	case <-runCtx.Done():
+		select {
+		case res := <-resultCh:
+			return res, true
+		case <-time.After(grace):
+		case <-ctx.Done():
+		}
+	}
+	return workerRunResult{EscalationReason: EscalationAbandoned}, false
 }
 
 // SpawnChildFunc returns a forked child worker provisioned with id and the initial instruction.
@@ -62,8 +100,9 @@ type DecisionPhaseResult struct {
 }
 
 // Wait blocks on every fired worker run, applies each result to its worker,
-// and returns the per-worker turn-summary map.
-func (r *DecisionPhaseResult) Wait() map[int][]agent.TurnSummary {
+// and returns the per-worker turn-summary map. Abandoned joins apply their
+// placeholder and contribute no turns.
+func (r *DecisionPhaseResult) Wait(ctx context.Context) map[int][]agent.TurnSummary {
 	if r == nil {
 		return nil
 	}
@@ -72,7 +111,7 @@ func (r *DecisionPhaseResult) Wait() map[int][]agent.TurnSummary {
 	joins := r.joins
 	r.mu.Unlock()
 	for id, j := range joins {
-		out[id] = j.joinAndApply()
+		out[id], _ = j.joinAndApply(ctx)
 	}
 	return out
 }

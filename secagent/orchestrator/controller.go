@@ -731,16 +731,20 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 		narrator.TriggerNow(narrCtx)
 	}
 
-	// fires one worker's iter run as a goroutine; the returned func blocks
-	// for the run result. Run state is seeded here (and applied at join
-	// time) so run goroutines never mutate shared WorkerState.
-	fire := func(fctx context.Context, w *WorkerState) func() workerRunResult {
+	// fires one worker's iter run as a goroutine; the returned join blocks
+	// for the run result but abandons the wait once the run or caller context
+	// fires without a result landing (wedged run goroutine). Run state is
+	// seeded here (and applied at join time) so run goroutines never mutate
+	// shared WorkerState.
+	fire := func(fctx context.Context, w *WorkerState) WorkerJoinFunc {
 		rs := newWorkerRunResult(w)
 		resultCh := make(chan workerRunResult, 1)
 		go func() {
 			resultCh <- runOneWorker(fctx, w, rs, candidates, log)
 		}()
-		return func() workerRunResult { return <-resultCh }
+		return func(ctx context.Context) (workerRunResult, bool) {
+			return workerJoinWait(ctx, fctx, resultCh, joinSalvageWait)
+		}
 	}
 
 	// provisions a forked child; chronicle inheritance happens in direct.go
@@ -790,7 +794,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 
 		phaseTransition("idle", "autonomous")
 		narrator.Tick(narrCtx)
-		workerRuns := harvestInflight(inflight)
+		workerRuns := harvestInflight(ctx, inflight, log)
 		inflight = map[int]workerRun{}
 
 		// cancel-check AFTER harvest so prior-iter in-flight workers are reaped first
@@ -966,7 +970,7 @@ func Run(ctx context.Context, cfg *config.Config, attached bool, log *Logger, sd
 	}
 
 	// join runs the loop fired but never harvested (end_run / max-iterations exits)
-	_ = harvestInflight(inflight)
+	_ = harvestInflight(ctx, inflight, log)
 
 	// all worker submissions are joined; settle pending merges before final
 	// verification, the unvalidated dump, and the summary below so none of
@@ -1042,7 +1046,7 @@ func isDeadIteration(workerRuns map[int][]agent.TurnSummary, candidatesBefore, c
 // affected worker's iter+1 run via fire, recording the join in inflight.
 // Entries that exceed maxWorkers or collide with retired IDs are skipped with a log entry.
 func applyPlanAndFire(ctx context.Context, plan []PlanEntry, workers *[]*WorkerState, spawn workerSpawnFunc,
-	maxWorkers int, fire func(context.Context, *WorkerState) func() workerRunResult,
+	maxWorkers int, fire FireWorkerFunc,
 	inflight map[int]workerRun, log *Logger) {
 	byID := map[int]*WorkerState{}
 	var existing int
@@ -1060,7 +1064,7 @@ func applyPlanAndFire(ctx context.Context, plan []PlanEntry, workers *[]*WorkerS
 		}
 		planned[p.WorkerID] = true
 		if w, ok := byID[p.WorkerID]; ok && w.Alive {
-			stopInflightWorkerRun(w, inflight, log)
+			stopInflightWorkerRun(ctx, w, inflight, log)
 			w.LastInstruction = p.Assignment
 			if hasProductiveTurn(w.AutonomousTurns) {
 				w.ProgressNoneStreak = 0
@@ -1093,7 +1097,7 @@ func applyPlanAndFire(ctx context.Context, plan []PlanEntry, workers *[]*WorkerS
 	}
 }
 
-func stopInflightWorkerRun(w *WorkerState, inflight map[int]workerRun, log *Logger) {
+func stopInflightWorkerRun(ctx context.Context, w *WorkerState, inflight map[int]workerRun, log *Logger) {
 	if w == nil || inflight == nil {
 		return
 	}
@@ -1104,15 +1108,18 @@ func stopInflightWorkerRun(w *WorkerState, inflight map[int]workerRun, log *Logg
 	if w.Agent != nil {
 		w.Agent.Interrupt()
 	}
-	_ = run.joinAndApply()
+	if _, ok := run.joinAndApply(ctx); !ok {
+		log.Log("plan", "join abandoned — wedged run goroutine did not exit with its ctx", map[string]any{
+			"worker_id": w.ID,
+		})
+	}
 	delete(inflight, w.ID)
 	log.Log("plan", "replaced in-flight run", map[string]any{"worker_id": w.ID})
 }
 
 // refireAlive fires an iter+1 run for every alive worker that doesn't already have a join in inflight.
 func refireAlive(ctx context.Context, workers []*WorkerState,
-	fire func(context.Context, *WorkerState) func() workerRunResult,
-	inflight map[int]workerRun, log *Logger) {
+	fire FireWorkerFunc, inflight map[int]workerRun, log *Logger) {
 	for _, w := range workers {
 		if !w.Alive {
 			continue
@@ -1137,11 +1144,18 @@ func publishJoins(inflight map[int]workerRun, res *DecisionPhaseResult) {
 }
 
 // harvestInflight blocks on every join in inflight, applies each run result
-// to its worker, and returns the per-worker turn-summary map.
-func harvestInflight(inflight map[int]workerRun) map[int][]agent.TurnSummary {
+// to its worker, and returns the per-worker turn-summary map. Abandoned
+// joins are logged and contribute no turns.
+func harvestInflight(ctx context.Context, inflight map[int]workerRun, log *Logger) map[int][]agent.TurnSummary {
 	out := map[int][]agent.TurnSummary{}
 	for id, r := range inflight {
-		out[id] = r.joinAndApply()
+		turns, ok := r.joinAndApply(ctx)
+		if !ok {
+			log.Log("controller", "join abandoned — run goroutine did not exit with its ctx", map[string]any{
+				"worker_id": id,
+			})
+		}
+		out[id] = turns
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,12 +21,14 @@ func scriptedFireFn(t *testing.T, turns map[int][]agent.TurnSummary) (FireWorker
 
 	var mu sync.Mutex
 	var fired []int
-	return func(_ context.Context, w *WorkerState) func() workerRunResult {
+	return func(_ context.Context, w *WorkerState) WorkerJoinFunc {
 			mu.Lock()
 			fired = append(fired, w.ID)
 			mu.Unlock()
 			result := turns[w.ID]
-			return func() workerRunResult { return workerRunResult{AutonomousTurns: result} }
+			return func(context.Context) (workerRunResult, bool) {
+				return workerRunResult{AutonomousTurns: result}, true
+			}
 		}, func() []int {
 			mu.Lock()
 			defer mu.Unlock()
@@ -70,7 +73,7 @@ func TestRunDecisionPhase(t *testing.T) {
 		require.Len(t, decisions.WorkerDecisions, 2)
 		assert.Equal(t, "next w1", w1.LastInstruction)
 		assert.Equal(t, "next w2", w2.LastInstruction)
-		assert.Len(t, res.Wait(), 2)
+		assert.Len(t, res.Wait(t.Context()), 2)
 	})
 
 	t.Run("defaults_to_continue", func(t *testing.T) {
@@ -387,5 +390,54 @@ func TestRunIter1ReconPlanCall(t *testing.T) {
 		assert.Equal(t, 2, turn)
 		assert.False(t, decisions.HasPlan)
 		assert.True(t, decisions.HasDirectionDone)
+	})
+}
+
+func TestWorkerJoinWait(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns_landed_result", func(t *testing.T) {
+		runCtx, stopRun := context.WithCancel(t.Context())
+		stopRun()
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		ch := make(chan workerRunResult, 1)
+		ch <- workerRunResult{EscalationReason: EscalationBudget}
+		res, ok := workerJoinWait(ctx, runCtx, ch, time.Second)
+		assert.True(t, ok)
+		assert.Equal(t, EscalationBudget, res.EscalationReason)
+	})
+
+	t.Run("abandons_when_caller_ctx_canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		res, ok := workerJoinWait(ctx, t.Context(), make(chan workerRunResult), time.Second)
+		assert.False(t, ok)
+		assert.Equal(t, EscalationAbandoned, res.EscalationReason)
+	})
+
+	t.Run("salvages_result_within_grace", func(t *testing.T) {
+		runCtx, stopRun := context.WithCancel(t.Context())
+		stopRun()
+		ch := make(chan workerRunResult, 1)
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			ch <- workerRunResult{EscalationReason: EscalationCandidate}
+		}()
+		res, ok := workerJoinWait(t.Context(), runCtx, ch, time.Second)
+		assert.True(t, ok)
+		assert.Equal(t, EscalationCandidate, res.EscalationReason)
+	})
+
+	t.Run("abandons_after_grace", func(t *testing.T) {
+		runCtx, stopRun := context.WithCancel(t.Context())
+		stopRun()
+		ch := make(chan workerRunResult, 1)
+		go func() {
+			time.Sleep(time.Second)
+			ch <- workerRunResult{EscalationReason: EscalationCandidate}
+		}()
+		_, ok := workerJoinWait(t.Context(), runCtx, ch, 20*time.Millisecond)
+		assert.False(t, ok)
 	})
 }
