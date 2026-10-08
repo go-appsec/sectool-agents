@@ -1,10 +1,13 @@
 export GO111MODULE = on
 
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS := -ldflags "-X github.com/go-appsec/sectool-agents/secagent/version.Version=$(VERSION)"
+
 .PHONY: build clean test test-cover bench lint
 
 build:
 	@mkdir -p bin
-	go build -o bin/secagent .
+	go build $(LDFLAGS) -o bin/secagent .
 
 clean:
 	rm -rf bin/

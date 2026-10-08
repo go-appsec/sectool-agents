@@ -4,11 +4,29 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/go-appsec/sectool-agents/secagent/version"
 )
+
+// defaultUserAgent identifies secagent on outbound requests that carry none.
+var defaultUserAgent = "secagent/" + version.Version
+
+// uaTransport injects defaultUserAgent onto requests that don't carry one.
+type uaTransport struct {
+	base http.RoundTripper
+}
+
+func (t uaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	if r.Header.Get("User-Agent") == "" {
+		r.Header.Set("User-Agent", defaultUserAgent)
+	}
+	return t.base.RoundTrip(r)
+}
 
 // sharedHTTPTransport is reused across every secagent HTTP client so connection
 // pooling works as a single pool and any future Transport tuning lands once.
-var sharedHTTPTransport = &http.Transport{
+var sharedHTTPTransport = uaTransport{base: &http.Transport{
 	Proxy: http.ProxyFromEnvironment,
 	DialContext: (&net.Dialer{
 		Timeout:   10 * time.Second,
@@ -20,7 +38,7 @@ var sharedHTTPTransport = &http.Transport{
 	IdleConnTimeout:       90 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
-}
+}}
 
 // noFollowRedirects surfaces redirects to the caller without auto-following.
 // Auto-following risks SSRF amplification, credential leakage to redirected
